@@ -1,11 +1,20 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { db } from './firebase'; 
-import { collection, addDoc, getDocs, getDoc, query, orderBy, deleteDoc, doc, where, updateDoc } from 'firebase/firestore'; 
+import { collection, addDoc, getDocs, getDoc, query, orderBy, doc, where, updateDoc } from 'firebase/firestore'; 
 import { categories, centers, centerData } from './data';
 import jsPDF from 'jspdf';
 import html2canvas from 'html2canvas';
 import emailjs from 'emailjs-com'; 
+import {
+  buildSummaryReport,
+  formatDisplayDate,
+  formatMetric,
+  generateSummaryReportPDFBlob,
+  getReportFileName,
+  getReportTheme,
+  hydrateReport,
+} from './reporting';
 import { 
   Trash2, Download, LogOut, Loader2, CheckCircle, RefreshCw, 
   ChevronDown, ChevronUp, ArrowLeft, Send, LayoutDashboard, 
@@ -13,6 +22,8 @@ import {
   Package, ShoppingCart, FileText, Sparkles, Box, Plus, Minus,
   Check, Mail
 } from 'lucide-react';
+
+void motion;
 
 // Animation variants
 const fadeInUp = {
@@ -31,35 +42,39 @@ const scaleIn = {
   exit: { scale: 0.9, opacity: 0 }
 };
 
-const slideIn = {
-  initial: { x: -20, opacity: 0 },
-  animate: { x: 0, opacity: 1 },
-  exit: { x: 20, opacity: 0 }
+const getInitialRouteState = () => {
+  const params = new URLSearchParams(window.location.search);
+  const orderId = params.get('orderId');
+  const sendOrderId = params.get('sendOrderId');
+  const reportId = params.get('reportId');
+
+  if (reportId) {
+    return { view: 'single-report', directOrderId: null, directSendOrderId: null, directReportId: reportId };
+  }
+  if (sendOrderId) {
+    return { view: 'single-send-order', directOrderId: null, directSendOrderId: sendOrderId, directReportId: null };
+  }
+  if (orderId) {
+    return { view: 'single-order', directOrderId: orderId, directSendOrderId: null, directReportId: null };
+  }
+
+  return { view: 'login', directOrderId: null, directSendOrderId: null, directReportId: null };
 };
 
 function App() {
+  const [initialRoute] = useState(getInitialRouteState);
   const [user, setUser] = useState(null); 
-  const [view, setView] = useState('login'); 
+  const [view, setView] = useState(initialRoute.view); 
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [directOrderId, setDirectOrderId] = useState(null);
-  const [directSendOrderId, setDirectSendOrderId] = useState(null);
+  const directOrderId = initialRoute.directOrderId;
+  const directSendOrderId = initialRoute.directSendOrderId;
+  const directReportId = initialRoute.directReportId;
 
   useEffect(() => {
     emailjs.init("m14CzkMDHuJeLH0VK"); 
-    const params = new URLSearchParams(window.location.search);
-    const orderId = params.get('orderId');
-    if (orderId) {
-      setDirectOrderId(orderId);
-      setView('single-order'); 
-    }
-    const sendOrderId = params.get('sendOrderId');
-    if (sendOrderId) {
-      setDirectSendOrderId(sendOrderId);
-      setView('single-send-order');
-    }
   }, []);
 
   const handleLogin = async (e) => {
@@ -74,7 +89,7 @@ function App() {
       querySnapshot.forEach((doc) => { if (doc.data().password === password) foundUser = doc.data(); });
       if (foundUser) { setUser(foundUser); setView(foundUser.role === 'admin' ? 'admin' : 'dashboard'); } 
       else { setError("Wrong Password!"); }
-    } catch (err) { setError("Login error."); }
+    } catch { setError("Login error."); }
     setLoading(false);
   };
 
@@ -84,6 +99,10 @@ function App() {
 
   if (view === 'single-send-order' && directSendOrderId) {
     return <SingleSendOrderView orderId={directSendOrderId} onBack={() => { setView('login'); window.history.replaceState(null, '', '/'); }} />;
+  }
+
+  if (view === 'single-report' && directReportId) {
+    return <SingleReportView reportId={directReportId} onBack={() => { setView('login'); window.history.replaceState(null, '', '/'); }} />;
   }
 
   return (
@@ -233,7 +252,7 @@ function App() {
       </AnimatePresence>
 
       {view === 'dashboard' && <UserHub user={user} />}
-      {view === 'admin' && <AdminDashboard />}
+      {view === 'admin' && <AdminDashboard user={user} />}
     </div>
   );
 }
@@ -515,8 +534,209 @@ const generateSendPDFBlobReliable = async (order) => {
   return pdf.output('blob');
 };
 
+const getReportUiTheme = (reportKind) => (
+  reportKind === 'send'
+    ? {
+        tint: 'from-blue-500 to-blue-600',
+        soft: 'from-blue-500/10 to-blue-600/5',
+        border: 'border-blue-500/20',
+        text: 'text-blue-600',
+        muted: 'text-blue-400',
+        chip: 'bg-blue-500/10 text-blue-700 border-blue-200',
+      }
+    : {
+        tint: 'from-orange-500 to-orange-600',
+        soft: 'from-orange-500/10 to-orange-600/5',
+        border: 'border-orange-500/20',
+        text: 'text-orange-600',
+        muted: 'text-orange-400',
+        chip: 'bg-orange-500/10 text-orange-700 border-orange-200',
+      }
+);
+
+const getReportCenters = (orders, sendOrders) => (
+  Array.from(
+    new Set([
+      ...centers,
+      ...orders.map((order) => order.center),
+      ...sendOrders.map((order) => order.fromCenter),
+    ].filter(Boolean)),
+  ).sort((left, right) => left.localeCompare(right))
+);
+
+function ReportPreviewContent({ report }) {
+  const preparedReport = hydrateReport(report);
+  const isSend = preparedReport.reportKind === 'send';
+  const uiTheme = getReportUiTheme(preparedReport.reportKind);
+  const summaryCards = isSend
+    ? [
+        { label: 'Total Entries', value: formatMetric(preparedReport.summary.totalRecords) },
+        { label: 'Centers', value: formatMetric(preparedReport.summary.totalCenters) },
+        { label: 'Line Items', value: formatMetric(preparedReport.summary.totalLineItems) },
+        { label: 'KG Total', value: formatMetric(preparedReport.summary.totalKg) },
+      ]
+    : [
+        { label: 'Total Entries', value: formatMetric(preparedReport.summary.totalRecords) },
+        { label: 'Centers', value: formatMetric(preparedReport.summary.totalCenters) },
+        { label: 'Line Items', value: formatMetric(preparedReport.summary.totalLineItems) },
+        { label: 'Quantity Total', value: formatMetric(preparedReport.summary.totalQuantity) },
+      ];
+
+  return (
+    <div className="space-y-6 sm:space-y-8">
+      <div className={`rounded-2xl sm:rounded-3xl border ${uiTheme.border} bg-gradient-to-r ${uiTheme.soft} p-5 sm:p-7`}>
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <p className={`text-[11px] font-black uppercase tracking-[0.25em] ${uiTheme.text}`}>SMVS Summary Report</p>
+            <h2 className="mt-2 text-2xl sm:text-3xl font-black text-slate-900">{preparedReport.title}</h2>
+            <p className="mt-2 text-sm text-slate-600">
+              {preparedReport.reportKind === 'send' ? 'Dispatch summary report' : 'Request summary report'} for {preparedReport.centerLabel}
+            </p>
+          </div>
+          <div className="space-y-2 text-sm text-slate-600 sm:text-right">
+            <p><span className="font-bold text-slate-900">Range:</span> {preparedReport.rangeLabel}</p>
+            <p><span className="font-bold text-slate-900">Generated:</span> {formatDisplayDate(preparedReport.generatedAtIso)}</p>
+            <p><span className="font-bold text-slate-900">Prepared By:</span> {preparedReport.createdBy || 'Admin'}</p>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        {summaryCards.map((card) => (
+          <div key={card.label} className={`rounded-2xl border ${uiTheme.border} bg-white p-4 shadow-sm`}>
+            <p className="text-[11px] font-bold uppercase tracking-widest text-slate-400">{card.label}</p>
+            <p className={`mt-2 text-2xl font-black ${uiTheme.text}`}>{card.value}</p>
+          </div>
+        ))}
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+        <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 sm:p-5">
+          <p className="text-[11px] font-black uppercase tracking-widest text-slate-400">Scope Details</p>
+          <div className="mt-3 space-y-2 text-sm text-slate-700">
+            <p><span className="font-bold text-slate-900">Scope:</span> {preparedReport.scope === 'center' ? 'Center-wise' : 'Full Report'}</p>
+            <p><span className="font-bold text-slate-900">Center:</span> {preparedReport.centerLabel}</p>
+            <p><span className="font-bold text-slate-900">Type:</span> {preparedReport.reportKind === 'send' ? 'Send Entries' : 'Request Entries'}</p>
+          </div>
+        </div>
+        <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 sm:p-5">
+          <p className="text-[11px] font-black uppercase tracking-widest text-slate-400">Coverage</p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <span className={`rounded-full border px-3 py-1 text-xs font-bold uppercase ${uiTheme.chip}`}>{preparedReport.centerLabel}</span>
+            <span className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-bold uppercase text-slate-600">{preparedReport.rangeLabel}</span>
+            <span className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-bold uppercase text-slate-600">
+              {preparedReport.records.length} Entries
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div className="rounded-2xl border border-slate-200 overflow-hidden">
+        <div className={`border-b ${uiTheme.border} bg-gradient-to-r ${uiTheme.soft} px-4 py-3`}>
+          <h3 className={`text-sm font-black uppercase tracking-widest ${uiTheme.text}`}>Center Breakdown</h3>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[640px] text-sm">
+            <thead className="bg-slate-900 text-white">
+              <tr>
+                <th className="px-4 py-3 text-left">Center</th>
+                <th className="px-4 py-3 text-center">Entries</th>
+                <th className="px-4 py-3 text-center">Line Items</th>
+                <th className="px-4 py-3 text-center">{isSend ? 'Qty Total' : 'Quantity Total'}</th>
+                {isSend && <th className="px-4 py-3 text-center">KG Total</th>}
+                <th className="px-4 py-3 text-center">Last Date</th>
+              </tr>
+            </thead>
+            <tbody>
+              {preparedReport.centerBreakdown.map((row, index) => (
+                <tr key={`${row.center}-${index}`} className="border-t border-slate-200">
+                  <td className="px-4 py-3 font-bold text-slate-900">{row.center}</td>
+                  <td className="px-4 py-3 text-center text-slate-600">{formatMetric(row.recordsCount)}</td>
+                  <td className="px-4 py-3 text-center text-slate-600">{formatMetric(row.lineItems)}</td>
+                  <td className="px-4 py-3 text-center font-bold text-slate-900">{formatMetric(row.totalQuantity)}</td>
+                  {isSend && <td className={`px-4 py-3 text-center font-bold ${uiTheme.text}`}>{formatMetric(row.totalKg)}</td>}
+                  <td className="px-4 py-3 text-center text-slate-600">{formatDisplayDate(row.lastEntryDate)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="rounded-2xl border border-slate-200 overflow-hidden">
+        <div className={`border-b ${uiTheme.border} bg-gradient-to-r ${uiTheme.soft} px-4 py-3`}>
+          <h3 className={`text-sm font-black uppercase tracking-widest ${uiTheme.text}`}>Item Summary</h3>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[640px] text-sm">
+            <thead className="bg-slate-900 text-white">
+              <tr>
+                <th className="px-4 py-3 text-left">Item Name</th>
+                {!isSend && <th className="px-4 py-3 text-center">Unit</th>}
+                <th className="px-4 py-3 text-center">Line Items</th>
+                <th className="px-4 py-3 text-center">{isSend ? 'Qty Total' : 'Quantity Total'}</th>
+                {isSend && <th className="px-4 py-3 text-center">KG Total</th>}
+              </tr>
+            </thead>
+            <tbody>
+              {preparedReport.itemBreakdown.slice(0, 30).map((row, index) => (
+                <tr key={`${row.itemName}-${index}`} className="border-t border-slate-200">
+                  <td className="px-4 py-3 font-bold text-slate-900">{row.itemName}</td>
+                  {!isSend && <td className="px-4 py-3 text-center uppercase text-slate-500">{row.unit || '-'}</td>}
+                  <td className="px-4 py-3 text-center text-slate-600">{formatMetric(row.lineItems)}</td>
+                  <td className="px-4 py-3 text-center font-bold text-slate-900">{formatMetric(row.totalQuantity)}</td>
+                  {isSend && <td className={`px-4 py-3 text-center font-bold ${uiTheme.text}`}>{formatMetric(row.totalKg)}</td>}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {preparedReport.itemBreakdown.length > 30 && (
+          <div className="border-t border-slate-200 bg-slate-50 px-4 py-3 text-xs font-bold uppercase tracking-widest text-slate-500">
+            Showing top 30 items in preview. Full PDF includes all rows.
+          </div>
+        )}
+      </div>
+
+      <div className="rounded-2xl border border-slate-200 overflow-hidden">
+        <div className={`border-b ${uiTheme.border} bg-gradient-to-r ${uiTheme.soft} px-4 py-3`}>
+          <h3 className={`text-sm font-black uppercase tracking-widest ${uiTheme.text}`}>Detailed Entries</h3>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[760px] text-sm">
+            <thead className="bg-slate-900 text-white">
+              <tr>
+                <th className="px-4 py-3 text-left">Date</th>
+                <th className="px-4 py-3 text-left">Chalan</th>
+                <th className="px-4 py-3 text-left">{isSend ? 'From Center' : 'Center'}</th>
+                <th className="px-4 py-3 text-left">Sender</th>
+                <th className="px-4 py-3 text-center">Items</th>
+                <th className="px-4 py-3 text-center">{isSend ? 'Qty' : 'Quantity'}</th>
+                {isSend && <th className="px-4 py-3 text-center">KG</th>}
+              </tr>
+            </thead>
+            <tbody>
+              {preparedReport.records.map((row, index) => (
+                <tr key={`${row.sourceId || row.chalanNo}-${index}`} className="border-t border-slate-200">
+                  <td className="px-4 py-3 text-slate-600">{formatDisplayDate(row.date)}</td>
+                  <td className="px-4 py-3 font-bold text-slate-900">#{row.chalanNo}</td>
+                  <td className="px-4 py-3 font-bold text-slate-900">{row.center}</td>
+                  <td className="px-4 py-3 text-slate-600">{row.senderName || '-'}</td>
+                  <td className="px-4 py-3 text-center text-slate-600">{formatMetric(row.lineItems)}</td>
+                  <td className="px-4 py-3 text-center font-bold text-slate-900">{formatMetric(row.totalQuantity)}</td>
+                  {isSend && <td className={`px-4 py-3 text-center font-bold ${uiTheme.text}`}>{formatMetric(row.totalKg)}</td>}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // --- ADMIN DASHBOARD ---
-function AdminDashboard() {
+function AdminDashboard({ user }) {
   const [activeTab, setActiveTab] = useState('requests');
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -531,13 +751,24 @@ function AdminDashboard() {
   const [sendMailLoading, setSendMailLoading] = useState(null);
   const [sendFilters, setSendFilters] = useState({ date: '', center: '', name: '' });
   const [editSendOrder, setEditSendOrder] = useState(null);
-  const [mailModal, setMailModal] = useState(null); // { order, type: 'request'|'send' }
+  const [reports, setReports] = useState([]);
+  const [reportLoading, setReportLoading] = useState(true);
+  const [reportPdfLoading, setReportPdfLoading] = useState(null);
+  const [reportGenerating, setReportGenerating] = useState(false);
+  const [previewReport, setPreviewReport] = useState(null);
+  const [reportForm, setReportForm] = useState({
+    reportKind: 'request',
+    scope: 'full',
+    center: '',
+    fromDate: '',
+    toDate: '',
+  });
+  const [mailModal, setMailModal] = useState(null); // { order, type: 'request'|'send'|'report' }
   const [mailStep, setMailStep] = useState('confirm'); // 'confirm' | 'custom'
   const [customEmail, setCustomEmail] = useState('');
   const [customEmailError, setCustomEmailError] = useState('');
   const [mailSending, setMailSending] = useState(false);
-
-  useEffect(() => { fetchOrders(); fetchSendOrders(); }, []);
+  const availableReportCenters = getReportCenters(orders, sendOrders);
 
   const fetchOrders = async () => {
     setLoading(true);
@@ -554,6 +785,22 @@ function AdminDashboard() {
     setSendOrders(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })).filter(o => !o.is_deleted));
     setSendLoading(false);
   };
+
+  const fetchReports = async () => {
+    setReportLoading(true);
+    try {
+      const q = query(collection(db, "reports"), orderBy("generatedAt", "desc"));
+      const snapshot = await getDocs(q);
+      setReports(snapshot.docs.map(doc => hydrateReport({ id: doc.id, ...doc.data() })));
+    } catch (err) {
+      console.warn('Report fetch failed:', err);
+      setReports([]);
+    }
+    setReportLoading(false);
+  };
+
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => { fetchOrders(); fetchSendOrders(); fetchReports(); }, []);
 
   const clearFilters = () => setFilters({ date: '', center: '', name: '' });
   const clearSendFilters = () => setSendFilters({ date: '', center: '', name: '' });
@@ -622,14 +869,16 @@ function AdminDashboard() {
     setCustomEmail('');
     setCustomEmailError('');
     setMailSending(false);
+    setSendMailLoading(null);
   };
 
   const handleMailSend = async (emailToUse) => {
     if (!mailModal) return;
     const { order, type } = mailModal;
     setMailSending(true);
+    if (type === 'send') setSendMailLoading(order.id);
     try {
-      const formattedDate = (order.date || '').split('-').reverse().join('-');
+      const formattedDate = formatDisplayDate(order.date);
       if (type === 'request') {
         await emailjs.send("service_1ug481j", "template_djuyjcq", {
           email: emailToUse,
@@ -637,7 +886,7 @@ function AdminDashboard() {
           receiver: order.senderName || order.centerContactName || '',
           pdf_link: `${window.location.origin}?orderId=${order.id}`
         });
-      } else {
+      } else if (type === 'send') {
         await emailjs.send('service_es31jwq', 'template_0xnrlbm', {
           email: emailToUse,
           to_name: order.fromCenter,
@@ -647,6 +896,21 @@ function AdminDashboard() {
           order_id: order.chalanNo,
           pdf_link: `${window.location.origin}?sendOrderId=${order.id}`,
         }, '_E6nBjN6vCMGEW6I8');
+      } else {
+        const report = hydrateReport(order);
+        await emailjs.send("service_1ug481j", "template_djuyjcq", {
+          email: emailToUse,
+          from_name: report.reportKind === 'send' ? 'Dispatch Summary Report' : 'Request Summary Report',
+          chalan_no: report.scope === 'center' ? report.centerLabel : 'All Centers',
+          date: report.rangeLabel,
+          receiver: `Generated ${formatDisplayDate(report.generatedAtIso)}`,
+          pdf_link: `${window.location.origin}?reportId=${report.id}`
+        });
+        if (report.id) {
+          await updateDoc(doc(db, "reports", report.id), { email: emailToUse });
+          setReports(prev => prev.map(item => item.id === report.id ? { ...item, email: emailToUse } : item));
+          setPreviewReport(prev => (prev && prev.id === report.id ? { ...prev, email: emailToUse } : prev));
+        }
       }
       closeMailModal();
       alert('Email Sent! ✅');
@@ -658,10 +922,8 @@ function AdminDashboard() {
 
   const handleMailModalConfirm = (usePast) => {
     if (!mailModal) return;
-    const { order, type } = mailModal;
-    const pastEmail = type === 'send'
-      ? (order.email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(order.email) ? order.email : '')
-      : (order.email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(order.email) ? order.email : '');
+    const { order } = mailModal;
+    const pastEmail = order.email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(order.email) ? order.email : '';
     if (usePast && pastEmail) {
       handleMailSend(pastEmail);
     } else {
@@ -679,6 +941,7 @@ function AdminDashboard() {
 
   const handleSendMail = (order) => openMailModal(order, 'request');
   const handleSendMailDispatch = (order) => openMailModal(order, 'send');
+  const handleSendMailReport = (report) => openMailModal(report, 'report');
 
   const handleDelete = async (order) => {
     if (!window.confirm(`Delete order #${order.chalanNo} from ${order.center}?`)) return;
@@ -724,6 +987,105 @@ function AdminDashboard() {
     setSendPdfLoading(null);
   };
 
+  const handleCreateReport = async () => {
+    if (reportForm.reportKind === 'request' && loading) {
+      alert('Request entries are still loading. Please wait.');
+      return;
+    }
+    if (reportForm.reportKind === 'send' && sendLoading) {
+      alert('Send entries are still loading. Please wait.');
+      return;
+    }
+    if (reportForm.scope === 'center' && !reportForm.center) {
+      alert('Select a center for center-wise report.');
+      return;
+    }
+    if (reportForm.fromDate && reportForm.toDate && reportForm.fromDate > reportForm.toDate) {
+      alert('From date cannot be after To date.');
+      return;
+    }
+
+    setReportGenerating(true);
+    try {
+      const draft = buildSummaryReport({
+        orders,
+        sendOrders,
+        reportKind: reportForm.reportKind,
+        scope: reportForm.scope,
+        center: reportForm.center,
+        fromDate: reportForm.fromDate,
+        toDate: reportForm.toDate,
+        createdBy: user?.username || 'Admin',
+      });
+
+      if (draft.records.length === 0) {
+        alert('No entries found for the selected filters.');
+        setReportGenerating(false);
+        return;
+      }
+
+      const payload = {
+        ...draft,
+        generatedAt: new Date(),
+        generatedAtIso: new Date().toISOString(),
+      };
+      const docRef = await addDoc(collection(db, 'reports'), payload);
+      const savedReport = hydrateReport({ id: docRef.id, ...payload });
+      setReports(prev => [savedReport, ...prev]);
+      setPreviewReport(savedReport);
+      alert('Summary report created! ✅');
+    } catch (err) {
+      alert('Report Error: ' + err.message);
+    }
+    setReportGenerating(false);
+  };
+
+  const handleDownloadReport = async (report) => {
+    setReportPdfLoading(report.id);
+    try {
+      const hydrated = hydrateReport(report);
+      const blob = await generateSummaryReportPDFBlob(hydrated);
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = getReportFileName(hydrated);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(link.href);
+    } catch (err) {
+      alert('Download Error: ' + err.message);
+    }
+    setReportPdfLoading(null);
+  };
+
+  const handleShareReport = async (report) => {
+    setReportPdfLoading(report.id);
+    try {
+      const hydrated = hydrateReport(report);
+      const blob = await generateSummaryReportPDFBlob(hydrated);
+      const file = new File([blob], getReportFileName(hydrated), { type: 'application/pdf' });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({
+          files: [file],
+          title: hydrated.title,
+          text: `${hydrated.reportKind === 'send' ? 'Dispatch' : 'Request'} summary report - ${hydrated.centerLabel}`,
+        });
+      } else {
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = getReportFileName(hydrated);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(link.href);
+        alert("Share not supported on this device. File downloaded instead.");
+      }
+    } catch (err) {
+      alert('Share Error: ' + err.message);
+    }
+    setReportPdfLoading(null);
+  };
+
   const handleDeleteSend = async (order) => {
     if (!window.confirm(`Delete send chalan #${order.chalanNo} from ${order.fromCenter}?`)) return;
     try {
@@ -736,6 +1098,8 @@ function AdminDashboard() {
   if (editSendOrder) return <EditSendOrderScreen order={editSendOrder} onBack={() => { setEditSendOrder(null); fetchSendOrders(); }} />;
 
   const isRequests = activeTab === 'requests';
+  const isSends = activeTab === 'sends';
+  const isReports = activeTab === 'reports';
 
   return (
     <>
@@ -745,7 +1109,7 @@ function AdminDashboard() {
       className="p-3 sm:p-6 max-w-7xl mx-auto pb-20"
     >
       {/* Tab Switcher */}
-      <div className="flex gap-2 mb-6">
+      <div className="grid grid-cols-1 gap-2 mb-6 sm:grid-cols-3">
         <motion.button
           whileTap={{ scale: 0.97 }}
           onClick={() => setActiveTab('requests')}
@@ -757,10 +1121,18 @@ function AdminDashboard() {
         <motion.button
           whileTap={{ scale: 0.97 }}
           onClick={() => setActiveTab('sends')}
-          className={`flex-1 py-3 rounded-2xl font-bold text-sm uppercase tracking-wide flex items-center justify-center gap-2 transition-all border ${!isRequests ? 'bg-gradient-to-r from-blue-500 to-blue-600 text-white border-transparent shadow-lg shadow-blue-500/20' : 'bg-[#1e1e1e] text-gray-400 border-white/10 hover:border-blue-500/30'}`}
+          className={`py-3 rounded-2xl font-bold text-sm uppercase tracking-wide flex items-center justify-center gap-2 transition-all border ${isSends ? 'bg-gradient-to-r from-blue-500 to-blue-600 text-white border-transparent shadow-lg shadow-blue-500/20' : 'bg-[#1e1e1e] text-gray-400 border-white/10 hover:border-blue-500/30'}`}
         >
           <Send size={16} /> Send Entries
-          <span className={`text-[10px] px-2 py-0.5 rounded-full font-black ${!isRequests ? 'bg-white/20' : 'bg-white/10'}`}>{sendOrders.length}</span>
+          <span className={`text-[10px] px-2 py-0.5 rounded-full font-black ${isSends ? 'bg-white/20' : 'bg-white/10'}`}>{sendOrders.length}</span>
+        </motion.button>
+        <motion.button
+          whileTap={{ scale: 0.97 }}
+          onClick={() => setActiveTab('reports')}
+          className={`py-3 rounded-2xl font-bold text-sm uppercase tracking-wide flex items-center justify-center gap-2 transition-all border ${isReports ? 'bg-gradient-to-r from-emerald-500 to-emerald-600 text-white border-transparent shadow-lg shadow-emerald-500/20' : 'bg-[#1e1e1e] text-gray-400 border-white/10 hover:border-emerald-500/30'}`}
+        >
+          <FileText size={16} /> Reports
+          <span className={`text-[10px] px-2 py-0.5 rounded-full font-black ${isReports ? 'bg-white/20' : 'bg-white/10'}`}>{reports.length}</span>
         </motion.button>
       </div>
 
@@ -886,7 +1258,7 @@ function AdminDashboard() {
       )}
 
       {/* ===== SEND ENTRIES SECTION ===== */}
-      {!isRequests && (
+      {isSends && (
         <>
           {/* Send Filter Section */}
           <motion.div
@@ -1010,6 +1382,199 @@ function AdminDashboard() {
         </>
       )}
 
+      {isReports && (
+        <>
+          <motion.div
+            initial={{ y: -20, opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
+            className="bg-gradient-to-b from-[#1e1e1e] to-[#181818] p-4 sm:p-6 rounded-2xl sm:rounded-3xl border border-white/5 mb-6 sm:mb-8 shadow-xl"
+          >
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+              <div>
+                <div className="flex items-center gap-2 text-emerald-400 font-bold uppercase text-xs tracking-widest">
+                  <FileText size={16} /> Summary Reports
+                </div>
+                <h2 className="mt-2 text-xl sm:text-2xl font-black text-white">Create full or center-wise summary PDFs</h2>
+                <p className="mt-2 text-sm text-gray-400 max-w-2xl">
+                  Generate dynamic request and dispatch reports by date range, preview them, then download, share, or mail the report link.
+                </p>
+              </div>
+              <div className="flex gap-2 sm:gap-3">
+                <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }} onClick={fetchReports}
+                  className="text-gray-400 hover:text-emerald-400 flex items-center justify-center gap-1.5 text-xs font-bold uppercase transition-all bg-white/5 hover:bg-emerald-500/10 px-3 py-2 rounded-xl border border-white/10">
+                  <RefreshCw size={14} /> Refresh
+                </motion.button>
+                <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }} onClick={() => setReportForm({ reportKind: 'request', scope: 'full', center: '', fromDate: '', toDate: '' })}
+                  className="text-gray-400 hover:text-white flex items-center justify-center gap-1.5 text-xs font-bold uppercase transition-all bg-white/5 hover:bg-white/10 px-3 py-2 rounded-xl border border-white/10">
+                  <Eraser size={14} /> Clear
+                </motion.button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5 mt-6">
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Report Type</label>
+                <select
+                  className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-emerald-500/50 transition-all text-sm"
+                  value={reportForm.reportKind}
+                  onChange={e => setReportForm(prev => ({ ...prev, reportKind: e.target.value }))}
+                >
+                  <option value="request">Request Summary</option>
+                  <option value="send">Send Summary</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Scope</label>
+                <select
+                  className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-emerald-500/50 transition-all text-sm"
+                  value={reportForm.scope}
+                  onChange={e => setReportForm(prev => ({ ...prev, scope: e.target.value, center: e.target.value === 'full' ? '' : prev.center }))}
+                >
+                  <option value="full">Full Report</option>
+                  <option value="center">Center-wise</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Center</label>
+                <select
+                  className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-emerald-500/50 transition-all text-sm disabled:opacity-50"
+                  value={reportForm.center}
+                  onChange={e => setReportForm(prev => ({ ...prev, center: e.target.value }))}
+                  disabled={reportForm.scope !== 'center'}
+                >
+                  <option value="">{reportForm.scope === 'center' ? 'Select Center' : 'All Centers'}</option>
+                  {availableReportCenters.map((centerName) => (
+                    <option key={centerName} value={centerName}>{centerName}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">From Date</label>
+                <input
+                  type="date"
+                  className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-emerald-500/50 transition-all text-sm"
+                  value={reportForm.fromDate}
+                  onChange={e => setReportForm(prev => ({ ...prev, fromDate: e.target.value }))}
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">To Date</label>
+                <input
+                  type="date"
+                  className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-emerald-500/50 transition-all text-sm"
+                  value={reportForm.toDate}
+                  onChange={e => setReportForm(prev => ({ ...prev, toDate: e.target.value }))}
+                />
+              </div>
+            </div>
+
+            <div className="mt-5 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+              <p className="text-xs text-gray-500">
+                Reports are saved in Firestore so mailed links can open a dedicated report page and download the same PDF later.
+              </p>
+              <motion.button
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
+                onClick={handleCreateReport}
+                disabled={reportGenerating}
+                className="bg-gradient-to-r from-emerald-500 to-emerald-600 text-white px-5 py-3 rounded-xl font-bold text-sm uppercase tracking-wide shadow-lg shadow-emerald-500/20 flex items-center justify-center gap-2 disabled:opacity-50"
+              >
+                {reportGenerating ? <Loader2 size={16} className="animate-spin" /> : <FileText size={16} />}
+                {reportGenerating ? 'Generating...' : 'Generate Report'}
+              </motion.button>
+            </div>
+          </motion.div>
+
+          {reportLoading && (
+            <div className="flex justify-center py-20">
+              <motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: "linear" }}>
+                <Loader2 size={48} className="text-emerald-500" />
+              </motion.div>
+            </div>
+          )}
+
+          {!reportLoading && reports.length > 0 && (
+            <motion.div variants={staggerContainer} initial="initial" animate="animate"
+              className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 sm:gap-6">
+              <AnimatePresence>
+                {reports.map((report, index) => {
+                  const preparedReport = hydrateReport(report);
+                  const uiTheme = getReportUiTheme(preparedReport.reportKind);
+                  const pdfTheme = getReportTheme(preparedReport.reportKind);
+                  return (
+                    <motion.div key={preparedReport.id} variants={fadeInUp} initial="initial" animate="animate" exit="exit"
+                      transition={{ delay: index * 0.05 }} whileHover={{ y: -5, transition: { duration: 0.2 } }}
+                      className="bg-gradient-to-b from-[#1e1e1e] to-[#181818] rounded-2xl sm:rounded-3xl border border-white/5 shadow-xl overflow-hidden hover:border-emerald-500/30 transition-colors group">
+                      <div className={`p-4 sm:p-5 border-b border-white/5 bg-gradient-to-r ${uiTheme.soft}`}>
+                        <div className="flex justify-between items-start gap-3">
+                          <div>
+                            <p className={`text-[10px] font-black uppercase tracking-[0.2em] ${uiTheme.muted}`}>{pdfTheme.title}</p>
+                            <h3 className="font-black text-white text-sm sm:text-base mt-1">{preparedReport.title}</h3>
+                            <p className="text-xs text-gray-400 mt-1">{preparedReport.centerLabel}</p>
+                          </div>
+                          <div className="text-right">
+                            <div className="text-xs text-gray-300 font-medium bg-white/5 px-2 py-1 rounded-lg">{formatDisplayDate(preparedReport.generatedAtIso)}</div>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="p-4 sm:p-5">
+                        <div className="grid grid-cols-2 gap-2 mb-4">
+                          <div className="bg-[#252525] p-3 rounded-xl border border-white/5 text-center">
+                            <p className="text-[10px] text-gray-500 uppercase font-bold">Entries</p>
+                            <p className="font-black text-white text-base">{formatMetric(preparedReport.summary.totalRecords)}</p>
+                          </div>
+                          <div className={`bg-gradient-to-br ${uiTheme.soft} p-3 rounded-xl border ${uiTheme.border} text-center`}>
+                            <p className={`text-[10px] uppercase font-bold ${uiTheme.muted}`}>{preparedReport.reportKind === 'send' ? 'KG Total' : 'Qty Total'}</p>
+                            <p className={`font-black text-base ${uiTheme.text}`}>
+                              {formatMetric(preparedReport.reportKind === 'send' ? preparedReport.summary.totalKg : preparedReport.summary.totalQuantity)}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="mb-4 space-y-1 text-xs text-gray-400">
+                          <p><span className="font-bold text-gray-200">Range:</span> {preparedReport.rangeLabel}</p>
+                          <p><span className="font-bold text-gray-200">Scope:</span> {preparedReport.scope === 'center' ? 'Center-wise' : 'Full Report'}</p>
+                          <p><span className="font-bold text-gray-200">Centers:</span> {formatMetric(preparedReport.summary.totalCenters)}</p>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={() => setPreviewReport(preparedReport)}
+                            className="bg-[#252525] hover:bg-[#2d2d2d] text-white p-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all border border-white/5">
+                            <Eye size={14} /> Preview
+                          </motion.button>
+                          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} disabled={reportPdfLoading === preparedReport.id} onClick={() => handleShareReport(preparedReport)}
+                            className="bg-[#252525] hover:bg-[#2d2d2d] text-white p-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all border border-white/5 disabled:opacity-50">
+                            {reportPdfLoading === preparedReport.id ? <Loader2 size={14} className="animate-spin" /> : <Share2 size={14} />} Share
+                          </motion.button>
+                          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={() => handleSendMailReport(preparedReport)}
+                            className="bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 p-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all border border-blue-500/20">
+                            <Send size={14} /> Mail
+                          </motion.button>
+                          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} disabled={reportPdfLoading === preparedReport.id} onClick={() => handleDownloadReport(preparedReport)}
+                            className="bg-gradient-to-r from-emerald-500 to-emerald-600 text-white p-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-all shadow-lg shadow-emerald-500/20 disabled:opacity-50">
+                            {reportPdfLoading === preparedReport.id ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />} Download
+                          </motion.button>
+                        </div>
+                      </div>
+                    </motion.div>
+                  );
+                })}
+              </AnimatePresence>
+            </motion.div>
+          )}
+
+          {!reportLoading && reports.length === 0 && (
+            <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="text-center py-20">
+              <FileText size={64} className="text-gray-600 mx-auto mb-4" />
+              <p className="text-gray-400 text-lg font-bold">No reports generated yet</p>
+              <p className="text-gray-500 text-sm mt-2">Use the form above to create the first full or center-wise summary report.</p>
+            </motion.div>
+          )}
+        </>
+      )}
+
       {/* Request Preview Modal */}
       <AnimatePresence>
         {previewOrder && (
@@ -1127,6 +1692,32 @@ function AdminDashboard() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      <AnimatePresence>
+        {previewReport && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/90 backdrop-blur-sm z-[220] flex items-center justify-center p-2 sm:p-4"
+            onClick={() => setPreviewReport(null)}
+          >
+            <motion.div
+              initial={{ scale: 0.96, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.96, opacity: 0 }}
+              onClick={e => e.stopPropagation()}
+              className="bg-white text-black w-full max-w-6xl max-h-[95vh] overflow-y-auto rounded-xl sm:rounded-2xl p-6 sm:p-8 relative shadow-2xl custom-scroll"
+            >
+              <motion.button whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.9 }} onClick={() => setPreviewReport(null)}
+                className="absolute top-3 right-3 sm:top-4 sm:right-4 bg-gray-100 p-2 rounded-full text-black hover:bg-gray-200 transition-colors z-10">
+                <X size={20} />
+              </motion.button>
+              <ReportPreviewContent report={previewReport} />
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </motion.div>
 
       {/* ===== MAIL MODAL ===== */}
@@ -1153,12 +1744,22 @@ function AdminDashboard() {
                 {mailStep === 'confirm' && (() => {
                   const { order, type } = mailModal;
                   const pastEmail = order.email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(order.email) ? order.email : null;
+                  const targetLabel = type === 'request'
+                    ? order.center
+                    : type === 'send'
+                      ? order.fromCenter
+                      : order.title;
                   return (
                     <div className="space-y-4">
                       <p className="text-gray-300 text-sm">
                         Send email for <span className="font-bold text-white">
-                          {type === 'request' ? order.center : order.fromCenter}
-                        </span> — Chalan <span className="text-blue-400 font-bold">#{order.chalanNo}</span>
+                          {targetLabel}
+                        </span>
+                        {type === 'report' ? (
+                          <span className="text-blue-400 font-bold"> — {order.rangeLabel}</span>
+                        ) : (
+                          <span> — Chalan <span className="text-blue-400 font-bold">#{order.chalanNo}</span></span>
+                        )}
                       </p>
                       {pastEmail ? (
                         <>
@@ -1696,7 +2297,7 @@ function SendDashboard({ user, onBack }) {
         if (no > maxNo) maxNo = no;
       });
       return String(maxNo + 1);
-    } catch (e) { return '1'; }
+    } catch { return '1'; }
   };
 
   useEffect(() => {
@@ -2001,7 +2602,7 @@ function UserDashboard({ user, onBack = null }) {
         if (no > maxNo) maxNo = no;
       });
       return String(maxNo + 1);
-    } catch (e) { return '1'; }
+    } catch { return '1'; }
   };
 
   useEffect(() => {
@@ -2209,7 +2810,7 @@ function UserDashboard({ user, onBack = null }) {
           animate="animate"
           className="space-y-3 sm:space-y-4"
         >
-          {Object.entries(filteredCategories).map(([category, items], catIndex) => (
+          {Object.entries(filteredCategories).map(([category, items]) => (
             <motion.div 
               key={category}
               variants={fadeInUp}
@@ -2476,7 +3077,7 @@ function SingleOrderView({ orderId, onBack }) {
         const docSnap = await getDoc(docRef);
         if (docSnap.exists()) { setOrder({ id: docSnap.id, ...docSnap.data() }); } 
         else { setError("Order not found."); }
-      } catch (err) { setError("Load Error."); }
+      } catch { setError("Load Error."); }
       setLoading(false);
     };
     fetchOrder();
@@ -2580,7 +3181,7 @@ function SingleSendOrderView({ orderId, onBack }) {
         const docSnap = await getDoc(docRef);
         if (docSnap.exists()) { setOrder({ id: docSnap.id, ...docSnap.data() }); }
         else { setError("Dispatch chalan not found."); }
-      } catch (err) { setError("Load Error."); }
+      } catch { setError("Load Error."); }
       setLoading(false);
     };
     fetchOrder();
@@ -2678,6 +3279,155 @@ function SingleSendOrderView({ orderId, onBack }) {
           </motion.button>
         </div>
       </motion.div>
+    </motion.div>
+  );
+}
+
+function SingleReportView({ reportId, onBack }) {
+  const [report, setReport] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [pdfLoading, setPdfLoading] = useState(false);
+  const [shareLoading, setShareLoading] = useState(false);
+
+  useEffect(() => {
+    const fetchReport = async () => {
+      try {
+        const docRef = doc(db, "reports", reportId);
+        const docSnap = await getDoc(docRef);
+        if (docSnap.exists()) {
+          setReport(hydrateReport({ id: docSnap.id, ...docSnap.data() }));
+        } else {
+          setError("Report not found.");
+        }
+      } catch {
+        setError("Load Error.");
+      }
+      setLoading(false);
+    };
+    fetchReport();
+  }, [reportId]);
+
+  const handleDownload = async () => {
+    if (!report) return;
+    setPdfLoading(true);
+    try {
+      const blob = await generateSummaryReportPDFBlob(report);
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = getReportFileName(report);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(link.href);
+    } catch (err) {
+      alert("Download Error: " + err.message);
+    }
+    setPdfLoading(false);
+  };
+
+  const handleShare = async () => {
+    if (!report) return;
+    setShareLoading(true);
+    try {
+      const blob = await generateSummaryReportPDFBlob(report);
+      const file = new File([blob], getReportFileName(report), { type: 'application/pdf' });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({
+          files: [file],
+          title: report.title,
+          text: `${report.reportKind === 'send' ? 'Dispatch' : 'Request'} summary report - ${report.centerLabel}`,
+        });
+      } else {
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = getReportFileName(report);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(link.href);
+        alert("Share not supported on this device. File downloaded instead.");
+      }
+    } catch (err) {
+      alert("Share Error: " + err.message);
+    }
+    setShareLoading(false);
+  };
+
+  if (loading) {
+    return (
+      <div className="h-screen flex justify-center items-center bg-gradient-to-br from-[#0a0a0a] via-[#121212] to-[#0f0f0f]">
+        <motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: "linear" }}>
+          <Loader2 className="text-emerald-500" size={48} />
+        </motion.div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="h-screen flex justify-center items-center flex-col text-white bg-gradient-to-br from-[#0a0a0a] via-[#121212] to-[#0f0f0f]">
+        <p className="font-bold mb-4">{error}</p>
+        <button onClick={onBack} className="bg-[#2d2d2d] px-4 py-2 rounded">Home</button>
+      </div>
+    );
+  }
+
+  const reportTheme = getReportTheme(report.reportKind);
+
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      className="min-h-screen bg-gradient-to-br from-[#0a0a0a] via-[#121212] to-[#0f0f0f] p-4 sm:p-6"
+    >
+      <div className="max-w-6xl mx-auto">
+        <motion.div
+          initial={{ y: 20, opacity: 0 }}
+          animate={{ y: 0, opacity: 1 }}
+          className="bg-gradient-to-b from-[#1e1e1e] to-[#181818] rounded-2xl sm:rounded-[2rem] shadow-2xl border border-white/5 overflow-hidden"
+        >
+          <div className={`bg-gradient-to-r ${report.reportKind === 'send' ? 'from-blue-500 to-blue-600' : 'from-orange-500 to-orange-600'} p-5 sm:p-6 text-white flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between`}>
+            <div>
+              <h2 className="text-lg sm:text-xl font-extrabold uppercase tracking-tight">{reportTheme.title}</h2>
+              <p className="text-white/80 text-xs mt-0.5">{report.title}</p>
+            </div>
+            <div className="flex gap-2 sm:gap-3">
+              <motion.button
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                onClick={onBack}
+                className="bg-black/20 p-2.5 rounded-xl hover:bg-black/40"
+              >
+                <ArrowLeft />
+              </motion.button>
+              <motion.button
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                disabled={shareLoading}
+                onClick={handleShare}
+                className="bg-black/20 px-4 py-2 rounded-xl hover:bg-black/40 text-sm font-bold flex items-center gap-2 disabled:opacity-50"
+              >
+                {shareLoading ? <Loader2 size={16} className="animate-spin" /> : <Share2 size={16} />} Share
+              </motion.button>
+              <motion.button
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                disabled={pdfLoading}
+                onClick={handleDownload}
+                className="bg-white text-slate-900 px-4 py-2 rounded-xl text-sm font-black flex items-center gap-2 disabled:opacity-50"
+              >
+                {pdfLoading ? <Loader2 size={16} className="animate-spin" /> : <Download size={16} />}
+                {pdfLoading ? 'Generating...' : 'Download PDF'}
+              </motion.button>
+            </div>
+          </div>
+
+          <div className="p-4 sm:p-8">
+            <ReportPreviewContent report={report} />
+          </div>
+        </motion.div>
+      </div>
     </motion.div>
   );
 }
