@@ -1,8 +1,28 @@
 @import "tailwindcss";
 
+@font-face {
+  font-family: "NotoSansGujarati";
+  src: url("./assets/fonts/NotoSansGujarati-Regular.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "NotoSansGujarati";
+  src: url("./assets/fonts/NotoSansGujarati-Bold.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+}
+
 body {
   background-color: #121212;
   color: #e0e0e0;
+}
+
+.font-report-gujarati {
+  font-family: "NotoSansGujarati", "Nirmala UI", sans-serif;
 }
 
 /* Custom Scrollbar */

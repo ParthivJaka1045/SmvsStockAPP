@@ -7,12 +7,15 @@ import jsPDF from 'jspdf';
 import html2canvas from 'html2canvas';
 import emailjs from 'emailjs-com'; 
 import {
+  REPORT_TITLE,
   buildSummaryReport,
+  createDefaultReportOptions,
   formatDisplayDate,
   formatMetric,
   generateSummaryReportPDFBlob,
   getReportFileName,
   getReportTheme,
+  getVisibleReportMetrics,
   hydrateReport,
 } from './reporting';
 import { 
@@ -564,51 +567,56 @@ const getReportCenters = (orders, sendOrders) => (
   ).sort((left, right) => left.localeCompare(right))
 );
 
+const createDefaultReportForm = () => ({
+  reportKind: 'request',
+  scope: 'full',
+  center: '',
+  fromDate: '',
+  toDate: '',
+  options: createDefaultReportOptions(),
+});
+
 function ReportPreviewContent({ report }) {
   const preparedReport = hydrateReport(report);
   const isSend = preparedReport.reportKind === 'send';
   const uiTheme = getReportUiTheme(preparedReport.reportKind);
-  const summaryCards = isSend
-    ? [
-        { label: 'Total Entries', value: formatMetric(preparedReport.summary.totalRecords) },
-        { label: 'Centers', value: formatMetric(preparedReport.summary.totalCenters) },
-        { label: 'Line Items', value: formatMetric(preparedReport.summary.totalLineItems) },
-        { label: 'KG Total', value: formatMetric(preparedReport.summary.totalKg) },
-      ]
-    : [
-        { label: 'Total Entries', value: formatMetric(preparedReport.summary.totalRecords) },
-        { label: 'Centers', value: formatMetric(preparedReport.summary.totalCenters) },
-        { label: 'Line Items', value: formatMetric(preparedReport.summary.totalLineItems) },
-        { label: 'Quantity Total', value: formatMetric(preparedReport.summary.totalQuantity) },
-      ];
+  const summaryCards = getVisibleReportMetrics(preparedReport);
+  const includedSections = [
+    preparedReport.options.sections.centerBreakdown ? 'Center Breakdown' : null,
+    'Item Summary',
+    preparedReport.options.sections.detailedEntries ? 'Detailed Entries' : null,
+  ].filter(Boolean);
 
   return (
-    <div className="space-y-6 sm:space-y-8">
+    <div className="space-y-6 sm:space-y-8 font-report-gujarati">
       <div className={`rounded-2xl sm:rounded-3xl border ${uiTheme.border} bg-gradient-to-r ${uiTheme.soft} p-5 sm:p-7`}>
         <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
           <div>
-            <p className={`text-[11px] font-black uppercase tracking-[0.25em] ${uiTheme.text}`}>SMVS Summary Report</p>
-            <h2 className="mt-2 text-2xl sm:text-3xl font-black text-slate-900">{preparedReport.title}</h2>
+            <p className={`text-[11px] font-black uppercase tracking-[0.25em] ${uiTheme.text}`}>Admin Report Format</p>
+            <h2 className="mt-2 text-2xl sm:text-3xl font-black text-slate-900">{REPORT_TITLE}</h2>
             <p className="mt-2 text-sm text-slate-600">
-              {preparedReport.reportKind === 'send' ? 'Dispatch summary report' : 'Request summary report'} for {preparedReport.centerLabel}
+              {preparedReport.reportKind === 'send' ? 'Dispatch entries summary' : 'Request entries summary'}
             </p>
           </div>
           <div className="space-y-2 text-sm text-slate-600 sm:text-right">
+            <p><span className="font-bold text-slate-900">Center:</span> {preparedReport.centerLabel}</p>
             <p><span className="font-bold text-slate-900">Range:</span> {preparedReport.rangeLabel}</p>
+            <p><span className="font-bold text-slate-900">Scope:</span> {preparedReport.scope === 'center' ? 'Center-wise' : 'Full Report'}</p>
             <p><span className="font-bold text-slate-900">Generated:</span> {formatDisplayDate(preparedReport.generatedAtIso)}</p>
-            <p><span className="font-bold text-slate-900">Prepared By:</span> {preparedReport.createdBy || 'Admin'}</p>
           </div>
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        {summaryCards.map((card) => (
-          <div key={card.label} className={`rounded-2xl border ${uiTheme.border} bg-white p-4 shadow-sm`}>
-            <p className="text-[11px] font-bold uppercase tracking-widest text-slate-400">{card.label}</p>
-            <p className={`mt-2 text-2xl font-black ${uiTheme.text}`}>{card.value}</p>
-          </div>
-        ))}
-      </div>
+      {summaryCards.length > 0 && (
+        <div className={`grid grid-cols-2 gap-3 ${summaryCards.length > 2 ? 'sm:grid-cols-4' : 'sm:grid-cols-2'}`}>
+          {summaryCards.map((card) => (
+            <div key={card.label} className={`rounded-2xl border ${uiTheme.border} bg-white p-4 shadow-sm`}>
+              <p className="text-[11px] font-bold uppercase tracking-widest text-slate-400">{card.label}</p>
+              <p className={`mt-2 text-2xl font-black ${uiTheme.text}`}>{card.value}</p>
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 sm:p-5">
@@ -617,51 +625,57 @@ function ReportPreviewContent({ report }) {
             <p><span className="font-bold text-slate-900">Scope:</span> {preparedReport.scope === 'center' ? 'Center-wise' : 'Full Report'}</p>
             <p><span className="font-bold text-slate-900">Center:</span> {preparedReport.centerLabel}</p>
             <p><span className="font-bold text-slate-900">Type:</span> {preparedReport.reportKind === 'send' ? 'Send Entries' : 'Request Entries'}</p>
+            <p><span className="font-bold text-slate-900">Prepared By:</span> {preparedReport.createdBy || 'Admin'}</p>
           </div>
         </div>
         <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 sm:p-5">
-          <p className="text-[11px] font-black uppercase tracking-widest text-slate-400">Coverage</p>
+          <p className="text-[11px] font-black uppercase tracking-widest text-slate-400">Included Blocks</p>
           <div className="mt-3 flex flex-wrap gap-2">
-            <span className={`rounded-full border px-3 py-1 text-xs font-bold uppercase ${uiTheme.chip}`}>{preparedReport.centerLabel}</span>
-            <span className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-bold uppercase text-slate-600">{preparedReport.rangeLabel}</span>
-            <span className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-bold uppercase text-slate-600">
-              {preparedReport.records.length} Entries
-            </span>
+            {includedSections.map((sectionLabel) => (
+              <span key={sectionLabel} className={`rounded-full border px-3 py-1 text-xs font-bold uppercase ${uiTheme.chip}`}>
+                {sectionLabel}
+              </span>
+            ))}
+            {summaryCards.map((card) => (
+              <span key={card.label} className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-bold uppercase text-slate-600">
+                {card.label}
+              </span>
+            ))}
           </div>
         </div>
       </div>
 
-      <div className="rounded-2xl border border-slate-200 overflow-hidden">
-        <div className={`border-b ${uiTheme.border} bg-gradient-to-r ${uiTheme.soft} px-4 py-3`}>
-          <h3 className={`text-sm font-black uppercase tracking-widest ${uiTheme.text}`}>Center Breakdown</h3>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[640px] text-sm">
-            <thead className="bg-slate-900 text-white">
-              <tr>
-                <th className="px-4 py-3 text-left">Center</th>
-                <th className="px-4 py-3 text-center">Entries</th>
-                <th className="px-4 py-3 text-center">Line Items</th>
-                <th className="px-4 py-3 text-center">{isSend ? 'Qty Total' : 'Quantity Total'}</th>
-                {isSend && <th className="px-4 py-3 text-center">KG Total</th>}
-                <th className="px-4 py-3 text-center">Last Date</th>
-              </tr>
-            </thead>
-            <tbody>
-              {preparedReport.centerBreakdown.map((row, index) => (
-                <tr key={`${row.center}-${index}`} className="border-t border-slate-200">
-                  <td className="px-4 py-3 font-bold text-slate-900">{row.center}</td>
-                  <td className="px-4 py-3 text-center text-slate-600">{formatMetric(row.recordsCount)}</td>
-                  <td className="px-4 py-3 text-center text-slate-600">{formatMetric(row.lineItems)}</td>
-                  <td className="px-4 py-3 text-center font-bold text-slate-900">{formatMetric(row.totalQuantity)}</td>
-                  {isSend && <td className={`px-4 py-3 text-center font-bold ${uiTheme.text}`}>{formatMetric(row.totalKg)}</td>}
-                  <td className="px-4 py-3 text-center text-slate-600">{formatDisplayDate(row.lastEntryDate)}</td>
+      {preparedReport.options.sections.centerBreakdown && (
+        <div className="rounded-2xl border border-slate-200 overflow-hidden">
+          <div className={`border-b ${uiTheme.border} bg-gradient-to-r ${uiTheme.soft} px-4 py-3`}>
+            <h3 className={`text-sm font-black uppercase tracking-widest ${uiTheme.text}`}>Center Breakdown</h3>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[640px] text-sm">
+              <thead className="bg-slate-900 text-white">
+                <tr>
+                  <th className="px-4 py-3 text-left">Center</th>
+                  <th className="px-4 py-3 text-center">Entries</th>
+                  <th className="px-4 py-3 text-center">Line Items</th>
+                  {isSend && <th className="px-4 py-3 text-center">KG Total</th>}
+                  <th className="px-4 py-3 text-center">Last Date</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {preparedReport.centerBreakdown.map((row, index) => (
+                  <tr key={`${row.center}-${index}`} className="border-t border-slate-200">
+                    <td className="px-4 py-3 font-bold text-slate-900">{row.center}</td>
+                    <td className="px-4 py-3 text-center text-slate-600">{formatMetric(row.recordsCount)}</td>
+                    <td className="px-4 py-3 text-center text-slate-600">{formatMetric(row.lineItems)}</td>
+                    {isSend && <td className={`px-4 py-3 text-center font-bold ${uiTheme.text}`}>{formatMetric(row.totalKg)}</td>}
+                    <td className="px-4 py-3 text-center text-slate-600">{formatDisplayDate(row.lastEntryDate)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
-      </div>
+      )}
 
       <div className="rounded-2xl border border-slate-200 overflow-hidden">
         <div className={`border-b ${uiTheme.border} bg-gradient-to-r ${uiTheme.soft} px-4 py-3`}>
@@ -674,7 +688,6 @@ function ReportPreviewContent({ report }) {
                 <th className="px-4 py-3 text-left">Item Name</th>
                 {!isSend && <th className="px-4 py-3 text-center">Unit</th>}
                 <th className="px-4 py-3 text-center">Line Items</th>
-                <th className="px-4 py-3 text-center">{isSend ? 'Qty Total' : 'Quantity Total'}</th>
                 {isSend && <th className="px-4 py-3 text-center">KG Total</th>}
               </tr>
             </thead>
@@ -684,7 +697,6 @@ function ReportPreviewContent({ report }) {
                   <td className="px-4 py-3 font-bold text-slate-900">{row.itemName}</td>
                   {!isSend && <td className="px-4 py-3 text-center uppercase text-slate-500">{row.unit || '-'}</td>}
                   <td className="px-4 py-3 text-center text-slate-600">{formatMetric(row.lineItems)}</td>
-                  <td className="px-4 py-3 text-center font-bold text-slate-900">{formatMetric(row.totalQuantity)}</td>
                   {isSend && <td className={`px-4 py-3 text-center font-bold ${uiTheme.text}`}>{formatMetric(row.totalKg)}</td>}
                 </tr>
               ))}
@@ -698,39 +710,41 @@ function ReportPreviewContent({ report }) {
         )}
       </div>
 
-      <div className="rounded-2xl border border-slate-200 overflow-hidden">
-        <div className={`border-b ${uiTheme.border} bg-gradient-to-r ${uiTheme.soft} px-4 py-3`}>
-          <h3 className={`text-sm font-black uppercase tracking-widest ${uiTheme.text}`}>Detailed Entries</h3>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[760px] text-sm">
-            <thead className="bg-slate-900 text-white">
-              <tr>
-                <th className="px-4 py-3 text-left">Date</th>
-                <th className="px-4 py-3 text-left">Chalan</th>
-                <th className="px-4 py-3 text-left">{isSend ? 'From Center' : 'Center'}</th>
-                <th className="px-4 py-3 text-left">Sender</th>
-                <th className="px-4 py-3 text-center">Items</th>
-                <th className="px-4 py-3 text-center">{isSend ? 'Qty' : 'Quantity'}</th>
-                {isSend && <th className="px-4 py-3 text-center">KG</th>}
-              </tr>
-            </thead>
-            <tbody>
-              {preparedReport.records.map((row, index) => (
-                <tr key={`${row.sourceId || row.chalanNo}-${index}`} className="border-t border-slate-200">
-                  <td className="px-4 py-3 text-slate-600">{formatDisplayDate(row.date)}</td>
-                  <td className="px-4 py-3 font-bold text-slate-900">#{row.chalanNo}</td>
-                  <td className="px-4 py-3 font-bold text-slate-900">{row.center}</td>
-                  <td className="px-4 py-3 text-slate-600">{row.senderName || '-'}</td>
-                  <td className="px-4 py-3 text-center text-slate-600">{formatMetric(row.lineItems)}</td>
-                  <td className="px-4 py-3 text-center font-bold text-slate-900">{formatMetric(row.totalQuantity)}</td>
-                  {isSend && <td className={`px-4 py-3 text-center font-bold ${uiTheme.text}`}>{formatMetric(row.totalKg)}</td>}
+      {preparedReport.options.sections.detailedEntries && (
+        <div className="rounded-2xl border border-slate-200 overflow-hidden">
+          <div className={`border-b ${uiTheme.border} bg-gradient-to-r ${uiTheme.soft} px-4 py-3`}>
+            <h3 className={`text-sm font-black uppercase tracking-widest ${uiTheme.text}`}>Detailed Entries</h3>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[760px] text-sm">
+              <thead className="bg-slate-900 text-white">
+                <tr>
+                  <th className="px-4 py-3 text-left">Date</th>
+                  <th className="px-4 py-3 text-left">Chalan</th>
+                  <th className="px-4 py-3 text-left">{isSend ? 'From Center' : 'Center'}</th>
+                  <th className="px-4 py-3 text-left">Sender</th>
+                  <th className="px-4 py-3 text-center">Items</th>
+                  <th className="px-4 py-3 text-center">{isSend ? 'Qty' : 'Quantity'}</th>
+                  {isSend && <th className="px-4 py-3 text-center">KG</th>}
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {preparedReport.records.map((row, index) => (
+                  <tr key={`${row.sourceId || row.chalanNo}-${index}`} className="border-t border-slate-200">
+                    <td className="px-4 py-3 text-slate-600">{formatDisplayDate(row.date)}</td>
+                    <td className="px-4 py-3 font-bold text-slate-900">#{row.chalanNo}</td>
+                    <td className="px-4 py-3 font-bold text-slate-900">{row.center}</td>
+                    <td className="px-4 py-3 text-slate-600">{row.senderName || '-'}</td>
+                    <td className="px-4 py-3 text-center text-slate-600">{formatMetric(row.lineItems)}</td>
+                    <td className="px-4 py-3 text-center font-bold text-slate-900">{formatMetric(row.totalQuantity)}</td>
+                    {isSend && <td className={`px-4 py-3 text-center font-bold ${uiTheme.text}`}>{formatMetric(row.totalKg)}</td>}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }
@@ -756,19 +770,40 @@ function AdminDashboard({ user }) {
   const [reportPdfLoading, setReportPdfLoading] = useState(null);
   const [reportGenerating, setReportGenerating] = useState(false);
   const [previewReport, setPreviewReport] = useState(null);
-  const [reportForm, setReportForm] = useState({
-    reportKind: 'request',
-    scope: 'full',
-    center: '',
-    fromDate: '',
-    toDate: '',
-  });
+  const [reportForm, setReportForm] = useState(createDefaultReportForm);
   const [mailModal, setMailModal] = useState(null); // { order, type: 'request'|'send'|'report' }
   const [mailStep, setMailStep] = useState('confirm'); // 'confirm' | 'custom'
   const [customEmail, setCustomEmail] = useState('');
   const [customEmailError, setCustomEmailError] = useState('');
   const [mailSending, setMailSending] = useState(false);
   const availableReportCenters = getReportCenters(orders, sendOrders);
+
+  const toggleReportMetric = (metricKey) => {
+    setReportForm(prev => ({
+      ...prev,
+      options: {
+        ...prev.options,
+        metrics: {
+          ...prev.options.metrics,
+          [metricKey]: !prev.options.metrics[metricKey],
+        },
+      },
+    }));
+  };
+
+  const toggleReportSection = (sectionKey) => {
+    if (sectionKey === 'itemSummary') return;
+    setReportForm(prev => ({
+      ...prev,
+      options: {
+        ...prev.options,
+        sections: {
+          ...prev.options.sections,
+          [sectionKey]: !prev.options.sections[sectionKey],
+        },
+      },
+    }));
+  };
 
   const fetchOrders = async () => {
     setLoading(true);
@@ -1016,6 +1051,7 @@ function AdminDashboard({ user }) {
         fromDate: reportForm.fromDate,
         toDate: reportForm.toDate,
         createdBy: user?.username || 'Admin',
+        options: reportForm.options,
       });
 
       if (draft.records.length === 0) {
@@ -1404,7 +1440,7 @@ function AdminDashboard({ user }) {
                   className="text-gray-400 hover:text-emerald-400 flex items-center justify-center gap-1.5 text-xs font-bold uppercase transition-all bg-white/5 hover:bg-emerald-500/10 px-3 py-2 rounded-xl border border-white/10">
                   <RefreshCw size={14} /> Refresh
                 </motion.button>
-                <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }} onClick={() => setReportForm({ reportKind: 'request', scope: 'full', center: '', fromDate: '', toDate: '' })}
+                <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }} onClick={() => setReportForm(createDefaultReportForm())}
                   className="text-gray-400 hover:text-white flex items-center justify-center gap-1.5 text-xs font-bold uppercase transition-all bg-white/5 hover:bg-white/10 px-3 py-2 rounded-xl border border-white/10">
                   <Eraser size={14} /> Clear
                 </motion.button>
@@ -1472,9 +1508,58 @@ function AdminDashboard({ user }) {
               </div>
             </div>
 
+            <div className="mt-5 grid grid-cols-1 gap-4 xl:grid-cols-2">
+              <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                <p className="text-[11px] font-bold uppercase tracking-widest text-gray-500">Summary Metrics</p>
+                <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  {[
+                    ['totalEntries', 'Total Entries'],
+                    ['activeCenters', 'Active Centers'],
+                    ['lineItems', 'Line Items'],
+                    ['valueTotal', reportForm.reportKind === 'send' ? 'KG Total' : 'Qty Total'],
+                  ].map(([key, label]) => (
+                    <label key={key} className="flex items-center gap-3 rounded-xl border border-white/10 bg-[#252525] px-3 py-2 text-sm text-white cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={reportForm.options.metrics[key]}
+                        onChange={() => toggleReportMetric(key)}
+                        className="h-4 w-4 rounded border-white/20 bg-transparent accent-emerald-500"
+                      />
+                      <span>{label}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                <p className="text-[11px] font-bold uppercase tracking-widest text-gray-500">Report Sections</p>
+                <div className="mt-3 grid grid-cols-1 gap-2">
+                  {[
+                    ['centerBreakdown', 'Center Breakdown', 'Optional'],
+                    ['itemSummary', 'Item Summary', 'Compulsory'],
+                    ['detailedEntries', 'Detailed Entries', 'Optional'],
+                  ].map(([key, label, note]) => (
+                    <label key={key} className={`flex items-center justify-between gap-3 rounded-xl border border-white/10 px-3 py-2 text-sm ${key === 'itemSummary' ? 'bg-emerald-500/10 text-emerald-300' : 'bg-[#252525] text-white cursor-pointer'}`}>
+                      <span className="flex items-center gap-3">
+                        <input
+                          type="checkbox"
+                          checked={reportForm.options.sections[key]}
+                          onChange={() => toggleReportSection(key)}
+                          disabled={key === 'itemSummary'}
+                          className="h-4 w-4 rounded border-white/20 bg-transparent accent-emerald-500 disabled:opacity-100"
+                        />
+                        <span>{label}</span>
+                      </span>
+                      <span className="text-[10px] font-bold uppercase tracking-widest text-gray-400">{note}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            </div>
+
             <div className="mt-5 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
               <p className="text-xs text-gray-500">
-                Reports are saved in Firestore so mailed links can open a dedicated report page and download the same PDF later.
+                Reports use the fixed title {REPORT_TITLE} and only the selected metrics and sections are included in preview and PDF.
               </p>
               <motion.button
                 whileHover={{ scale: 1.02 }}

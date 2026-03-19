@@ -1,5 +1,99 @@
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import gujaratiFontBoldUrl from './assets/fonts/NotoSansGujarati-Bold.ttf?url';
+import gujaratiFontRegularUrl from './assets/fonts/NotoSansGujarati-Regular.ttf?url';
+
+export const REPORT_TITLE = 'SMVS STOCK SUMMARY REPORT';
+
+const REPORT_FONT_FAMILY = 'NotoSansGujarati';
+const DEFAULT_PDF_FONT_FAMILY = 'helvetica';
+
+export const createDefaultReportOptions = () => ({
+  sections: {
+    centerBreakdown: true,
+    itemSummary: true,
+    detailedEntries: true,
+  },
+  metrics: {
+    totalEntries: true,
+    activeCenters: true,
+    lineItems: true,
+    valueTotal: true,
+  },
+});
+
+const normalizeReportOptions = (options) => {
+  const defaults = createDefaultReportOptions();
+  const sections = options?.sections || {};
+  const metrics = options?.metrics || {};
+
+  return {
+    sections: {
+      centerBreakdown: sections.centerBreakdown ?? defaults.sections.centerBreakdown,
+      itemSummary: true,
+      detailedEntries: sections.detailedEntries ?? defaults.sections.detailedEntries,
+    },
+    metrics: {
+      totalEntries: metrics.totalEntries ?? defaults.metrics.totalEntries,
+      activeCenters: metrics.activeCenters ?? defaults.metrics.activeCenters,
+      lineItems: metrics.lineItems ?? defaults.metrics.lineItems,
+      valueTotal: metrics.valueTotal ?? defaults.metrics.valueTotal,
+    },
+  };
+};
+
+export const getReportValueMetricLabel = (reportKind) => (reportKind === 'send' ? 'KG Total' : 'Qty Total');
+
+let reportFontAssetsPromise = null;
+
+const arrayBufferToBase64 = (buffer) => {
+  let binary = '';
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    const chunk = bytes.subarray(index, index + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+
+  return btoa(binary);
+};
+
+const loadReportFontAssets = async () => {
+  if (!reportFontAssetsPromise) {
+    reportFontAssetsPromise = Promise.all([
+      { fileName: 'NotoSansGujarati-Regular.ttf', fontUrl: gujaratiFontRegularUrl, style: 'normal' },
+      { fileName: 'NotoSansGujarati-Bold.ttf', fontUrl: gujaratiFontBoldUrl, style: 'bold' },
+    ].map(async ({ fileName, fontUrl, style }) => {
+      const response = await fetch(fontUrl);
+      if (!response.ok) throw new Error(`Font download failed for ${fileName}`);
+      const buffer = await response.arrayBuffer();
+      return {
+        fileName,
+        style,
+        base64: arrayBufferToBase64(buffer),
+      };
+    }));
+  }
+
+  return reportFontAssetsPromise;
+};
+
+const ensureReportFont = async (pdf) => {
+  try {
+    const assets = await loadReportFontAssets();
+    assets.forEach(({ fileName, style, base64 }) => {
+      if (!pdf.existsFileInVFS(fileName)) {
+        pdf.addFileToVFS(fileName, base64);
+      }
+      pdf.addFont(fileName, REPORT_FONT_FAMILY, style);
+    });
+    return REPORT_FONT_FAMILY;
+  } catch (error) {
+    console.warn('Report font load failed, falling back to Helvetica.', error);
+    return DEFAULT_PDF_FONT_FAMILY;
+  }
+};
 
 const safeNumber = (value) => {
   const parsed = parseFloat(value);
@@ -209,7 +303,7 @@ export const hydrateReport = (report) => {
   const summary = report.summary || {};
   return {
     ...report,
-    title: report.title || 'SMVS Summary Report',
+    title: report.title || REPORT_TITLE,
     reportKind: report.reportKind || 'request',
     scope: report.scope || 'full',
     center: report.center || '',
@@ -222,6 +316,7 @@ export const hydrateReport = (report) => {
     records: Array.isArray(report.records) ? report.records : [],
     centerBreakdown: Array.isArray(report.centerBreakdown) ? report.centerBreakdown : [],
     itemBreakdown: Array.isArray(report.itemBreakdown) ? report.itemBreakdown : [],
+    options: normalizeReportOptions(report.options),
     summary: {
       totalRecords: safeNumber(summary.totalRecords),
       totalCenters: safeNumber(summary.totalCenters),
@@ -230,6 +325,22 @@ export const hydrateReport = (report) => {
       totalKg: roundMetric(summary.totalKg),
     },
   };
+};
+
+export const getVisibleReportMetrics = (reportInput) => {
+  const report = hydrateReport(reportInput);
+  const metrics = [
+    { key: 'totalEntries', label: 'Total Entries', value: formatMetric(report.summary.totalRecords) },
+    { key: 'activeCenters', label: 'Active Centers', value: formatMetric(report.summary.totalCenters) },
+    { key: 'lineItems', label: 'Line Items', value: formatMetric(report.summary.totalLineItems) },
+    {
+      key: 'valueTotal',
+      label: getReportValueMetricLabel(report.reportKind),
+      value: formatMetric(report.reportKind === 'send' ? report.summary.totalKg : report.summary.totalQuantity),
+    },
+  ];
+
+  return metrics.filter((metric) => report.options.metrics[metric.key]);
 };
 
 export const buildSummaryReport = ({
@@ -241,6 +352,7 @@ export const buildSummaryReport = ({
   fromDate = '',
   toDate = '',
   createdBy = 'Admin',
+  options = createDefaultReportOptions(),
 }) => {
   const isSend = reportKind === 'send';
   const sourceRecords = isSend ? sendOrders : orders;
@@ -284,13 +396,6 @@ export const buildSummaryReport = ({
     totalKg: roundMetric(filteredRecords.reduce((sum, record) => sum + safeNumber(record.totalKg), 0)),
   };
 
-  const titleParts = [
-    isSend ? 'Dispatch' : 'Request',
-    scope === 'center' ? 'Center-wise' : 'Full',
-    'Report',
-  ];
-  if (scope === 'center' && center) titleParts.push(center);
-
   return hydrateReport({
     type: 'summary-report',
     reportKind,
@@ -300,11 +405,12 @@ export const buildSummaryReport = ({
     fromDate,
     toDate,
     rangeLabel: formatDateRangeLabel(fromDate, toDate),
-    title: titleParts.join(' '),
+    title: REPORT_TITLE,
     createdBy,
     generatedAt: new Date(),
     generatedAtIso: new Date().toISOString(),
     summary,
+    options: normalizeReportOptions(options),
     centerBreakdown,
     itemBreakdown,
     records: filteredRecords,
@@ -331,105 +437,116 @@ export const getReportFileName = (reportInput) => {
   return `${parts.join('-')}.pdf`;
 };
 
-const drawMetricCard = (pdf, x, y, width, height, label, value, theme) => {
-  pdf.setFillColor(...theme.surface);
-  pdf.setDrawColor(...theme.line);
-  pdf.roundedRect(x, y, width, height, 4, 4, 'FD');
+const drawFirstPageHeader = (pdf, report, fontFamily) => {
+  const pageWidth = pdf.internal.pageSize.getWidth();
+  const centeredX = pageWidth / 2;
 
-  pdf.setFont('helvetica', 'bold');
-  pdf.setFontSize(9);
-  pdf.setTextColor(...theme.text);
-  pdf.text(label.toUpperCase(), x + 4, y + 7);
-
-  pdf.setFontSize(17);
+  pdf.setFont(fontFamily, 'bold');
+  pdf.setFontSize(16);
   pdf.setTextColor(17, 24, 39);
-  pdf.text(String(value), x + 4, y + 17);
-};
+  pdf.text(REPORT_TITLE, centeredX, 18, { align: 'center' });
 
-const drawFirstPageHeader = (pdf, report, theme) => {
-  const pageWidth = pdf.internal.pageSize.getWidth();
-
-  pdf.setFillColor(...theme.primary);
-  pdf.roundedRect(14, 12, pageWidth - 28, 24, 5, 5, 'F');
-
-  pdf.setFont('helvetica', 'bold');
-  pdf.setFontSize(19);
-  pdf.setTextColor(255, 255, 255);
-  pdf.text('SMVS SUMMARY REPORT', 18, 22);
-
+  pdf.setFont(fontFamily, 'normal');
   pdf.setFontSize(10);
-  pdf.text(theme.title.toUpperCase(), 18, 29);
-  pdf.text(`Generated ${formatDisplayDate(report.generatedAtIso)}`, pageWidth - 18, 29, { align: 'right' });
+  pdf.text(`Center : ${report.centerLabel}`, centeredX, 26, { align: 'center' });
+  pdf.text(`Range: ${report.rangeLabel}`, centeredX, 32, { align: 'center' });
+  pdf.text(`Scope: ${report.scope === 'center' ? 'Center-wise' : 'Full Report'}`, centeredX, 38, { align: 'center' });
 
-  pdf.setFillColor(...theme.surface);
-  pdf.setDrawColor(...theme.line);
-  pdf.roundedRect(14, 42, pageWidth - 28, 20, 4, 4, 'FD');
-
-  pdf.setFont('helvetica', 'normal');
-  pdf.setFontSize(9.5);
-  pdf.setTextColor(55, 65, 81);
-  pdf.text(`Report: ${report.title}`, 18, 49);
-  pdf.text(`Scope: ${report.scope === 'center' ? 'Center-wise' : 'Full'}`, 18, 55);
-  pdf.text(`Range: ${report.rangeLabel}`, pageWidth - 18, 49, { align: 'right' });
-  pdf.text(`Center: ${report.centerLabel}`, pageWidth - 18, 55, { align: 'right' });
+  pdf.setDrawColor(156, 163, 175);
+  pdf.line(14, 42, pageWidth - 14, 42);
 };
 
-const drawContinuationHeader = (pdf, report, theme) => {
+const drawContinuationHeader = (pdf, report, fontFamily) => {
   const pageWidth = pdf.internal.pageSize.getWidth();
 
-  pdf.setDrawColor(...theme.line);
-  pdf.setFillColor(...theme.surface);
-  pdf.roundedRect(14, 10, pageWidth - 28, 12, 3, 3, 'FD');
-
-  pdf.setFont('helvetica', 'bold');
+  pdf.setFont(fontFamily, 'bold');
   pdf.setFontSize(9.5);
-  pdf.setTextColor(...theme.text);
-  pdf.text('SMVS SUMMARY REPORT', 18, 17);
-  pdf.setFont('helvetica', 'normal');
-  pdf.text(report.title, pageWidth - 18, 17, { align: 'right' });
+  pdf.setTextColor(17, 24, 39);
+  pdf.text(REPORT_TITLE, 14, 15);
+
+  pdf.setFont(fontFamily, 'normal');
+  pdf.text(`Center: ${report.centerLabel}`, pageWidth - 14, 15, { align: 'right' });
+
+  pdf.setDrawColor(209, 213, 219);
+  pdf.line(14, 18, pageWidth - 14, 18);
 };
 
-const drawPageFooter = (pdf, report) => {
+const drawPageFooter = (pdf, report, fontFamily) => {
   const pageWidth = pdf.internal.pageSize.getWidth();
   const pageHeight = pdf.internal.pageSize.getHeight();
   const currentPage = pdf.getCurrentPageInfo().pageNumber;
   const totalPages = pdf.getNumberOfPages();
 
-  pdf.setDrawColor(229, 231, 235);
+  pdf.setDrawColor(209, 213, 219);
   pdf.line(14, pageHeight - 12, pageWidth - 14, pageHeight - 12);
 
-  pdf.setFont('helvetica', 'normal');
+  pdf.setFont(fontFamily, 'normal');
   pdf.setFontSize(8);
   pdf.setTextColor(107, 114, 128);
   pdf.text(`Range: ${report.rangeLabel}`, 14, pageHeight - 7);
   pdf.text(`Page ${currentPage} / ${totalPages}`, pageWidth - 14, pageHeight - 7, { align: 'right' });
 };
 
-const ensureSectionSpace = (pdf, startY, neededHeight, report, theme) => {
+const drawSummaryMetricRow = (pdf, y, metrics, fontFamily) => {
+  if (metrics.length === 0) return y;
+
+  const pageWidth = pdf.internal.pageSize.getWidth();
+  const usableWidth = pageWidth - 28;
+  const columnWidth = usableWidth / metrics.length;
+  const labelSize = metrics.length >= 4 ? 8.5 : 9;
+
+  pdf.setFont(fontFamily, 'bold');
+  pdf.setFontSize(labelSize);
+  pdf.setTextColor(55, 65, 81);
+  metrics.forEach((metric, index) => {
+    const x = 14 + (columnWidth * index) + (columnWidth / 2);
+    pdf.text(metric.label, x, y, { align: 'center' });
+  });
+
+  pdf.setFont(fontFamily, 'normal');
+  pdf.setFontSize(13);
+  pdf.setTextColor(17, 24, 39);
+  metrics.forEach((metric, index) => {
+    const x = 14 + (columnWidth * index) + (columnWidth / 2);
+    pdf.text(String(metric.value), x, y + 8, { align: 'center' });
+  });
+
+  pdf.setDrawColor(156, 163, 175);
+  pdf.line(14, y + 12, pageWidth - 14, y + 12);
+
+  return y + 18;
+};
+
+const ensureSectionSpace = (pdf, startY, neededHeight, report, fontFamily) => {
   const pageHeight = pdf.internal.pageSize.getHeight();
   if (startY + neededHeight <= pageHeight - 18) return startY;
   pdf.addPage();
-  drawContinuationHeader(pdf, report, theme);
-  return 28;
+  drawContinuationHeader(pdf, report, fontFamily);
+  return 26;
 };
 
-const drawSectionLabel = (pdf, y, label, theme) => {
-  pdf.setFont('helvetica', 'bold');
+const drawSectionLabel = (pdf, y, label, fontFamily) => {
+  const pageWidth = pdf.internal.pageSize.getWidth();
+
+  pdf.setFont(fontFamily, 'bold');
   pdf.setFontSize(11);
-  pdf.setTextColor(...theme.text);
+  pdf.setTextColor(17, 24, 39);
   pdf.text(label.toUpperCase(), 14, y);
-  return y + 4;
+
+  pdf.setDrawColor(209, 213, 219);
+  pdf.line(14, y + 2, pageWidth - 14, y + 2);
+
+  return y + 7;
 };
 
 const buildCenterTableConfig = (report) => {
   if (report.reportKind === 'send') {
     return {
-      head: [['Center', 'Entries', 'Line Items', 'Qty Total', 'KG Total', 'Last Date']],
+      head: [['Center', 'Entries', 'Line Items', 'KG Total', 'Last Date']],
       body: report.centerBreakdown.map((row) => [
         row.center,
         formatMetric(row.recordsCount),
         formatMetric(row.lineItems),
-        formatMetric(row.totalQuantity),
         formatMetric(row.totalKg),
         formatDisplayDate(row.lastEntryDate),
       ]),
@@ -437,12 +554,11 @@ const buildCenterTableConfig = (report) => {
   }
 
   return {
-    head: [['Center', 'Entries', 'Line Items', 'Quantity Total', 'Last Date']],
+    head: [['Center', 'Entries', 'Line Items', 'Last Date']],
     body: report.centerBreakdown.map((row) => [
       row.center,
       formatMetric(row.recordsCount),
       formatMetric(row.lineItems),
-      formatMetric(row.totalQuantity),
       formatDisplayDate(row.lastEntryDate),
     ]),
   };
@@ -451,23 +567,21 @@ const buildCenterTableConfig = (report) => {
 const buildItemTableConfig = (report) => {
   if (report.reportKind === 'send') {
     return {
-      head: [['Item Name', 'Line Items', 'Qty Total', 'KG Total']],
+      head: [['Item Name', 'Line Items', 'KG Total']],
       body: report.itemBreakdown.map((row) => [
         row.itemName,
         formatMetric(row.lineItems),
-        formatMetric(row.totalQuantity),
         formatMetric(row.totalKg),
       ]),
     };
   }
 
   return {
-    head: [['Item Name', 'Unit', 'Line Items', 'Quantity Total']],
+    head: [['Item Name', 'Unit', 'Line Items']],
     body: report.itemBreakdown.map((row) => [
       row.itemName,
       row.unit || '-',
       formatMetric(row.lineItems),
-      formatMetric(row.totalQuantity),
     ]),
   };
 };
@@ -501,24 +615,24 @@ const buildRecordTableConfig = (report) => {
   };
 };
 
-const applyReportTable = (pdf, report, theme, config) => {
+const applyReportTable = (pdf, report, fontFamily, config) => {
   autoTable(pdf, {
     ...config,
-    margin: { top: 28, right: 14, bottom: 16, left: 14 },
+    margin: { top: 26, right: 14, bottom: 16, left: 14 },
     styles: {
-      font: 'helvetica',
+      font: fontFamily,
       fontSize: 8.4,
       cellPadding: 2.2,
       textColor: [31, 41, 55],
-      lineColor: [229, 231, 235],
+      lineColor: [209, 213, 219],
       lineWidth: 0.15,
       overflow: 'linebreak',
     },
     headStyles: {
-      fillColor: theme.primary,
-      textColor: [255, 255, 255],
+      fillColor: [243, 244, 246],
+      textColor: [17, 24, 39],
       fontStyle: 'bold',
-      lineColor: theme.primary,
+      lineColor: [156, 163, 175],
       lineWidth: 0.15,
     },
     alternateRowStyles: {
@@ -529,46 +643,26 @@ const applyReportTable = (pdf, report, theme, config) => {
     },
     didDrawPage: () => {
       if (pdf.getCurrentPageInfo().pageNumber > 1) {
-        drawContinuationHeader(pdf, report, theme);
+        drawContinuationHeader(pdf, report, fontFamily);
       }
-      drawPageFooter(pdf, report);
+      drawPageFooter(pdf, report, fontFamily);
     },
   });
 };
 
 export const generateSummaryReportPDFBlob = async (reportInput) => {
   const report = hydrateReport(reportInput);
-  const theme = getReportTheme(report.reportKind);
   const pdf = new jsPDF('p', 'mm', 'a4');
+  const fontFamily = await ensureReportFont(pdf);
 
-  drawFirstPageHeader(pdf, report, theme);
+  drawFirstPageHeader(pdf, report, fontFamily);
 
-  const pageWidth = pdf.internal.pageSize.getWidth();
-  const cardWidth = (pageWidth - 32) / 2;
-  const metrics = report.reportKind === 'send'
-    ? [
-        ['Total Entries', formatMetric(report.summary.totalRecords)],
-        ['Active Centers', formatMetric(report.summary.totalCenters)],
-        ['Line Items', formatMetric(report.summary.totalLineItems)],
-        ['KG Total', formatMetric(report.summary.totalKg)],
-      ]
-    : [
-        ['Total Entries', formatMetric(report.summary.totalRecords)],
-        ['Active Centers', formatMetric(report.summary.totalCenters)],
-        ['Line Items', formatMetric(report.summary.totalLineItems)],
-        ['Quantity Total', formatMetric(report.summary.totalQuantity)],
-      ];
+  let cursorY = drawSummaryMetricRow(pdf, 52, getVisibleReportMetrics(report), fontFamily);
 
-  drawMetricCard(pdf, 14, 68, cardWidth, 24, metrics[0][0], metrics[0][1], theme);
-  drawMetricCard(pdf, 16 + cardWidth, 68, cardWidth, 24, metrics[1][0], metrics[1][1], theme);
-  drawMetricCard(pdf, 14, 96, cardWidth, 24, metrics[2][0], metrics[2][1], theme);
-  drawMetricCard(pdf, 16 + cardWidth, 96, cardWidth, 24, metrics[3][0], metrics[3][1], theme);
-
-  let cursorY = 130;
-
-  if (report.centerBreakdown.length > 0) {
-    cursorY = drawSectionLabel(pdf, cursorY, 'Center Breakdown', theme);
-    applyReportTable(pdf, report, theme, {
+  if (report.options.sections.centerBreakdown && report.centerBreakdown.length > 0) {
+    cursorY = ensureSectionSpace(pdf, cursorY, 26, report, fontFamily);
+    cursorY = drawSectionLabel(pdf, cursorY, 'Center Breakdown', fontFamily);
+    applyReportTable(pdf, report, fontFamily, {
       startY: cursorY,
       ...buildCenterTableConfig(report),
     });
@@ -576,21 +670,27 @@ export const generateSummaryReportPDFBlob = async (reportInput) => {
   }
 
   if (report.itemBreakdown.length > 0) {
-    cursorY = ensureSectionSpace(pdf, cursorY, 26, report, theme);
-    cursorY = drawSectionLabel(pdf, cursorY, 'Item Summary', theme);
-    applyReportTable(pdf, report, theme, {
+    cursorY = ensureSectionSpace(pdf, cursorY, 26, report, fontFamily);
+    cursorY = drawSectionLabel(pdf, cursorY, 'Item Summary', fontFamily);
+    applyReportTable(pdf, report, fontFamily, {
       startY: cursorY,
       ...buildItemTableConfig(report),
     });
     cursorY = (pdf.lastAutoTable?.finalY || cursorY) + 10;
   }
 
-  cursorY = ensureSectionSpace(pdf, cursorY, 26, report, theme);
-  cursorY = drawSectionLabel(pdf, cursorY, 'Detailed Entries', theme);
-  applyReportTable(pdf, report, theme, {
-    startY: cursorY,
-    ...buildRecordTableConfig(report),
-  });
+  if (report.options.sections.detailedEntries) {
+    cursorY = ensureSectionSpace(pdf, cursorY, 26, report, fontFamily);
+    cursorY = drawSectionLabel(pdf, cursorY, 'Detailed Entries', fontFamily);
+    applyReportTable(pdf, report, fontFamily, {
+      startY: cursorY,
+      ...buildRecordTableConfig(report),
+    });
+  }
+
+  if (!pdf.lastAutoTable) {
+    drawPageFooter(pdf, report, fontFamily);
+  }
 
   return pdf.output('blob');
 };
