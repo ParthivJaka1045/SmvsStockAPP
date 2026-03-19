@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { db } from './firebase'; 
-import { collection, addDoc, getDocs, getDoc, query, orderBy, doc, where, updateDoc } from 'firebase/firestore'; 
+import { collection, addDoc, getDocs, getDoc, query, orderBy, doc, where, updateDoc, deleteDoc } from 'firebase/firestore'; 
 import { categories, centers, centerData } from './data';
 import jsPDF from 'jspdf';
 import html2canvas from 'html2canvas';
@@ -620,12 +620,12 @@ function ReportPreviewContent({ report }) {
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 sm:p-5">
-          <p className="text-[11px] font-black uppercase tracking-widest text-slate-400">Scope Details</p>
-          <div className="mt-3 space-y-2 text-sm text-slate-700">
-            <p><span className="font-bold text-slate-900">Scope:</span> {preparedReport.scope === 'center' ? 'Center-wise' : 'Full Report'}</p>
-            <p><span className="font-bold text-slate-900">Center:</span> {preparedReport.centerLabel}</p>
-            <p><span className="font-bold text-slate-900">Type:</span> {preparedReport.reportKind === 'send' ? 'Send Entries' : 'Request Entries'}</p>
-            <p><span className="font-bold text-slate-900">Prepared By:</span> {preparedReport.createdBy || 'Admin'}</p>
+          <p className="text-[11px] font-black uppercase tracking-widest text-slate-400">Center</p>
+          <div className="mt-3">
+            <p className="text-2xl font-black text-slate-900">{preparedReport.centerLabel}</p>
+            <p className="mt-2 text-sm text-slate-600">
+              {preparedReport.reportKind === 'send' ? 'Dispatch entries summary' : 'Request entries summary'}
+            </p>
           </div>
         </div>
         <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 sm:p-5">
@@ -768,6 +768,7 @@ function AdminDashboard({ user }) {
   const [reports, setReports] = useState([]);
   const [reportLoading, setReportLoading] = useState(true);
   const [reportPdfLoading, setReportPdfLoading] = useState(null);
+  const [reportDeleting, setReportDeleting] = useState(null);
   const [reportGenerating, setReportGenerating] = useState(false);
   const [previewReport, setPreviewReport] = useState(null);
   const [reportForm, setReportForm] = useState(createDefaultReportForm);
@@ -1120,6 +1121,22 @@ function AdminDashboard({ user }) {
       alert('Share Error: ' + err.message);
     }
     setReportPdfLoading(null);
+  };
+
+  const handleDeleteReport = async (report) => {
+    const hydrated = hydrateReport(report);
+    if (!hydrated.id) return;
+    if (!window.confirm(`Delete report for ${hydrated.centerLabel} (${hydrated.rangeLabel})?`)) return;
+
+    setReportDeleting(hydrated.id);
+    try {
+      await deleteDoc(doc(db, 'reports', hydrated.id));
+      setReports(prev => prev.filter(item => item.id !== hydrated.id));
+      setPreviewReport(prev => (prev && prev.id === hydrated.id ? null : prev));
+    } catch (err) {
+      alert('Delete Error: ' + err.message);
+    }
+    setReportDeleting(null);
   };
 
   const handleDeleteSend = async (order) => {
@@ -1601,8 +1618,18 @@ function AdminDashboard({ user }) {
                             <h3 className="font-black text-white text-sm sm:text-base mt-1">{preparedReport.title}</h3>
                             <p className="text-xs text-gray-400 mt-1">{preparedReport.centerLabel}</p>
                           </div>
-                          <div className="text-right">
+                          <div className="text-right flex flex-col items-end gap-2">
                             <div className="text-xs text-gray-300 font-medium bg-white/5 px-2 py-1 rounded-lg">{formatDisplayDate(preparedReport.generatedAtIso)}</div>
+                            <motion.button
+                              whileHover={{ scale: 1.05 }}
+                              whileTap={{ scale: 0.95 }}
+                              disabled={reportDeleting === preparedReport.id}
+                              onClick={() => handleDeleteReport(preparedReport)}
+                              className="text-red-300 hover:text-red-200 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 rounded-lg px-2 py-1 text-[11px] font-bold flex items-center gap-1 disabled:opacity-50"
+                            >
+                              {reportDeleting === preparedReport.id ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+                              Delete
+                            </motion.button>
                           </div>
                         </div>
                       </div>
