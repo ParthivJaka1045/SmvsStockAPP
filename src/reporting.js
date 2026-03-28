@@ -180,11 +180,11 @@ const isDateWithinSelectedMonth = (value, monthValue, selectedDate) => {
   return dateValue >= getMonthStartDate(monthValue) && dateValue <= selectedDate;
 };
 
-const getSendItemValue = (item) => safeNumber(item?.kg ?? item?.qty);
+const getSendItemValue = (item) => safeNumber(item?.kg);
 
 const getRequestItemValue = (item) => safeNumber(item?.qty);
 
-const getPurchaseItemValue = (item) => safeNumber(item?.kg ?? item?.qty);
+const getPurchaseItemValue = (item) => safeNumber(item?.kg);
 
 const buildLegacyRows = (report, monthLabel) => {
   if (!Array.isArray(report.itemBreakdown)) return [];

@@ -541,7 +541,6 @@ const buildSendPDFPageHTML = (order, pageItems, pageIndex, totalPages, startNo) 
     return `<tr style="background:${bgColor}">
       <td style="border:1px solid #333;padding:6px 10px;text-align:center;font-family:${GJ_FONT};font-size:13px;color:#666">${itemNo}</td>
       <td style="border:1px solid #333;padding:6px 10px;font-weight:700;font-size:14px;font-family:${GJ_FONT}">${row.itemName}</td>
-      <td style="border:1px solid #333;padding:6px 10px;text-align:center;font-weight:900;font-size:15px;color:#2563eb;font-family:${GJ_FONT}">${row.qty || '-'}</td>
       <td style="border:1px solid #333;padding:6px 10px;text-align:center;font-weight:900;font-size:15px;color:#ea580c;font-family:${GJ_FONT}">${row.kg || '-'}</td>
     </tr>`;
   }).join('');
@@ -586,7 +585,6 @@ const buildSendPDFPageHTML = (order, pageItems, pageIndex, totalPages, startNo) 
           <tr style="background:linear-gradient(135deg,#2563eb,#1d4ed8)">
             <th style="border:1px solid #333;padding:10px 8px;color:#fff;font-weight:800;font-size:12px;width:45px;font-family:${GJ_FONT}">No</th>
             <th style="border:1px solid #333;padding:10px 8px;color:#fff;font-weight:800;font-size:12px;text-align:left;font-family:${GJ_FONT}">Item Name</th>
-            <th style="border:1px solid #333;padding:10px 8px;color:#fff;font-weight:800;font-size:12px;width:70px;font-family:${GJ_FONT}">Qty</th>
             <th style="border:1px solid #333;padding:10px 8px;color:#fff;font-weight:800;font-size:12px;width:70px;font-family:${GJ_FONT}">KG</th>
           </tr>
         </thead>
@@ -1712,7 +1710,6 @@ function AdminDashboard({ user }) {
                     <tr>
                       <th className="border p-2 w-10 sm:w-12 text-center">No</th>
                       <th className="border p-2 text-left">Item Name</th>
-                      <th className="border p-2 w-16 sm:w-20 text-center">Qty</th>
                       <th className="border p-2 w-16 sm:w-20 text-center">KG</th>
                     </tr>
                   </thead>
@@ -1721,7 +1718,6 @@ function AdminDashboard({ user }) {
                       <tr key={i} className="border border-gray-300">
                         <td className="border p-2 text-center text-gray-500 font-sans">{i+1}</td>
                         <td className="border p-2 font-bold">{it.itemName}</td>
-                        <td className="border p-2 text-center font-bold text-blue-600">{it.qty || '-'}</td>
                         <td className="border p-2 text-center font-bold text-orange-600">{it.kg || '-'}</td>
                       </tr>
                     ))}
@@ -1899,7 +1895,6 @@ const createDefaultPurchaseForm = () => ({
   rows: Array.from({ length: 5 }, (_, index) => ({
     id: index + 1,
     itemName: '',
-    qty: '',
     kg: '',
   })),
 });
@@ -1944,7 +1939,7 @@ function PurchaseAdminPanel({ user }) {
       ...prev,
       rows: [
         ...prev.rows,
-        { id: Math.max(...prev.rows.map((row) => row.id), 0) + 1, itemName: '', qty: '', kg: '' },
+        { id: Math.max(...prev.rows.map((row) => row.id), 0) + 1, itemName: '', kg: '' },
       ],
     }));
   };
@@ -1972,8 +1967,11 @@ function PurchaseAdminPanel({ user }) {
         billNo: purchaseForm.billNo.trim(),
         billDate: purchaseForm.billDate,
         date: purchaseForm.billDate,
-        items: filledRows,
-        totalKg: filledRows.reduce((sum, row) => sum + (parseFloat(row.kg) || parseFloat(row.qty) || 0), 0),
+        items: filledRows.map((row) => ({
+          itemName: row.itemName.trim(),
+          kg: row.kg,
+        })),
+        totalKg: filledRows.reduce((sum, row) => sum + (parseFloat(row.kg) || 0), 0),
         timestamp: new Date(),
         submittedBy: user.username,
       };
@@ -2072,7 +2070,6 @@ function PurchaseAdminPanel({ user }) {
                 <tr>
                   <th className="p-3 text-left text-gray-500 font-bold text-xs uppercase w-10">No</th>
                   <th className="p-3 text-left text-gray-500 font-bold text-xs uppercase">Item Name</th>
-                  <th className="p-3 text-center text-gray-500 font-bold text-xs uppercase w-24">Qty</th>
                   <th className="p-3 text-center text-gray-500 font-bold text-xs uppercase w-24">KG</th>
                   <th className="p-3 w-10" />
                 </tr>
@@ -2087,16 +2084,6 @@ function PurchaseAdminPanel({ user }) {
                         placeholder={`Item ${index + 1}...`}
                         value={row.itemName}
                         onChange={(e) => updatePurchaseRow(row.id, 'itemName', e.target.value)}
-                      />
-                    </td>
-                    <td className="p-2">
-                      <input
-                        type="number"
-                        min="0"
-                        className="w-full p-2 bg-[#252525] border border-white/5 rounded-lg text-white outline-none focus:border-violet-500/50 text-sm text-center transition-all"
-                        placeholder="0"
-                        value={row.qty}
-                        onChange={(e) => updatePurchaseRow(row.id, 'qty', e.target.value)}
                       />
                     </td>
                     <td className="p-2">
@@ -2200,7 +2187,7 @@ function PurchaseAdminPanel({ user }) {
                   <div className="rounded-xl border border-white/5 bg-[#252525] p-3 text-xs text-gray-400 space-y-1">
                     {(purchase.items || []).slice(0, 3).map((item, index) => (
                       <p key={`${purchase.id}-${index}`} className="truncate">
-                        <span className="font-bold text-white">{item.itemName}</span> - {item.kg || item.qty || 0}
+                        <span className="font-bold text-white">{item.itemName}</span> - {item.kg || 0}
                       </p>
                     ))}
                     {(purchase.items || []).length > 3 && (
@@ -2445,15 +2432,15 @@ function EditOrderScreen({ order, onBack }) {
 function EditSendOrderScreen({ order, onBack }) {
   const [rows, setRows] = useState(
     (order.items && order.items.length > 0)
-      ? order.items.map((item, i) => ({ id: i + 1, itemName: item.itemName || '', qty: item.qty || '', kg: item.kg || '' }))
-      : Array.from({ length: 5 }, (_, i) => ({ id: i + 1, itemName: '', qty: '', kg: '' }))
+      ? order.items.map((item, i) => ({ id: i + 1, itemName: item.itemName || '', kg: item.kg || '' }))
+      : Array.from({ length: 5 }, (_, i) => ({ id: i + 1, itemName: '', kg: '' }))
   );
   const [loading, setLoading] = useState(false);
 
   const updateRow = (id, field, value) => setRows(prev => prev.map(r => r.id === id ? { ...r, [field]: value } : r));
   const addRow = () => {
     const nextId = rows.length > 0 ? Math.max(...rows.map(r => r.id)) + 1 : 1;
-    setRows(prev => [...prev, { id: nextId, itemName: '', qty: '', kg: '' }]);
+    setRows(prev => [...prev, { id: nextId, itemName: '', kg: '' }]);
   };
   const removeRow = (id) => { if (rows.length > 1) setRows(prev => prev.filter(r => r.id !== id)); };
 
@@ -2463,7 +2450,10 @@ function EditSendOrderScreen({ order, onBack }) {
     setLoading(true);
     try {
       const totalKg = filledRows.reduce((sum, r) => sum + (parseFloat(r.kg) || 0), 0);
-      await updateDoc(doc(db, 'send-orders', order.id), { items: filledRows, totalKg });
+      await updateDoc(doc(db, 'send-orders', order.id), {
+        items: filledRows.map((row) => ({ itemName: row.itemName.trim(), kg: row.kg })),
+        totalKg,
+      });
       alert('Updated Successfully! ✅');
       onBack();
     } catch (e) { alert('Error: ' + e.message); }
@@ -2512,7 +2502,7 @@ function EditSendOrderScreen({ order, onBack }) {
         </div>
         <div className="p-3 space-y-2">
           {rows.map((row, index) => (
-            <div key={row.id} className="grid grid-cols-[auto_1fr_80px_80px_auto] gap-2 items-center">
+            <div key={row.id} className="grid grid-cols-[auto_1fr_80px_auto] gap-2 items-center">
               <span className="text-gray-500 text-xs font-bold w-6 text-center">{index + 1}</span>
               <input
                 type="text"
@@ -2520,13 +2510,6 @@ function EditSendOrderScreen({ order, onBack }) {
                 value={row.itemName}
                 onChange={e => updateRow(row.id, 'itemName', e.target.value)}
                 className="p-2.5 bg-[#252525] border border-white/10 rounded-xl text-white text-sm outline-none focus:border-blue-500/50 transition-all placeholder-gray-600"
-              />
-              <input
-                type="number"
-                placeholder="Qty"
-                value={row.qty}
-                onChange={e => updateRow(row.id, 'qty', e.target.value)}
-                className="p-2.5 bg-[#252525] border border-white/10 rounded-xl text-white text-sm outline-none focus:border-blue-500/50 transition-all placeholder-gray-600 text-center"
               />
               <input
                 type="number"
@@ -2670,7 +2653,7 @@ function SendDashboard({ user, onBack }) {
     email: '',
   });
   const [rows, setRows] = useState(
-    Array.from({ length: INITIAL_ROWS }, (_, i) => ({ id: i + 1, itemName: '', qty: '', kg: '' }))
+    Array.from({ length: INITIAL_ROWS }, (_, i) => ({ id: i + 1, itemName: '', kg: '' }))
   );
   const [loading, setLoading] = useState(false);
 
@@ -2696,7 +2679,7 @@ function SendDashboard({ user, onBack }) {
   const updateRow = (id, field, value) => setRows(prev => prev.map(r => r.id === id ? { ...r, [field]: value } : r));
   const addRow = () => {
     const nextId = rows.length > 0 ? Math.max(...rows.map(r => r.id)) + 1 : 1;
-    setRows(prev => [...prev, { id: nextId, itemName: '', qty: '', kg: '' }]);
+    setRows(prev => [...prev, { id: nextId, itemName: '', kg: '' }]);
   };
   const removeRow = (id) => { if (rows.length > 1) setRows(prev => prev.filter(r => r.id !== id)); };
 
@@ -2717,7 +2700,10 @@ function SendDashboard({ user, onBack }) {
         post: formData.post.trim(),
         globalId: formData.globalId.trim(),
         email: formData.email.trim(),
-        items: filledRows,
+        items: filledRows.map((row) => ({
+          itemName: row.itemName.trim(),
+          kg: row.kg,
+        })),
         timestamp: new Date(),
         submittedBy: user.username,
       };
@@ -2804,7 +2790,6 @@ function SendDashboard({ user, onBack }) {
                 <tr>
                   <th className="p-3 text-left text-gray-400 font-bold text-xs uppercase w-10">No</th>
                   <th className="p-3 text-left text-gray-400 font-bold text-xs uppercase">Item Name</th>
-                  <th className="p-3 text-center text-gray-400 font-bold text-xs uppercase w-20">Qty</th>
                   <th className="p-3 text-center text-gray-400 font-bold text-xs uppercase w-20">KG</th>
                 </tr>
               </thead>
@@ -2813,7 +2798,6 @@ function SendDashboard({ user, onBack }) {
                   <tr key={row.id} className="border-t border-white/5">
                     <td className="p-3 text-gray-500 text-center text-xs">{i + 1}</td>
                     <td className="p-3 font-medium text-white">{row.itemName}</td>
-                    <td className="p-3 text-center font-bold text-blue-300">{row.qty || '-'}</td>
                     <td className="p-3 text-center font-bold text-blue-400">{row.kg || '-'}</td>
                   </tr>
                 ))}
@@ -2921,7 +2905,6 @@ function SendDashboard({ user, onBack }) {
               <tr>
                 <th className="p-3 text-left text-gray-500 font-bold text-xs uppercase w-10">No</th>
                 <th className="p-3 text-left text-gray-500 font-bold text-xs uppercase">Item Name</th>
-                <th className="p-3 text-center text-gray-500 font-bold text-xs uppercase w-20">Qty</th>
                 <th className="p-3 text-center text-gray-500 font-bold text-xs uppercase w-20">KG</th>
                 <th className="p-3 w-10"></th>
               </tr>
@@ -2936,13 +2919,6 @@ function SendDashboard({ user, onBack }) {
                       placeholder={`Item ${idx + 1}...`}
                       value={row.itemName}
                       onChange={e => updateRow(row.id, 'itemName', e.target.value)}
-                    />
-                  </td>
-                  <td className="p-2">
-                    <input type="number" min="0"
-                      className="w-full p-2 bg-[#252525] border border-white/5 rounded-lg text-white outline-none focus:border-blue-500/50 text-sm text-center transition-all"
-                      placeholder="0" value={row.qty}
-                      onChange={e => updateRow(row.id, 'qty', e.target.value)}
                     />
                   </td>
                   <td className="p-2">
