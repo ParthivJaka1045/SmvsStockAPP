@@ -2,20 +2,20 @@ import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { db } from './firebase'; 
 import { collection, addDoc, getDocs, getDoc, query, orderBy, doc, where, updateDoc, deleteDoc } from 'firebase/firestore'; 
-import { categories, centers, centerData } from './data';
+import { categories, centerData } from './data';
 import jsPDF from 'jspdf';
 import html2canvas from 'html2canvas';
 import emailjs from 'emailjs-com'; 
+import gujaratiFontBoldUrl from './assets/fonts/NotoSansGujarati-Bold.ttf?url';
+import gujaratiFontRegularUrl from './assets/fonts/NotoSansGujarati-Regular.ttf?url';
 import {
   REPORT_TITLE,
   buildSummaryReport,
-  createDefaultReportOptions,
   formatDisplayDate,
   formatMetric,
   generateSummaryReportPDFBlob,
   getReportFileName,
   getReportTheme,
-  getVisibleReportMetrics,
   hydrateReport,
 } from './reporting';
 import { 
@@ -23,10 +23,65 @@ import {
   ChevronDown, ChevronUp, ArrowLeft, Send, LayoutDashboard, 
   Edit3, Eye, Share2, X, Search, Calendar, MapPin, User, Eraser,
   Package, ShoppingCart, FileText, Sparkles, Box, Plus, Minus,
-  Check, Mail
+  Mail
 } from 'lucide-react';
 
 void motion;
+
+const REPORT_DEFAULT_EMAILS = [
+  'jakasaniyaparthiv@gmail.com',
+  'psk.assist@in.smvs.org',
+];
+
+const REPORT_MAIL_CONFIG = {
+  serviceId: 'service_es31jwq',
+  templateId: 'template_t4geyq3',
+  publicKey: '_E6nBjN6vCMGEW6I8',
+};
+
+const REQUEST_MAIL_CONFIG = {
+  serviceId: 'service_1ug481j',
+  templateId: 'template_djuyjcq',
+  publicKey: '',
+};
+
+const SEND_MAIL_CONFIG = {
+  serviceId: 'service_es31jwq',
+  templateId: 'template_0xnrlbm',
+  publicKey: '_E6nBjN6vCMGEW6I8',
+};
+
+const DEFAULT_CC_EMAIL = REPORT_DEFAULT_EMAILS[0];
+const DEFAULT_BCC_EMAIL = REPORT_DEFAULT_EMAILS[1];
+
+const isValidEmail = (value) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test((value || '').trim());
+
+const isDigitsOnly = (value) => /^\d+$/.test((value || '').trim());
+
+const getMonthInputValue = (value = new Date()) => {
+  const date = value instanceof Date ? value : new Date(value);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+};
+
+const getLastDateForMonth = (monthValue) => {
+  if (!monthValue || !/^\d{4}-\d{2}$/.test(monthValue)) return new Date().toISOString().split('T')[0];
+  const [year, month] = monthValue.split('-').map(Number);
+  const date = new Date(year, month, 0);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+};
+
+const getDateWithinMonth = (monthValue, dateValue) => {
+  if (dateValue && dateValue.startsWith(monthValue)) return dateValue;
+  const today = new Date().toISOString().split('T')[0];
+  if (today.startsWith(monthValue)) return today;
+  return getLastDateForMonth(monthValue);
+};
+
+const sendEmailWithConfig = (config, params) => (
+  config.publicKey
+    ? emailjs.send(config.serviceId, config.templateId, params, config.publicKey)
+    : emailjs.send(config.serviceId, config.templateId, params)
+);
 
 // Animation variants
 const fadeInUp = {
@@ -318,6 +373,42 @@ const categoryIcons = {
   "અન્ય": "📦"
 };
 
+// --- Gujarati font loading for PDF HTML rendering ---
+let _gujaratiFontDataUrlPromise = null;
+const getGujaratiFontDataUrls = async () => {
+  if (!_gujaratiFontDataUrlPromise) {
+    _gujaratiFontDataUrlPromise = Promise.all(
+      [gujaratiFontRegularUrl, gujaratiFontBoldUrl].map(async (url) => {
+        const resp = await fetch(url);
+        const blob = await resp.blob();
+        return new Promise((resolve) => {
+          const reader = new FileReader();
+          reader.onloadend = () => resolve(reader.result);
+          reader.readAsDataURL(blob);
+        });
+      })
+    );
+  }
+  return _gujaratiFontDataUrlPromise;
+};
+
+const buildFontFaceCSS = (regularDataUrl, boldDataUrl) => `
+  @font-face {
+    font-family: 'NotoGujarati';
+    src: url('${regularDataUrl}') format('truetype');
+    font-weight: 400;
+    font-style: normal;
+  }
+  @font-face {
+    font-family: 'NotoGujarati';
+    src: url('${boldDataUrl}') format('truetype');
+    font-weight: 700;
+    font-style: normal;
+  }
+`;
+
+const GJ_FONT = "'NotoGujarati', sans-serif";
+
 // --- RELIABLE PDF GENERATOR (pure inline styles, no Tailwind dependency) ---
 const buildPDFPageHTML = (order, pageItems, pageIndex, totalPages, startNo) => {
   const totals = calculateTotals(order.items);
@@ -327,10 +418,10 @@ const buildPDFPageHTML = (order, pageItems, pageIndex, totalPages, startNo) => {
     const itemNo = startNo + idx;
     const bgColor = idx % 2 === 0 ? '#ffffff' : '#f9f9f9';
     return `<tr style="background:${bgColor}">
-      <td style="border:1px solid #333;padding:6px 10px;text-align:center;font-family:sans-serif;font-size:13px;color:#666">${itemNo}</td>
-      <td style="border:1px solid #333;padding:6px 10px;font-weight:700;font-size:14px">${item.name}</td>
-      <td style="border:1px solid #333;padding:6px 10px;text-align:center;font-weight:900;font-size:15px;color:#ea580c">${item.qty}</td>
-      <td style="border:1px solid #333;padding:6px 10px;text-align:center;font-size:11px;font-weight:700;text-transform:uppercase;color:#888;font-family:sans-serif">${item.unit}</td>
+      <td style="border:1px solid #333;padding:6px 10px;text-align:center;font-family:${GJ_FONT};font-size:13px;color:#666">${itemNo}</td>
+      <td style="border:1px solid #333;padding:6px 10px;font-weight:700;font-size:14px;font-family:${GJ_FONT}">${item.name}</td>
+      <td style="border:1px solid #333;padding:6px 10px;text-align:center;font-weight:900;font-size:15px;color:#ea580c;font-family:${GJ_FONT}">${item.qty}</td>
+      <td style="border:1px solid #333;padding:6px 10px;text-align:center;font-size:11px;font-weight:700;text-transform:uppercase;color:#888;font-family:${GJ_FONT}">${item.unit}</td>
     </tr>`;
   }).join('');
 
@@ -338,45 +429,45 @@ const buildPDFPageHTML = (order, pageItems, pageIndex, totalPages, startNo) => {
 
   const footerHTML = isLastPage ? `
     <div style="margin-top:auto;padding-top:15px">
-      <div style="border:3px solid #222;border-radius:12px;padding:14px 20px;display:flex;justify-content:space-around;font-weight:900;text-transform:uppercase;font-size:14px;font-family:sans-serif;background:#f8f8f8">
+      <div style="border:3px solid #222;border-radius:12px;padding:14px 20px;display:flex;justify-content:space-around;font-weight:900;text-transform:uppercase;font-size:14px;font-family:${GJ_FONT};background:#f8f8f8">
         <span style="color:#333">📦 ITEMS: <span style="color:#ea580c">${totals.totalItems}</span></span>
         <span style="color:#333">⚖️ KG: <span style="color:#ea580c">${totals.totalKg}</span></span>
       </div>
       <div style="display:flex;justify-content:space-between;margin-top:40px;padding:0 40px">
         <div style="text-align:center">
-          <div style="border-top:2px solid #333;width:150px;padding-top:8px;font-weight:700;font-size:11px;text-transform:uppercase;font-family:sans-serif;color:#555">Receiver Sign</div>
+          <div style="border-top:2px solid #333;width:150px;padding-top:8px;font-weight:700;font-size:11px;text-transform:uppercase;font-family:${GJ_FONT};color:#555">Receiver Sign</div>
         </div>
         <div style="text-align:center">
-          <div style="border-top:2px solid #333;width:150px;padding-top:8px;font-weight:700;font-size:11px;text-transform:uppercase;font-family:sans-serif;color:#555">Verified By</div>
+          <div style="border-top:2px solid #333;width:150px;padding-top:8px;font-weight:700;font-size:11px;text-transform:uppercase;font-family:${GJ_FONT};color:#555">Verified By</div>
         </div>
       </div>
     </div>
   ` : '';
 
   return `
-    <div style="width:794px;height:1123px;padding:40px 45px;box-sizing:border-box;background:#ffffff;color:#000;font-family:sans-serif;display:flex;flex-direction:column">
+    <div style="width:794px;height:1123px;padding:40px 45px;box-sizing:border-box;background:#ffffff;color:#000;font-family:${GJ_FONT};display:flex;flex-direction:column">
       <!-- Header -->
       <div style="display:flex;justify-content:space-between;align-items:flex-start;padding-bottom:12px;border-bottom:4px solid #ea580c;margin-bottom:15px;flex-shrink:0">
         <div>
-          <h1 style="color:#ea580c;font-size:26px;font-weight:900;margin:0;text-transform:uppercase;letter-spacing:-0.5px;font-family:sans-serif">SMVS STOCK REQUEST</h1>
-          <p style="font-size:9px;color:#999;margin:3px 0 0 0;font-weight:700;text-transform:uppercase;letter-spacing:2px;font-family:sans-serif">Samp Swarup Mandal Video Seva</p>
+          <h1 style="color:#ea580c;font-size:26px;font-weight:900;margin:0;text-transform:uppercase;letter-spacing:-0.5px;font-family:${GJ_FONT}">SMVS STOCK REQUEST</h1>
+          <p style="font-size:9px;color:#999;margin:3px 0 0 0;font-weight:700;text-transform:uppercase;letter-spacing:2px;font-family:${GJ_FONT}">Samp Swarup Mandal Video Seva</p>
         </div>
         <div style="text-align:right">
-          <h2 style="font-size:18px;font-weight:800;margin:0;text-transform:uppercase;color:#333;font-family:sans-serif">${order.center}</h2>
-          <p style="font-weight:700;margin:3px 0 0 0;font-size:12px;font-family:sans-serif;color:#666">#${order.chalanNo} &nbsp;|&nbsp; ${formattedDate}</p>
-          ${order.centerContactName ? `<p style="font-size:10px;color:#999;margin:2px 0 0 0;font-family:sans-serif">Contact: <strong style="color:#333">${order.centerContactName}</strong>${order.centerPhone ? ` | ${order.centerPhone}` : ''}</p>` : ''}
-          ${order.senderName ? `<p style="font-size:10px;color:#888;margin:2px 0 0 0;font-family:sans-serif">Sender: <strong style="color:#333">${order.senderName}</strong>${order.post ? ` (${order.post})` : ''}${order.mobileNumber ? ` | ${order.mobileNumber}` : ''}</p>` : ''}
+          <h2 style="font-size:18px;font-weight:800;margin:0;text-transform:uppercase;color:#333;font-family:${GJ_FONT}">${order.center}</h2>
+          <p style="font-weight:700;margin:3px 0 0 0;font-size:12px;font-family:${GJ_FONT};color:#666">#${order.chalanNo} &nbsp;|&nbsp; ${formattedDate}</p>
+          ${order.senderName ? `<p style="font-size:10px;color:#888;margin:2px 0 0 0;font-family:${GJ_FONT}">Sender: <strong style="color:#333">${order.senderName}</strong>${order.post ? ` (${order.post})` : ''}${order.mobileNumber ? ` | ${order.mobileNumber}` : ''}</p>` : ''}
+          ${order.globalId ? `<p style="font-size:10px;color:#888;margin:2px 0 0 0;font-family:${GJ_FONT}">Global ID: <strong style="color:#333">${order.globalId}</strong></p>` : ''}
         </div>
       </div>
-      ${totalPages > 1 ? `<div style="text-align:right;font-size:9px;color:#aaa;margin-bottom:5px;font-family:sans-serif;font-weight:600;flex-shrink:0">Page ${pageIndex + 1} of ${totalPages}</div>` : ''}
+      ${totalPages > 1 ? `<div style="text-align:right;font-size:9px;color:#aaa;margin-bottom:5px;font-family:${GJ_FONT};font-weight:600;flex-shrink:0">Page ${pageIndex + 1} of ${totalPages}</div>` : ''}
       <!-- Table -->
       <table style="width:100%;border-collapse:collapse;border:2px solid #333;font-size:14px;flex-shrink:0">
         <thead>
           <tr style="background:linear-gradient(135deg,#ea580c,#dc2626)">
-            <th style="border:1px solid #333;padding:10px 8px;color:#fff;font-weight:800;font-size:12px;width:45px;font-family:sans-serif">No</th>
-            <th style="border:1px solid #333;padding:10px 8px;color:#fff;font-weight:800;font-size:12px;text-align:left;font-family:sans-serif">Item Name</th>
-            <th style="border:1px solid #333;padding:10px 8px;color:#fff;font-weight:800;font-size:12px;width:65px;font-family:sans-serif">Qty</th>
-            <th style="border:1px solid #333;padding:10px 8px;color:#fff;font-weight:800;font-size:12px;width:65px;font-family:sans-serif">Unit</th>
+            <th style="border:1px solid #333;padding:10px 8px;color:#fff;font-weight:800;font-size:12px;width:45px;font-family:${GJ_FONT}">No</th>
+            <th style="border:1px solid #333;padding:10px 8px;color:#fff;font-weight:800;font-size:12px;text-align:left;font-family:${GJ_FONT}">Item Name</th>
+            <th style="border:1px solid #333;padding:10px 8px;color:#fff;font-weight:800;font-size:12px;width:65px;font-family:${GJ_FONT}">Qty</th>
+            <th style="border:1px solid #333;padding:10px 8px;color:#fff;font-weight:800;font-size:12px;width:65px;font-family:${GJ_FONT}">Unit</th>
           </tr>
         </thead>
         <tbody>${rowsHTML}</tbody>
@@ -390,21 +481,27 @@ const generatePDFBlobReliable = async (order) => {
   const pages = getPages(order.items);
   const totalPages = pages.length;
 
-  // Create a temporary container
+  const [regularDataUrl, boldDataUrl] = await getGujaratiFontDataUrls();
+  const fontFaceCSS = buildFontFaceCSS(regularDataUrl, boldDataUrl);
+
   const container = document.createElement('div');
   container.style.cssText = 'position:fixed;left:-9999px;top:0;z-index:-1;';
   document.body.appendChild(container);
 
-  // Render all pages with correct starting item numbers
+  const styleEl = document.createElement('style');
+  styleEl.textContent = fontFaceCSS;
+  container.appendChild(styleEl);
+
   let startNo = 1;
-  container.innerHTML = pages.map((pageItems, i) => {
+  const pagesHTML = pages.map((pageItems, i) => {
     const html = buildPDFPageHTML(order, pageItems, i, totalPages, startNo);
     startNo += pageItems.length;
     return html;
   }).join('');
+  container.insertAdjacentHTML('beforeend', pagesHTML);
 
-  // Wait for DOM to paint
-  await new Promise(r => setTimeout(r, 500));
+  await document.fonts.ready;
+  await new Promise(r => setTimeout(r, 600));
 
   const pageElements = container.querySelectorAll(':scope > div');
   const pdf = new jsPDF('p', 'mm', 'a4');
@@ -428,7 +525,6 @@ const generatePDFBlobReliable = async (order) => {
     }
   }
 
-  // Cleanup
   document.body.removeChild(container);
   return pdf.output('blob');
 };
@@ -443,10 +539,10 @@ const buildSendPDFPageHTML = (order, pageItems, pageIndex, totalPages, startNo) 
     const itemNo = startNo + idx;
     const bgColor = idx % 2 === 0 ? '#ffffff' : '#f9f9f9';
     return `<tr style="background:${bgColor}">
-      <td style="border:1px solid #333;padding:6px 10px;text-align:center;font-family:sans-serif;font-size:13px;color:#666">${itemNo}</td>
-      <td style="border:1px solid #333;padding:6px 10px;font-weight:700;font-size:14px">${row.itemName}</td>
-      <td style="border:1px solid #333;padding:6px 10px;text-align:center;font-weight:900;font-size:15px;color:#2563eb">${row.qty || '-'}</td>
-      <td style="border:1px solid #333;padding:6px 10px;text-align:center;font-weight:900;font-size:15px;color:#ea580c">${row.kg || '-'}</td>
+      <td style="border:1px solid #333;padding:6px 10px;text-align:center;font-family:${GJ_FONT};font-size:13px;color:#666">${itemNo}</td>
+      <td style="border:1px solid #333;padding:6px 10px;font-weight:700;font-size:14px;font-family:${GJ_FONT}">${row.itemName}</td>
+      <td style="border:1px solid #333;padding:6px 10px;text-align:center;font-weight:900;font-size:15px;color:#2563eb;font-family:${GJ_FONT}">${row.qty || '-'}</td>
+      <td style="border:1px solid #333;padding:6px 10px;text-align:center;font-weight:900;font-size:15px;color:#ea580c;font-family:${GJ_FONT}">${row.kg || '-'}</td>
     </tr>`;
   }).join('');
 
@@ -454,43 +550,44 @@ const buildSendPDFPageHTML = (order, pageItems, pageIndex, totalPages, startNo) 
 
   const footerHTML = isLastPage ? `
     <div style="margin-top:auto;padding-top:15px">
-      <div style="border:3px solid #222;border-radius:12px;padding:14px 20px;display:flex;justify-content:space-around;font-weight:900;text-transform:uppercase;font-size:14px;font-family:sans-serif;background:#f8f8f8">
+      <div style="border:3px solid #222;border-radius:12px;padding:14px 20px;display:flex;justify-content:space-around;font-weight:900;text-transform:uppercase;font-size:14px;font-family:${GJ_FONT};background:#f8f8f8">
         <span style="color:#333">📦 ITEMS: <span style="color:#2563eb">${totalItems}</span></span>
         <span style="color:#333">⚖️ KG: <span style="color:#ea580c">${totalKg}</span></span>
       </div>
       <div style="display:flex;justify-content:space-between;margin-top:40px;padding:0 40px">
         <div style="text-align:center">
-          <div style="border-top:2px solid #333;width:150px;padding-top:8px;font-weight:700;font-size:11px;text-transform:uppercase;font-family:sans-serif;color:#555">Sender Sign</div>
+          <div style="border-top:2px solid #333;width:150px;padding-top:8px;font-weight:700;font-size:11px;text-transform:uppercase;font-family:${GJ_FONT};color:#555">Sender Sign</div>
         </div>
         <div style="text-align:center">
-          <div style="border-top:2px solid #333;width:150px;padding-top:8px;font-weight:700;font-size:11px;text-transform:uppercase;font-family:sans-serif;color:#555">Receiver Sign</div>
+          <div style="border-top:2px solid #333;width:150px;padding-top:8px;font-weight:700;font-size:11px;text-transform:uppercase;font-family:${GJ_FONT};color:#555">Receiver Sign</div>
         </div>
       </div>
     </div>
   ` : '';
 
   return `
-    <div style="width:794px;height:1123px;padding:40px 45px;box-sizing:border-box;background:#ffffff;color:#000;font-family:sans-serif;display:flex;flex-direction:column">
+    <div style="width:794px;height:1123px;padding:40px 45px;box-sizing:border-box;background:#ffffff;color:#000;font-family:${GJ_FONT};display:flex;flex-direction:column">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;padding-bottom:12px;border-bottom:4px solid #2563eb;margin-bottom:15px;flex-shrink:0">
         <div>
-          <h1 style="color:#2563eb;font-size:26px;font-weight:900;margin:0;text-transform:uppercase;letter-spacing:-0.5px;font-family:sans-serif">SMVS MATERIAL DISPATCH</h1>
-          <p style="font-size:9px;color:#999;margin:3px 0 0 0;font-weight:700;text-transform:uppercase;letter-spacing:2px;font-family:sans-serif">Samp Swarup Mandal Video Seva</p>
+          <h1 style="color:#2563eb;font-size:26px;font-weight:900;margin:0;text-transform:uppercase;letter-spacing:-0.5px;font-family:${GJ_FONT}">SMVS MATERIAL DISPATCH</h1>
+          <p style="font-size:9px;color:#999;margin:3px 0 0 0;font-weight:700;text-transform:uppercase;letter-spacing:2px;font-family:${GJ_FONT}">Samp Swarup Mandal Video Seva</p>
         </div>
         <div style="text-align:right">
-          <h2 style="font-size:16px;font-weight:800;margin:0;text-transform:uppercase;color:#333;font-family:sans-serif">FROM: ${order.fromCenter}</h2>
-          <p style="font-size:13px;font-weight:700;margin:2px 0 0 0;color:#666;font-family:sans-serif">TO: Swaminarayan Dham</p>
-          <p style="font-weight:700;margin:3px 0 0 0;font-size:12px;font-family:sans-serif;color:#666">#${order.chalanNo} &nbsp;|&nbsp; ${formattedDate}</p>
-          ${order.senderName ? `<p style="font-size:10px;color:#888;margin:2px 0 0 0;font-family:sans-serif">Sender: <strong style="color:#333">${order.senderName}</strong>${order.post ? ` (${order.post})` : ''}${order.mobileNumber ? ` | ${order.mobileNumber}` : ''}</p>` : ''}
+          <h2 style="font-size:16px;font-weight:800;margin:0;text-transform:uppercase;color:#333;font-family:${GJ_FONT}">FROM: ${order.fromCenter}</h2>
+          <p style="font-size:13px;font-weight:700;margin:2px 0 0 0;color:#666;font-family:${GJ_FONT}">TO: Swaminarayan Dham</p>
+          <p style="font-weight:700;margin:3px 0 0 0;font-size:12px;font-family:${GJ_FONT};color:#666">#${order.chalanNo} &nbsp;|&nbsp; ${formattedDate}</p>
+          ${order.senderName ? `<p style="font-size:10px;color:#888;margin:2px 0 0 0;font-family:${GJ_FONT}">Sender: <strong style="color:#333">${order.senderName}</strong>${order.post ? ` (${order.post})` : ''}${order.mobileNumber ? ` | ${order.mobileNumber}` : ''}</p>` : ''}
+          ${order.globalId ? `<p style="font-size:10px;color:#888;margin:2px 0 0 0;font-family:${GJ_FONT}">Global ID: <strong style="color:#333">${order.globalId}</strong></p>` : ''}
         </div>
       </div>
-      ${totalPages > 1 ? `<div style="text-align:right;font-size:9px;color:#aaa;margin-bottom:5px;font-family:sans-serif;font-weight:600;flex-shrink:0">Page ${pageIndex + 1} of ${totalPages}</div>` : ''}
+      ${totalPages > 1 ? `<div style="text-align:right;font-size:9px;color:#aaa;margin-bottom:5px;font-family:${GJ_FONT};font-weight:600;flex-shrink:0">Page ${pageIndex + 1} of ${totalPages}</div>` : ''}
       <table style="width:100%;border-collapse:collapse;border:2px solid #333;font-size:14px;flex-shrink:0">
         <thead>
           <tr style="background:linear-gradient(135deg,#2563eb,#1d4ed8)">
-            <th style="border:1px solid #333;padding:10px 8px;color:#fff;font-weight:800;font-size:12px;width:45px;font-family:sans-serif">No</th>
-            <th style="border:1px solid #333;padding:10px 8px;color:#fff;font-weight:800;font-size:12px;text-align:left;font-family:sans-serif">Item Name</th>
-            <th style="border:1px solid #333;padding:10px 8px;color:#fff;font-weight:800;font-size:12px;width:70px;font-family:sans-serif">Qty</th>
-            <th style="border:1px solid #333;padding:10px 8px;color:#fff;font-weight:800;font-size:12px;width:70px;font-family:sans-serif">KG</th>
+            <th style="border:1px solid #333;padding:10px 8px;color:#fff;font-weight:800;font-size:12px;width:45px;font-family:${GJ_FONT}">No</th>
+            <th style="border:1px solid #333;padding:10px 8px;color:#fff;font-weight:800;font-size:12px;text-align:left;font-family:${GJ_FONT}">Item Name</th>
+            <th style="border:1px solid #333;padding:10px 8px;color:#fff;font-weight:800;font-size:12px;width:70px;font-family:${GJ_FONT}">Qty</th>
+            <th style="border:1px solid #333;padding:10px 8px;color:#fff;font-weight:800;font-size:12px;width:70px;font-family:${GJ_FONT}">KG</th>
           </tr>
         </thead>
         <tbody>${rowsHTML}</tbody>
@@ -505,18 +602,30 @@ const generateSendPDFBlobReliable = async (order) => {
   const pages = getPages(filledItems);
   const totalPages = pages.length;
 
+  // Load Gujarati font data URLs
+  const [regularDataUrl, boldDataUrl] = await getGujaratiFontDataUrls();
+  const fontFaceCSS = buildFontFaceCSS(regularDataUrl, boldDataUrl);
+
   const container = document.createElement('div');
   container.style.cssText = 'position:fixed;left:-9999px;top:0;z-index:-1;';
   document.body.appendChild(container);
 
+  // Inject font-face style
+  const styleEl = document.createElement('style');
+  styleEl.textContent = fontFaceCSS;
+  container.appendChild(styleEl);
+
   let startNo = 1;
-  container.innerHTML = pages.map((pageItems, i) => {
+  const pagesHTML = pages.map((pageItems, i) => {
     const html = buildSendPDFPageHTML(order, pageItems, i, totalPages, startNo);
     startNo += pageItems.length;
     return html;
   }).join('');
+  container.insertAdjacentHTML('beforeend', pagesHTML);
 
-  await new Promise(r => setTimeout(r, 500));
+  // Wait for font to load and DOM to paint
+  await document.fonts.ready;
+  await new Promise(r => setTimeout(r, 600));
 
   const pageElements = container.querySelectorAll(':scope > div');
   const pdf = new jsPDF('p', 'mm', 'a4');
@@ -537,214 +646,108 @@ const generateSendPDFBlobReliable = async (order) => {
   return pdf.output('blob');
 };
 
-const getReportUiTheme = (reportKind) => (
-  reportKind === 'send'
-    ? {
-        tint: 'from-blue-500 to-blue-600',
-        soft: 'from-blue-500/10 to-blue-600/5',
-        border: 'border-blue-500/20',
-        text: 'text-blue-600',
-        muted: 'text-blue-400',
-        chip: 'bg-blue-500/10 text-blue-700 border-blue-200',
-      }
-    : {
-        tint: 'from-orange-500 to-orange-600',
-        soft: 'from-orange-500/10 to-orange-600/5',
-        border: 'border-orange-500/20',
-        text: 'text-orange-600',
-        muted: 'text-orange-400',
-        chip: 'bg-orange-500/10 text-orange-700 border-orange-200',
-      }
-);
-
-const getReportCenters = (orders, sendOrders) => (
-  Array.from(
-    new Set([
-      ...centers,
-      ...orders.map((order) => order.center),
-      ...sendOrders.map((order) => order.fromCenter),
-    ].filter(Boolean)),
-  ).sort((left, right) => left.localeCompare(right))
-);
-
-const createDefaultReportForm = () => ({
-  reportKind: 'request',
-  scope: 'full',
-  center: '',
-  fromDate: '',
-  toDate: '',
-  options: createDefaultReportOptions(),
+const getReportUiTheme = () => ({
+  tint: 'from-emerald-500 to-emerald-600',
+  soft: 'from-emerald-500/10 to-emerald-600/5',
+  border: 'border-emerald-500/20',
+  text: 'text-emerald-700',
+  muted: 'text-emerald-400',
+  chip: 'bg-emerald-500/10 text-emerald-700 border-emerald-200',
 });
+
+const createDefaultReportForm = () => {
+  const month = getMonthInputValue();
+  return {
+    month,
+    selectedDate: getDateWithinMonth(month, new Date().toISOString().split('T')[0]),
+  };
+};
 
 function ReportPreviewContent({ report }) {
   const preparedReport = hydrateReport(report);
-  const isSend = preparedReport.reportKind === 'send';
-  const uiTheme = getReportUiTheme(preparedReport.reportKind);
-  const summaryCards = getVisibleReportMetrics(preparedReport);
-  const includedSections = [
-    preparedReport.options.sections.centerBreakdown ? 'Center Breakdown' : null,
-    'Item Summary',
-    preparedReport.options.sections.detailedEntries ? 'Detailed Entries' : null,
-  ].filter(Boolean);
+  const uiTheme = getReportUiTheme();
 
   return (
-    <div className="space-y-6 sm:space-y-8 font-report-gujarati">
-      <div className={`rounded-2xl sm:rounded-3xl border ${uiTheme.border} bg-gradient-to-r ${uiTheme.soft} p-5 sm:p-7`}>
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+    <div className="space-y-6 font-report-gujarati">
+      <div className={`rounded-3xl border ${uiTheme.border} bg-gradient-to-r ${uiTheme.soft} p-5 sm:p-7`}>
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
           <div>
-            <p className={`text-[11px] font-black uppercase tracking-[0.25em] ${uiTheme.text}`}>Admin Report Format</p>
+            <p className={`text-[11px] font-black uppercase tracking-[0.25em] ${uiTheme.text}`}>Monthly Report</p>
             <h2 className="mt-2 text-2xl sm:text-3xl font-black text-slate-900">{REPORT_TITLE}</h2>
-            <p className="mt-2 text-sm text-slate-600">
-              {preparedReport.reportKind === 'send' ? 'Dispatch entries summary' : 'Request entries summary'}
-            </p>
+            <p className="mt-2 text-sm text-slate-600">Simple monthly stock table with fixed format.</p>
           </div>
-          <div className="space-y-2 text-sm text-slate-600 sm:text-right">
-            <p><span className="font-bold text-slate-900">Center:</span> {preparedReport.centerLabel}</p>
-            <p><span className="font-bold text-slate-900">Range:</span> {preparedReport.rangeLabel}</p>
-            <p><span className="font-bold text-slate-900">Scope:</span> {preparedReport.scope === 'center' ? 'Center-wise' : 'Full Report'}</p>
-            <p><span className="font-bold text-slate-900">Generated:</span> {formatDisplayDate(preparedReport.generatedAtIso)}</p>
-          </div>
-        </div>
-      </div>
-
-      {summaryCards.length > 0 && (
-        <div className={`grid grid-cols-2 gap-3 ${summaryCards.length > 2 ? 'sm:grid-cols-4' : 'sm:grid-cols-2'}`}>
-          {summaryCards.map((card) => (
-            <div key={card.label} className={`rounded-2xl border ${uiTheme.border} bg-white p-4 shadow-sm`}>
-              <p className="text-[11px] font-bold uppercase tracking-widest text-slate-400">{card.label}</p>
-              <p className={`mt-2 text-2xl font-black ${uiTheme.text}`}>{card.value}</p>
+          <div className="grid grid-cols-2 gap-3 text-sm text-slate-600 sm:text-right">
+            <div>
+              <p className="font-bold text-slate-900">Month</p>
+              <p>{preparedReport.monthLabel}</p>
             </div>
-          ))}
-        </div>
-      )}
-
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-        <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 sm:p-5">
-          <p className="text-[11px] font-black uppercase tracking-widest text-slate-400">Center</p>
-          <div className="mt-3">
-            <p className="text-2xl font-black text-slate-900">{preparedReport.centerLabel}</p>
-            <p className="mt-2 text-sm text-slate-600">
-              {preparedReport.reportKind === 'send' ? 'Dispatch entries summary' : 'Request entries summary'}
-            </p>
-          </div>
-        </div>
-        <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 sm:p-5">
-          <p className="text-[11px] font-black uppercase tracking-widest text-slate-400">Included Blocks</p>
-          <div className="mt-3 flex flex-wrap gap-2">
-            {includedSections.map((sectionLabel) => (
-              <span key={sectionLabel} className={`rounded-full border px-3 py-1 text-xs font-bold uppercase ${uiTheme.chip}`}>
-                {sectionLabel}
-              </span>
-            ))}
-            {summaryCards.map((card) => (
-              <span key={card.label} className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-bold uppercase text-slate-600">
-                {card.label}
-              </span>
-            ))}
+            <div>
+              <p className="font-bold text-slate-900">Range</p>
+              <p>{preparedReport.rangeLabel}</p>
+            </div>
+            <div>
+              <p className="font-bold text-slate-900">Rows</p>
+              <p>{formatMetric(preparedReport.summary.totalRows)}</p>
+            </div>
+            <div>
+              <p className="font-bold text-slate-900">Generated</p>
+              <p>{formatDisplayDate(preparedReport.generatedAtIso)}</p>
+            </div>
           </div>
         </div>
       </div>
 
-      {preparedReport.options.sections.centerBreakdown && (
-        <div className="rounded-2xl border border-slate-200 overflow-hidden">
-          <div className={`border-b ${uiTheme.border} bg-gradient-to-r ${uiTheme.soft} px-4 py-3`}>
-            <h3 className={`text-sm font-black uppercase tracking-widest ${uiTheme.text}`}>Center Breakdown</h3>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[640px] text-sm">
-              <thead className="bg-slate-900 text-white">
-                <tr>
-                  <th className="px-4 py-3 text-left">Center</th>
-                  <th className="px-4 py-3 text-center">Entries</th>
-                  <th className="px-4 py-3 text-center">Line Items</th>
-                  {isSend && <th className="px-4 py-3 text-center">KG Total</th>}
-                  <th className="px-4 py-3 text-center">Last Date</th>
-                </tr>
-              </thead>
-              <tbody>
-                {preparedReport.centerBreakdown.map((row, index) => (
-                  <tr key={`${row.center}-${index}`} className="border-t border-slate-200">
-                    <td className="px-4 py-3 font-bold text-slate-900">{row.center}</td>
-                    <td className="px-4 py-3 text-center text-slate-600">{formatMetric(row.recordsCount)}</td>
-                    <td className="px-4 py-3 text-center text-slate-600">{formatMetric(row.lineItems)}</td>
-                    {isSend && <td className={`px-4 py-3 text-center font-bold ${uiTheme.text}`}>{formatMetric(row.totalKg)}</td>}
-                    <td className="px-4 py-3 text-center text-slate-600">{formatDisplayDate(row.lastEntryDate)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+          <p className="text-[11px] font-bold uppercase tracking-widest text-slate-400">Aavak</p>
+          <p className={`mt-2 text-2xl font-black ${uiTheme.text}`}>{formatMetric(preparedReport.summary.totalIncome)}</p>
         </div>
-      )}
+        <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+          <p className="text-[11px] font-bold uppercase tracking-widest text-slate-400">Javak</p>
+          <p className="mt-2 text-2xl font-black text-slate-900">{formatMetric(preparedReport.summary.totalOutgoing)}</p>
+        </div>
+        <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+          <p className="text-[11px] font-bold uppercase tracking-widest text-slate-400">Kul Stock</p>
+          <p className="mt-2 text-2xl font-black text-slate-900">{formatMetric(preparedReport.summary.totalStock)}</p>
+        </div>
+      </div>
 
-      <div className="rounded-2xl border border-slate-200 overflow-hidden">
+      <div className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
         <div className={`border-b ${uiTheme.border} bg-gradient-to-r ${uiTheme.soft} px-4 py-3`}>
-          <h3 className={`text-sm font-black uppercase tracking-widest ${uiTheme.text}`}>Item Summary</h3>
+          <h3 className={`text-sm font-black uppercase tracking-widest ${uiTheme.text}`}>Monthly Table</h3>
         </div>
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[640px] text-sm">
+          <table className="w-full min-w-[760px] text-sm">
             <thead className="bg-slate-900 text-white">
               <tr>
-                <th className="px-4 py-3 text-left">Item Name</th>
-                {!isSend && <th className="px-4 py-3 text-center">Unit</th>}
-                <th className="px-4 py-3 text-center">Line Items</th>
-                {isSend && <th className="px-4 py-3 text-center">KG Total</th>}
+                <th className="px-4 py-3 text-left">વસ્તુનું નામ</th>
+                <th className="px-4 py-3 text-left">મહિનો</th>
+                <th className="px-4 py-3 text-center">{preparedReport.rangeLabel} આવક</th>
+                <th className="px-4 py-3 text-center">{preparedReport.rangeLabel} જાવક</th>
+                <th className="px-4 py-3 text-center">કુલ સ્ટોક</th>
               </tr>
             </thead>
             <tbody>
-              {preparedReport.itemBreakdown.slice(0, 30).map((row, index) => (
+              {preparedReport.rows.map((row, index) => (
                 <tr key={`${row.itemName}-${index}`} className="border-t border-slate-200">
                   <td className="px-4 py-3 font-bold text-slate-900">{row.itemName}</td>
-                  {!isSend && <td className="px-4 py-3 text-center uppercase text-slate-500">{row.unit || '-'}</td>}
-                  <td className="px-4 py-3 text-center text-slate-600">{formatMetric(row.lineItems)}</td>
-                  {isSend && <td className={`px-4 py-3 text-center font-bold ${uiTheme.text}`}>{formatMetric(row.totalKg)}</td>}
+                  <td className="px-4 py-3 text-slate-600">{row.monthLabel}</td>
+                  <td className={`px-4 py-3 text-center font-bold ${uiTheme.text}`}>{formatMetric(row.income)}</td>
+                  <td className="px-4 py-3 text-center font-bold text-slate-900">{formatMetric(row.outgoing)}</td>
+                  <td className="px-4 py-3 text-center font-black text-slate-900">{formatMetric(row.totalStock)}</td>
                 </tr>
               ))}
+              {preparedReport.rows.length === 0 && (
+                <tr>
+                  <td colSpan={5} className="px-4 py-10 text-center text-sm font-bold text-slate-400">
+                    No rows found for the selected month.
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
-        {preparedReport.itemBreakdown.length > 30 && (
-          <div className="border-t border-slate-200 bg-slate-50 px-4 py-3 text-xs font-bold uppercase tracking-widest text-slate-500">
-            Showing top 30 items in preview. Full PDF includes all rows.
-          </div>
-        )}
       </div>
-
-      {preparedReport.options.sections.detailedEntries && (
-        <div className="rounded-2xl border border-slate-200 overflow-hidden">
-          <div className={`border-b ${uiTheme.border} bg-gradient-to-r ${uiTheme.soft} px-4 py-3`}>
-            <h3 className={`text-sm font-black uppercase tracking-widest ${uiTheme.text}`}>Detailed Entries</h3>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[760px] text-sm">
-              <thead className="bg-slate-900 text-white">
-                <tr>
-                  <th className="px-4 py-3 text-left">Date</th>
-                  <th className="px-4 py-3 text-left">Chalan</th>
-                  <th className="px-4 py-3 text-left">{isSend ? 'From Center' : 'Center'}</th>
-                  <th className="px-4 py-3 text-left">Sender</th>
-                  <th className="px-4 py-3 text-center">Items</th>
-                  <th className="px-4 py-3 text-center">{isSend ? 'Qty' : 'Quantity'}</th>
-                  {isSend && <th className="px-4 py-3 text-center">KG</th>}
-                </tr>
-              </thead>
-              <tbody>
-                {preparedReport.records.map((row, index) => (
-                  <tr key={`${row.sourceId || row.chalanNo}-${index}`} className="border-t border-slate-200">
-                    <td className="px-4 py-3 text-slate-600">{formatDisplayDate(row.date)}</td>
-                    <td className="px-4 py-3 font-bold text-slate-900">#{row.chalanNo}</td>
-                    <td className="px-4 py-3 font-bold text-slate-900">{row.center}</td>
-                    <td className="px-4 py-3 text-slate-600">{row.senderName || '-'}</td>
-                    <td className="px-4 py-3 text-center text-slate-600">{formatMetric(row.lineItems)}</td>
-                    <td className="px-4 py-3 text-center font-bold text-slate-900">{formatMetric(row.totalQuantity)}</td>
-                    {isSend && <td className={`px-4 py-3 text-center font-bold ${uiTheme.text}`}>{formatMetric(row.totalKg)}</td>}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -773,38 +776,10 @@ function AdminDashboard({ user }) {
   const [previewReport, setPreviewReport] = useState(null);
   const [reportForm, setReportForm] = useState(createDefaultReportForm);
   const [mailModal, setMailModal] = useState(null); // { order, type: 'request'|'send'|'report' }
-  const [mailStep, setMailStep] = useState('confirm'); // 'confirm' | 'custom'
   const [customEmail, setCustomEmail] = useState('');
   const [customEmailError, setCustomEmailError] = useState('');
   const [mailSending, setMailSending] = useState(false);
-  const availableReportCenters = getReportCenters(orders, sendOrders);
-
-  const toggleReportMetric = (metricKey) => {
-    setReportForm(prev => ({
-      ...prev,
-      options: {
-        ...prev.options,
-        metrics: {
-          ...prev.options.metrics,
-          [metricKey]: !prev.options.metrics[metricKey],
-        },
-      },
-    }));
-  };
-
-  const toggleReportSection = (sectionKey) => {
-    if (sectionKey === 'itemSummary') return;
-    setReportForm(prev => ({
-      ...prev,
-      options: {
-        ...prev.options,
-        sections: {
-          ...prev.options.sections,
-          [sectionKey]: !prev.options.sections[sectionKey],
-        },
-      },
-    }));
-  };
+  const [selectedReportEmail, setSelectedReportEmail] = useState(REPORT_DEFAULT_EMAILS[0]);
 
   const fetchOrders = async () => {
     setLoading(true);
@@ -844,7 +819,7 @@ function AdminDashboard({ user }) {
   const filteredOrders = orders.filter(o => {
     const dateMatch = filters.date ? o.date === filters.date : true;
     const centerMatch = filters.center ? o.center.toLowerCase().includes(filters.center.toLowerCase()) : true;
-    const nameMatch = filters.name ? ((o.senderName || o.centerContactName || '')).toLowerCase().includes(filters.name.toLowerCase()) : true;
+    const nameMatch = filters.name ? ((o.senderName || '')).toLowerCase().includes(filters.name.toLowerCase()) : true;
     return dateMatch && centerMatch && nameMatch;
   });
 
@@ -894,53 +869,94 @@ function AdminDashboard({ user }) {
 
   const openMailModal = (order, type) => {
     setMailModal({ order, type });
-    setMailStep('confirm');
-    setCustomEmail('');
+    const savedEmail = isValidEmail(order?.email) ? order.email.trim() : '';
+    if (type === 'report') {
+      if (REPORT_DEFAULT_EMAILS.includes(savedEmail)) {
+        setSelectedReportEmail(savedEmail);
+        setCustomEmail('');
+      } else if (savedEmail) {
+        setSelectedReportEmail('custom');
+        setCustomEmail(savedEmail);
+      } else {
+        setSelectedReportEmail(REPORT_DEFAULT_EMAILS[0]);
+        setCustomEmail('');
+      }
+    } else {
+      setCustomEmail(savedEmail);
+      setSelectedReportEmail(REPORT_DEFAULT_EMAILS[0]);
+    }
     setCustomEmailError('');
   };
 
   const closeMailModal = () => {
     setMailModal(null);
-    setMailStep('confirm');
     setCustomEmail('');
     setCustomEmailError('');
     setMailSending(false);
+    setSelectedReportEmail(REPORT_DEFAULT_EMAILS[0]);
     setSendMailLoading(null);
   };
 
-  const handleMailSend = async (emailToUse) => {
+  const handleMailSend = async () => {
     if (!mailModal) return;
     const { order, type } = mailModal;
+    const emailToUse = type === 'report'
+      ? (selectedReportEmail === 'custom' ? customEmail.trim() : selectedReportEmail)
+      : customEmail.trim();
+
+    if (!isValidEmail(emailToUse)) {
+      setCustomEmailError('Please enter a valid email address.');
+      return;
+    }
+
     setMailSending(true);
     if (type === 'send') setSendMailLoading(order.id);
     try {
       const formattedDate = formatDisplayDate(order.date);
       if (type === 'request') {
-        await emailjs.send("service_1ug481j", "template_djuyjcq", {
+        await sendEmailWithConfig(REQUEST_MAIL_CONFIG, {
           email: emailToUse,
-          from_name: order.center, chalan_no: order.chalanNo, date: formattedDate,
-          receiver: order.senderName || order.centerContactName || '',
-          pdf_link: `${window.location.origin}?orderId=${order.id}`
+          cc_email: DEFAULT_CC_EMAIL,
+          bcc_email: DEFAULT_BCC_EMAIL,
+          from_name: order.center,
+          chalan_no: order.chalanNo,
+          date: formattedDate,
+          receiver: order.senderName || '',
+          sender: order.senderName || '',
+          global_id: order.globalId || '',
+          pdf_link: `${window.location.origin}?orderId=${order.id}`,
         });
       } else if (type === 'send') {
-        await emailjs.send('service_es31jwq', 'template_0xnrlbm', {
+        await sendEmailWithConfig(SEND_MAIL_CONFIG, {
           email: emailToUse,
+          cc_email: DEFAULT_CC_EMAIL,
+          bcc_email: DEFAULT_BCC_EMAIL,
           to_name: order.fromCenter,
           chalan_no: order.chalanNo,
           date: formattedDate,
           sender: order.senderName || '',
+          receiver: order.senderName || '',
+          global_id: order.globalId || '',
           order_id: order.chalanNo,
           pdf_link: `${window.location.origin}?sendOrderId=${order.id}`,
-        }, '_E6nBjN6vCMGEW6I8');
+        });
       } else {
         const report = hydrateReport(order);
-        await emailjs.send("service_1ug481j", "template_djuyjcq", {
+        await sendEmailWithConfig(REPORT_MAIL_CONFIG, {
           email: emailToUse,
-          from_name: report.reportKind === 'send' ? 'Dispatch Summary Report' : 'Request Summary Report',
-          chalan_no: report.scope === 'center' ? report.centerLabel : 'All Centers',
+          cc_email: DEFAULT_CC_EMAIL,
+          bcc_email: DEFAULT_BCC_EMAIL,
+          from_name: report.title,
+          report_title: report.title,
+          month: report.monthLabel,
+          chalan_no: report.monthLabel,
           date: report.rangeLabel,
+          range: report.rangeLabel,
           receiver: `Generated ${formatDisplayDate(report.generatedAtIso)}`,
-          pdf_link: `${window.location.origin}?reportId=${report.id}`
+          generated_on: formatDisplayDate(report.generatedAtIso),
+          total_rows: formatMetric(report.summary.totalRows),
+          total_stock: formatMetric(report.summary.totalStock),
+          pdf_link: `${window.location.origin}?reportId=${report.id}`,
         });
         if (report.id) {
           await updateDoc(doc(db, "reports", report.id), { email: emailToUse });
@@ -954,25 +970,6 @@ function AdminDashboard({ user }) {
       alert('Mail Error: ' + err.message);
       setMailSending(false);
     }
-  };
-
-  const handleMailModalConfirm = (usePast) => {
-    if (!mailModal) return;
-    const { order } = mailModal;
-    const pastEmail = order.email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(order.email) ? order.email : '';
-    if (usePast && pastEmail) {
-      handleMailSend(pastEmail);
-    } else {
-      setMailStep('custom');
-    }
-  };
-
-  const handleCustomEmailSend = () => {
-    const trimmed = customEmail.trim();
-    if (!trimmed) { setCustomEmailError('Email address required.'); return; }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) { setCustomEmailError('Please enter a valid email address.'); return; }
-    setCustomEmailError('');
-    handleMailSend(trimmed);
   };
 
   const handleSendMail = (order) => openMailModal(order, 'request');
@@ -1024,38 +1021,36 @@ function AdminDashboard({ user }) {
   };
 
   const handleCreateReport = async () => {
-    if (reportForm.reportKind === 'request' && loading) {
-      alert('Request entries are still loading. Please wait.');
+    if (loading || sendLoading) {
+      alert('Entries are still loading. Please wait.');
       return;
     }
-    if (reportForm.reportKind === 'send' && sendLoading) {
-      alert('Send entries are still loading. Please wait.');
+    if (!reportForm.month || !reportForm.selectedDate) {
+      alert('Select month and selected date first.');
       return;
     }
-    if (reportForm.scope === 'center' && !reportForm.center) {
-      alert('Select a center for center-wise report.');
-      return;
-    }
-    if (reportForm.fromDate && reportForm.toDate && reportForm.fromDate > reportForm.toDate) {
-      alert('From date cannot be after To date.');
+    if (!reportForm.selectedDate.startsWith(reportForm.month)) {
+      alert('Selected date must be inside the selected month.');
       return;
     }
 
     setReportGenerating(true);
     try {
+      const purchaseSnapshot = await getDocs(query(collection(db, 'purchases'), orderBy('timestamp', 'desc')));
+      const purchases = purchaseSnapshot.docs
+        .map((docSnap) => ({ id: docSnap.id, ...docSnap.data() }))
+        .filter((item) => !item.is_deleted);
+
       const draft = buildSummaryReport({
         orders,
         sendOrders,
-        reportKind: reportForm.reportKind,
-        scope: reportForm.scope,
-        center: reportForm.center,
-        fromDate: reportForm.fromDate,
-        toDate: reportForm.toDate,
+        purchases,
+        month: reportForm.month,
+        selectedDate: reportForm.selectedDate,
         createdBy: user?.username || 'Admin',
-        options: reportForm.options,
       });
 
-      if (draft.records.length === 0) {
+      if (draft.rows.length === 0) {
         alert('No entries found for the selected filters.');
         setReportGenerating(false);
         return;
@@ -1070,7 +1065,7 @@ function AdminDashboard({ user }) {
       const savedReport = hydrateReport({ id: docRef.id, ...payload });
       setReports(prev => [savedReport, ...prev]);
       setPreviewReport(savedReport);
-      alert('Summary report created! ✅');
+      alert('Monthly report created! ✅');
     } catch (err) {
       alert('Report Error: ' + err.message);
     }
@@ -1105,7 +1100,7 @@ function AdminDashboard({ user }) {
         await navigator.share({
           files: [file],
           title: hydrated.title,
-          text: `${hydrated.reportKind === 'send' ? 'Dispatch' : 'Request'} summary report - ${hydrated.centerLabel}`,
+          text: `${hydrated.title} - ${hydrated.monthLabel}`,
         });
       } else {
         const link = document.createElement('a');
@@ -1126,7 +1121,7 @@ function AdminDashboard({ user }) {
   const handleDeleteReport = async (report) => {
     const hydrated = hydrateReport(report);
     if (!hydrated.id) return;
-    if (!window.confirm(`Delete report for ${hydrated.centerLabel} (${hydrated.rangeLabel})?`)) return;
+    if (!window.confirm(`Delete report for ${hydrated.monthLabel} (${hydrated.rangeLabel})?`)) return;
 
     setReportDeleting(hydrated.id);
     try {
@@ -1153,6 +1148,7 @@ function AdminDashboard({ user }) {
   const isRequests = activeTab === 'requests';
   const isSends = activeTab === 'sends';
   const isReports = activeTab === 'reports';
+  const isPurchases = activeTab === 'purchases';
 
   return (
     <>
@@ -1162,13 +1158,13 @@ function AdminDashboard({ user }) {
       className="p-3 sm:p-6 max-w-7xl mx-auto pb-20"
     >
       {/* Tab Switcher */}
-      <div className="grid grid-cols-1 gap-2 mb-6 sm:grid-cols-3">
+      <div className="grid grid-cols-1 gap-2 mb-6 sm:grid-cols-4">
         <motion.button
           whileTap={{ scale: 0.97 }}
           onClick={() => setActiveTab('requests')}
           className={`flex-1 py-3 rounded-2xl font-bold text-sm uppercase tracking-wide flex items-center justify-center gap-2 transition-all border ${isRequests ? 'bg-gradient-to-r from-orange-500 to-orange-600 text-white border-transparent shadow-lg shadow-orange-500/20' : 'bg-[#1e1e1e] text-gray-400 border-white/10 hover:border-orange-500/30'}`}
         >
-          <ShoppingCart size={16} /> Request Entries
+          <ShoppingCart size={16} /> કોઠારમાંથી વસ્તુ મંગાવેલ હોય
           <span className={`text-[10px] px-2 py-0.5 rounded-full font-black ${isRequests ? 'bg-white/20' : 'bg-white/10'}`}>{orders.length}</span>
         </motion.button>
         <motion.button
@@ -1176,7 +1172,7 @@ function AdminDashboard({ user }) {
           onClick={() => setActiveTab('sends')}
           className={`py-3 rounded-2xl font-bold text-sm uppercase tracking-wide flex items-center justify-center gap-2 transition-all border ${isSends ? 'bg-gradient-to-r from-blue-500 to-blue-600 text-white border-transparent shadow-lg shadow-blue-500/20' : 'bg-[#1e1e1e] text-gray-400 border-white/10 hover:border-blue-500/30'}`}
         >
-          <Send size={16} /> Send Entries
+          <Send size={16} /> વસ્તુ મોકલેલ હોય
           <span className={`text-[10px] px-2 py-0.5 rounded-full font-black ${isSends ? 'bg-white/20' : 'bg-white/10'}`}>{sendOrders.length}</span>
         </motion.button>
         <motion.button
@@ -1186,6 +1182,13 @@ function AdminDashboard({ user }) {
         >
           <FileText size={16} /> Reports
           <span className={`text-[10px] px-2 py-0.5 rounded-full font-black ${isReports ? 'bg-white/20' : 'bg-white/10'}`}>{reports.length}</span>
+        </motion.button>
+        <motion.button
+          whileTap={{ scale: 0.97 }}
+          onClick={() => setActiveTab('purchases')}
+          className={`py-3 rounded-2xl font-bold text-sm uppercase tracking-wide flex items-center justify-center gap-2 transition-all border ${isPurchases ? 'bg-gradient-to-r from-violet-500 to-fuchsia-600 text-white border-transparent shadow-lg shadow-violet-500/20' : 'bg-[#1e1e1e] text-gray-400 border-white/10 hover:border-violet-500/30'}`}
+        >
+          <Box size={16} /> Purchases
         </motion.button>
       </div>
 
@@ -1445,11 +1448,11 @@ function AdminDashboard({ user }) {
             <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
               <div>
                 <div className="flex items-center gap-2 text-emerald-400 font-bold uppercase text-xs tracking-widest">
-                  <FileText size={16} /> Summary Reports
+                  <FileText size={16} /> Monthly Reports
                 </div>
-                <h2 className="mt-2 text-xl sm:text-2xl font-black text-white">Create full or center-wise summary PDFs</h2>
+                <h2 className="mt-2 text-xl sm:text-2xl font-black text-white">Create fixed monthly stock report</h2>
                 <p className="mt-2 text-sm text-gray-400 max-w-2xl">
-                  Generate dynamic request and dispatch reports by date range, preview them, then download, share, or mail the report link.
+                  One clean monthly table only. Income includes center send entries plus purchase entries, outgoing uses kothar request entries, and total stock is income minus outgoing.
                 </p>
               </div>
               <div className="flex gap-2 sm:gap-3">
@@ -1464,119 +1467,46 @@ function AdminDashboard({ user }) {
               </div>
             </div>
 
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5 mt-6">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 mt-6">
               <div>
-                <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Report Type</label>
-                <select
-                  className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-emerald-500/50 transition-all text-sm"
-                  value={reportForm.reportKind}
-                  onChange={e => setReportForm(prev => ({ ...prev, reportKind: e.target.value }))}
-                >
-                  <option value="request">Request Summary</option>
-                  <option value="send">Send Summary</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Scope</label>
-                <select
-                  className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-emerald-500/50 transition-all text-sm"
-                  value={reportForm.scope}
-                  onChange={e => setReportForm(prev => ({ ...prev, scope: e.target.value, center: e.target.value === 'full' ? '' : prev.center }))}
-                >
-                  <option value="full">Full Report</option>
-                  <option value="center">Center-wise</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Center</label>
-                <select
-                  className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-emerald-500/50 transition-all text-sm disabled:opacity-50"
-                  value={reportForm.center}
-                  onChange={e => setReportForm(prev => ({ ...prev, center: e.target.value }))}
-                  disabled={reportForm.scope !== 'center'}
-                >
-                  <option value="">{reportForm.scope === 'center' ? 'Select Center' : 'All Centers'}</option>
-                  {availableReportCenters.map((centerName) => (
-                    <option key={centerName} value={centerName}>{centerName}</option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">From Date</label>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Month</label>
                 <input
-                  type="date"
+                  type="month"
                   className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-emerald-500/50 transition-all text-sm"
-                  value={reportForm.fromDate}
-                  onChange={e => setReportForm(prev => ({ ...prev, fromDate: e.target.value }))}
+                  value={reportForm.month}
+                  onChange={e => {
+                    const month = e.target.value;
+                    setReportForm(prev => ({
+                      ...prev,
+                      month,
+                      selectedDate: getDateWithinMonth(month, prev.selectedDate),
+                    }));
+                  }}
                 />
               </div>
 
               <div>
-                <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">To Date</label>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Selected Date</label>
                 <input
                   type="date"
+                  min={`${reportForm.month}-01`}
+                  max={getLastDateForMonth(reportForm.month)}
                   className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-emerald-500/50 transition-all text-sm"
-                  value={reportForm.toDate}
-                  onChange={e => setReportForm(prev => ({ ...prev, toDate: e.target.value }))}
+                  value={reportForm.selectedDate}
+                  onChange={e => setReportForm(prev => ({ ...prev, selectedDate: e.target.value }))}
                 />
               </div>
-            </div>
 
-            <div className="mt-5 grid grid-cols-1 gap-4 xl:grid-cols-2">
-              <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-                <p className="text-[11px] font-bold uppercase tracking-widest text-gray-500">Summary Metrics</p>
-                <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
-                  {[
-                    ['totalEntries', 'Total Entries'],
-                    ['activeCenters', 'Active Centers'],
-                    ['lineItems', 'Line Items'],
-                    ['valueTotal', reportForm.reportKind === 'send' ? 'KG Total' : 'Qty Total'],
-                  ].map(([key, label]) => (
-                    <label key={key} className="flex items-center gap-3 rounded-xl border border-white/10 bg-[#252525] px-3 py-2 text-sm text-white cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={reportForm.options.metrics[key]}
-                        onChange={() => toggleReportMetric(key)}
-                        className="h-4 w-4 rounded border-white/20 bg-transparent accent-emerald-500"
-                      />
-                      <span>{label}</span>
-                    </label>
-                  ))}
-                </div>
-              </div>
-
-              <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-                <p className="text-[11px] font-bold uppercase tracking-widest text-gray-500">Report Sections</p>
-                <div className="mt-3 grid grid-cols-1 gap-2">
-                  {[
-                    ['centerBreakdown', 'Center Breakdown', 'Optional'],
-                    ['itemSummary', 'Item Summary', 'Compulsory'],
-                    ['detailedEntries', 'Detailed Entries', 'Optional'],
-                  ].map(([key, label, note]) => (
-                    <label key={key} className={`flex items-center justify-between gap-3 rounded-xl border border-white/10 px-3 py-2 text-sm ${key === 'itemSummary' ? 'bg-emerald-500/10 text-emerald-300' : 'bg-[#252525] text-white cursor-pointer'}`}>
-                      <span className="flex items-center gap-3">
-                        <input
-                          type="checkbox"
-                          checked={reportForm.options.sections[key]}
-                          onChange={() => toggleReportSection(key)}
-                          disabled={key === 'itemSummary'}
-                          className="h-4 w-4 rounded border-white/20 bg-transparent accent-emerald-500 disabled:opacity-100"
-                        />
-                        <span>{label}</span>
-                      </span>
-                      <span className="text-[10px] font-bold uppercase tracking-widest text-gray-400">{note}</span>
-                    </label>
-                  ))}
-                </div>
+              <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/10 p-4">
+                <p className="text-[11px] font-bold uppercase tracking-widest text-emerald-300">Dynamic Range</p>
+                <p className="mt-2 text-lg font-black text-white">તા. 1 થી {formatDisplayDate(reportForm.selectedDate)}</p>
+                <p className="mt-2 text-xs text-emerald-100/70">The monthly table columns will update using this range in preview, PDF, share, and mail.</p>
               </div>
             </div>
 
             <div className="mt-5 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
               <p className="text-xs text-gray-500">
-                Reports use the fixed title {REPORT_TITLE} and only the selected metrics and sections are included in preview and PDF.
+                Report format is fixed to: વસ્તુનું નામ, મહિનો, આવક, જાવક, કુલ સ્ટોક.
               </p>
               <motion.button
                 whileHover={{ scale: 1.02 }}
@@ -1605,8 +1535,8 @@ function AdminDashboard({ user }) {
               <AnimatePresence>
                 {reports.map((report, index) => {
                   const preparedReport = hydrateReport(report);
-                  const uiTheme = getReportUiTheme(preparedReport.reportKind);
-                  const pdfTheme = getReportTheme(preparedReport.reportKind);
+                  const uiTheme = getReportUiTheme();
+                  const pdfTheme = getReportTheme();
                   return (
                     <motion.div key={preparedReport.id} variants={fadeInUp} initial="initial" animate="animate" exit="exit"
                       transition={{ delay: index * 0.05 }} whileHover={{ y: -5, transition: { duration: 0.2 } }}
@@ -1615,8 +1545,8 @@ function AdminDashboard({ user }) {
                         <div className="flex justify-between items-start gap-3">
                           <div>
                             <p className={`text-[10px] font-black uppercase tracking-[0.2em] ${uiTheme.muted}`}>{pdfTheme.title}</p>
-                            <h3 className="font-black text-white text-sm sm:text-base mt-1">{preparedReport.title}</h3>
-                            <p className="text-xs text-gray-400 mt-1">{preparedReport.centerLabel}</p>
+                            <h3 className="font-black text-white text-sm sm:text-base mt-1">{preparedReport.monthLabel}</h3>
+                            <p className="text-xs text-gray-300 mt-1">{preparedReport.rangeLabel}</p>
                           </div>
                           <div className="text-right flex flex-col items-end gap-2">
                             <div className="text-xs text-gray-300 font-medium bg-white/5 px-2 py-1 rounded-lg">{formatDisplayDate(preparedReport.generatedAtIso)}</div>
@@ -1634,22 +1564,23 @@ function AdminDashboard({ user }) {
                         </div>
                       </div>
                       <div className="p-4 sm:p-5">
-                        <div className="grid grid-cols-2 gap-2 mb-4">
+                        <div className="grid grid-cols-3 gap-2 mb-4">
                           <div className="bg-[#252525] p-3 rounded-xl border border-white/5 text-center">
-                            <p className="text-[10px] text-gray-500 uppercase font-bold">Entries</p>
-                            <p className="font-black text-white text-base">{formatMetric(preparedReport.summary.totalRecords)}</p>
+                            <p className="text-[10px] text-gray-500 uppercase font-bold">Rows</p>
+                            <p className="font-black text-white text-base">{formatMetric(preparedReport.summary.totalRows)}</p>
                           </div>
                           <div className={`bg-gradient-to-br ${uiTheme.soft} p-3 rounded-xl border ${uiTheme.border} text-center`}>
-                            <p className={`text-[10px] uppercase font-bold ${uiTheme.muted}`}>{preparedReport.reportKind === 'send' ? 'KG Total' : 'Qty Total'}</p>
-                            <p className={`font-black text-base ${uiTheme.text}`}>
-                              {formatMetric(preparedReport.reportKind === 'send' ? preparedReport.summary.totalKg : preparedReport.summary.totalQuantity)}
-                            </p>
+                            <p className={`text-[10px] uppercase font-bold ${uiTheme.muted}`}>Aavak</p>
+                            <p className={`font-black text-base ${uiTheme.text}`}>{formatMetric(preparedReport.summary.totalIncome)}</p>
+                          </div>
+                          <div className="bg-[#252525] p-3 rounded-xl border border-white/5 text-center">
+                            <p className="text-[10px] text-gray-500 uppercase font-bold">Javak</p>
+                            <p className="font-black text-white text-base">{formatMetric(preparedReport.summary.totalOutgoing)}</p>
                           </div>
                         </div>
                         <div className="mb-4 space-y-1 text-xs text-gray-400">
-                          <p><span className="font-bold text-gray-200">Range:</span> {preparedReport.rangeLabel}</p>
-                          <p><span className="font-bold text-gray-200">Scope:</span> {preparedReport.scope === 'center' ? 'Center-wise' : 'Full Report'}</p>
-                          <p><span className="font-bold text-gray-200">Centers:</span> {formatMetric(preparedReport.summary.totalCenters)}</p>
+                          <p><span className="font-bold text-gray-200">Total Stock:</span> {formatMetric(preparedReport.summary.totalStock)}</p>
+                          <p><span className="font-bold text-gray-200">Saved Email:</span> {preparedReport.email || '-'}</p>
                         </div>
                         <div className="grid grid-cols-2 gap-2">
                           <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={() => setPreviewReport(preparedReport)}
@@ -1680,11 +1611,15 @@ function AdminDashboard({ user }) {
           {!reportLoading && reports.length === 0 && (
             <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="text-center py-20">
               <FileText size={64} className="text-gray-600 mx-auto mb-4" />
-              <p className="text-gray-400 text-lg font-bold">No reports generated yet</p>
-              <p className="text-gray-500 text-sm mt-2">Use the form above to create the first full or center-wise summary report.</p>
+              <p className="text-gray-400 text-lg font-bold">No monthly reports generated yet</p>
+              <p className="text-gray-500 text-sm mt-2">Select month and selected date above to create the first report.</p>
             </motion.div>
           )}
         </>
+      )}
+
+      {isPurchases && (
+        <PurchaseAdminPanel user={user} />
       )}
 
       {/* Request Preview Modal */}
@@ -1707,10 +1642,11 @@ function AdminDashboard({ user }) {
               <div className="grid grid-cols-2 gap-3 sm:gap-4 text-sm mb-6 sm:mb-8 bg-gray-50 p-4 sm:p-6 rounded-2xl border border-gray-100">
                 <div><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Center Name</p><p className="font-bold text-base sm:text-lg">{previewOrder.center}</p></div>
                 <div className="text-right"><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Chalan No</p><p className="font-bold text-base sm:text-lg">#{previewOrder.chalanNo}</p></div>
-                <div><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Order Date</p><p className="font-bold text-sm">{previewOrder.date.split('-').reverse().join('-')}</p></div>
+                <div><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Order Date</p><p className="font-bold text-sm">{formatDisplayDate(previewOrder.date)}</p></div>
                 <div className="text-right"><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Sender</p><p className="font-bold text-sm">{previewOrder.senderName || '-'}</p></div>
-                {previewOrder.centerContactName && <div><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Contact</p><p className="font-bold text-sm">{previewOrder.centerContactName}{previewOrder.centerPhone ? ` | ${previewOrder.centerPhone}` : ''}</p></div>}
                 {previewOrder.post && <div className="text-right"><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Post</p><p className="font-bold text-sm">{previewOrder.post}{previewOrder.mobileNumber ? ` | ${previewOrder.mobileNumber}` : ''}</p></div>}
+                {previewOrder.globalId && <div><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Global ID</p><p className="font-bold text-sm">{previewOrder.globalId}</p></div>}
+                {previewOrder.email && <div className="text-right"><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Email</p><p className="font-bold text-sm break-all">{previewOrder.email}</p></div>}
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-xs sm:text-[13px] border-collapse border border-black">
@@ -1763,10 +1699,12 @@ function AdminDashboard({ user }) {
               <div className="grid grid-cols-2 gap-3 sm:gap-4 text-sm mb-6 sm:mb-8 bg-gray-50 p-4 sm:p-6 rounded-2xl border border-gray-100">
                 <div><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">From Center</p><p className="font-bold text-base sm:text-lg">{previewSendOrder.fromCenter}</p></div>
                 <div className="text-right"><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Chalan No</p><p className="font-bold text-base sm:text-lg">#{previewSendOrder.chalanNo}</p></div>
-                <div><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Date</p><p className="font-bold text-sm">{(previewSendOrder.date || '').split('-').reverse().join('-')}</p></div>
+                <div><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Date</p><p className="font-bold text-sm">{formatDisplayDate(previewSendOrder.date)}</p></div>
                 <div className="text-right"><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">To</p><p className="font-bold text-sm text-blue-600">Swaminarayan Dham</p></div>
                 {previewSendOrder.senderName && <div><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Sender</p><p className="font-bold text-sm">{previewSendOrder.senderName}</p></div>}
                 {previewSendOrder.mobileNumber && <div className="text-right"><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Mobile</p><p className="font-bold text-sm">{previewSendOrder.mobileNumber}</p></div>}
+                {previewSendOrder.globalId && <div><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Global ID</p><p className="font-bold text-sm">{previewSendOrder.globalId}</p></div>}
+                {previewSendOrder.email && <div className="text-right"><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Email</p><p className="font-bold text-sm break-all">{previewSendOrder.email}</p></div>}
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-xs sm:text-[13px] border-collapse border border-black">
@@ -1853,102 +1791,439 @@ function AdminDashboard({ user }) {
               </div>
 
               <div className="p-5">
-                {mailStep === 'confirm' && (() => {
+                {(() => {
                   const { order, type } = mailModal;
-                  const pastEmail = order.email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(order.email) ? order.email : null;
                   const targetLabel = type === 'request'
                     ? order.center
                     : type === 'send'
                       ? order.fromCenter
-                      : order.title;
+                      : hydrateReport(order).monthLabel;
+
                   return (
                     <div className="space-y-4">
                       <p className="text-gray-300 text-sm">
-                        Send email for <span className="font-bold text-white">
-                          {targetLabel}
-                        </span>
+                        Send email for <span className="font-bold text-white">{targetLabel}</span>
                         {type === 'report' ? (
-                          <span className="text-blue-400 font-bold"> — {order.rangeLabel}</span>
+                          <span className="text-blue-400 font-bold"> — {hydrateReport(order).rangeLabel}</span>
                         ) : (
                           <span> — Chalan <span className="text-blue-400 font-bold">#{order.chalanNo}</span></span>
                         )}
                       </p>
-                      {pastEmail ? (
+
+                      {type === 'report' ? (
                         <>
-                          <div className="bg-blue-500/10 border border-blue-500/30 rounded-xl p-4">
-                            <p className="text-[11px] text-blue-400 font-bold uppercase tracking-widest mb-1">Past Mail ID</p>
-                            <p className="text-white font-bold text-sm break-all">{pastEmail}</p>
+                          <div>
+                            <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Default Email</label>
+                            <select
+                              className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-blue-500/70 transition-all text-sm"
+                              value={selectedReportEmail}
+                              onChange={e => {
+                                setSelectedReportEmail(e.target.value);
+                                setCustomEmailError('');
+                              }}
+                            >
+                              {REPORT_DEFAULT_EMAILS.map((email) => (
+                                <option key={email} value={email}>{email}</option>
+                              ))}
+                              <option value="custom">Custom Email</option>
+                            </select>
                           </div>
-                          <p className="text-gray-400 text-sm text-center">Send to this past email address?</p>
-                          <div className="grid grid-cols-2 gap-3">
-                            <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
-                              disabled={mailSending}
-                              onClick={() => handleMailModalConfirm(true)}
-                              className="bg-gradient-to-r from-green-500 to-green-600 text-white py-3 rounded-xl text-sm font-bold flex items-center justify-center gap-2 shadow-lg shadow-green-500/20 disabled:opacity-50">
-                              {mailSending ? <Loader2 size={16} className="animate-spin" /> : <Check size={16} />} Yes, Send
-                            </motion.button>
-                            <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
-                              disabled={mailSending}
-                              onClick={() => handleMailModalConfirm(false)}
-                              className="bg-white/5 hover:bg-white/10 text-gray-300 py-3 rounded-xl text-sm font-bold flex items-center justify-center gap-2 border border-white/10 disabled:opacity-50">
-                              <X size={16} /> No
-                            </motion.button>
-                          </div>
+                          {selectedReportEmail === 'custom' && (
+                            <div>
+                              <div className="relative">
+                                <Mail className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" size={16} />
+                                <input
+                                  type="email"
+                                  placeholder="example@email.com"
+                                  className={`w-full p-3 pl-9 bg-[#252525] border rounded-xl text-white outline-none focus:border-blue-500/70 transition-all text-sm placeholder-gray-500 ${customEmailError ? 'border-red-500/60' : 'border-white/10'}`}
+                                  value={customEmail}
+                                  onChange={e => { setCustomEmail(e.target.value); setCustomEmailError(''); }}
+                                  autoFocus
+                                />
+                              </div>
+                              {customEmailError && <p className="text-red-400 text-xs mt-1.5 pl-1">{customEmailError}</p>}
+                            </div>
+                          )}
                         </>
                       ) : (
-                        <>
-                          <div className="bg-gray-500/10 border border-gray-500/20 rounded-xl p-3 text-center">
-                            <p className="text-gray-500 text-xs">No past email found for this entry.</p>
+                        <div>
+                          <div className="relative">
+                            <Mail className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" size={16} />
+                            <input
+                              type="email"
+                              placeholder="example@email.com"
+                              className={`w-full p-3 pl-9 bg-[#252525] border rounded-xl text-white outline-none focus:border-blue-500/70 transition-all text-sm placeholder-gray-500 ${customEmailError ? 'border-red-500/60' : 'border-white/10'}`}
+                              value={customEmail}
+                              onChange={e => { setCustomEmail(e.target.value); setCustomEmailError(''); }}
+                              autoFocus
+                            />
                           </div>
-                          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
-                            onClick={() => setMailStep('custom')}
-                            className="w-full bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 py-3 rounded-xl text-sm font-bold flex items-center justify-center gap-2 border border-blue-500/20">
-                            <Mail size={16} /> Enter Email Address
-                          </motion.button>
-                        </>
+                          {customEmailError && <p className="text-red-400 text-xs mt-1.5 pl-1">{customEmailError}</p>}
+                        </div>
                       )}
+
+                      <div className="rounded-xl border border-white/10 bg-white/5 p-3 text-xs text-gray-400">
+                        CC: {DEFAULT_CC_EMAIL}<br />
+                        BCC: {DEFAULT_BCC_EMAIL}
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-3">
+                        <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
+                          onClick={closeMailModal}
+                          className="bg-white/5 hover:bg-white/10 text-gray-300 py-3 rounded-xl text-sm font-bold flex items-center justify-center gap-2 border border-white/10">
+                          <X size={16} /> Cancel
+                        </motion.button>
+                        <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
+                          disabled={mailSending}
+                          onClick={handleMailSend}
+                          className="bg-gradient-to-r from-blue-500 to-blue-600 text-white py-3 rounded-xl text-sm font-bold flex items-center justify-center gap-2 shadow-lg shadow-blue-500/20 disabled:opacity-50">
+                          {mailSending ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />} Send Mail
+                        </motion.button>
+                      </div>
                     </div>
                   );
                 })()}
-
-                {mailStep === 'custom' && (
-                  <div className="space-y-4">
-                    <p className="text-gray-300 text-sm">Enter a custom email address to send the mail:</p>
-                    <div>
-                      <div className="relative">
-                        <Mail className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" size={16} />
-                        <input
-                          type="email"
-                          placeholder="example@email.com"
-                          className={`w-full p-3 pl-9 bg-[#252525] border rounded-xl text-white outline-none focus:border-blue-500/70 transition-all text-sm placeholder-gray-500 ${customEmailError ? 'border-red-500/60' : 'border-white/10'}`}
-                          value={customEmail}
-                          onChange={e => { setCustomEmail(e.target.value); setCustomEmailError(''); }}
-                          onKeyDown={e => e.key === 'Enter' && handleCustomEmailSend()}
-                          autoFocus
-                        />
-                      </div>
-                      {customEmailError && <p className="text-red-400 text-xs mt-1.5 pl-1">{customEmailError}</p>}
-                    </div>
-                    <div className="grid grid-cols-2 gap-3">
-                      <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
-                        onClick={() => setMailStep('confirm')}
-                        className="bg-white/5 hover:bg-white/10 text-gray-300 py-3 rounded-xl text-sm font-bold flex items-center justify-center gap-2 border border-white/10">
-                        <ArrowLeft size={16} /> Back
-                      </motion.button>
-                      <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
-                        disabled={mailSending}
-                        onClick={handleCustomEmailSend}
-                        className="bg-gradient-to-r from-blue-500 to-blue-600 text-white py-3 rounded-xl text-sm font-bold flex items-center justify-center gap-2 shadow-lg shadow-blue-500/20 disabled:opacity-50">
-                        {mailSending ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />} Send Mail
-                      </motion.button>
-                    </div>
-                  </div>
-                )}
               </div>
             </motion.div>
           </motion.div>
         )}
       </AnimatePresence>
+    </>
+  );
+}
+
+const createDefaultPurchaseForm = () => ({
+  shopName: '',
+  billNo: '',
+  billDate: new Date().toISOString().split('T')[0],
+  rows: Array.from({ length: 5 }, (_, index) => ({
+    id: index + 1,
+    itemName: '',
+    qty: '',
+    kg: '',
+  })),
+});
+
+function PurchaseAdminPanel({ user }) {
+  const [purchaseForm, setPurchaseForm] = useState(createDefaultPurchaseForm);
+  const [purchases, setPurchases] = useState([]);
+  const [purchaseLoading, setPurchaseLoading] = useState(true);
+  const [purchaseSubmitting, setPurchaseSubmitting] = useState(false);
+  const [purchaseDeleting, setPurchaseDeleting] = useState(null);
+  const [purchaseFilters, setPurchaseFilters] = useState({ date: '', shop: '' });
+
+  const fetchPurchases = async () => {
+    setPurchaseLoading(true);
+    try {
+      const snapshot = await getDocs(query(collection(db, 'purchases'), orderBy('timestamp', 'desc')));
+      setPurchases(snapshot.docs.map((docSnap) => ({ id: docSnap.id, ...docSnap.data() })).filter((item) => !item.is_deleted));
+    } catch (error) {
+      console.warn('Purchase fetch failed:', error);
+      setPurchases([]);
+    }
+    setPurchaseLoading(false);
+  };
+
+  useEffect(() => {
+    const timeoutId = window.setTimeout(() => {
+      fetchPurchases();
+    }, 0);
+
+    return () => window.clearTimeout(timeoutId);
+  }, []);
+
+  const updatePurchaseRow = (id, field, value) => {
+    setPurchaseForm((prev) => ({
+      ...prev,
+      rows: prev.rows.map((row) => (row.id === id ? { ...row, [field]: value } : row)),
+    }));
+  };
+
+  const addPurchaseRow = () => {
+    setPurchaseForm((prev) => ({
+      ...prev,
+      rows: [
+        ...prev.rows,
+        { id: Math.max(...prev.rows.map((row) => row.id), 0) + 1, itemName: '', qty: '', kg: '' },
+      ],
+    }));
+  };
+
+  const removePurchaseRow = (id) => {
+    setPurchaseForm((prev) => ({
+      ...prev,
+      rows: prev.rows.length > 1 ? prev.rows.filter((row) => row.id !== id) : prev.rows,
+    }));
+  };
+
+  const filledRows = purchaseForm.rows.filter((row) => row.itemName.trim());
+
+  const handlePurchaseSubmit = async () => {
+    if (!purchaseForm.shopName.trim()) return alert('Shop name is required.');
+    if (!purchaseForm.billNo.trim()) return alert('Bill number is required.');
+    if (!purchaseForm.billDate) return alert('Bill date is required.');
+    if (filledRows.length === 0) return alert('Add at least one purchased item.');
+
+    setPurchaseSubmitting(true);
+    try {
+      const payload = {
+        type: 'purchase',
+        shopName: purchaseForm.shopName.trim(),
+        billNo: purchaseForm.billNo.trim(),
+        billDate: purchaseForm.billDate,
+        date: purchaseForm.billDate,
+        items: filledRows,
+        totalKg: filledRows.reduce((sum, row) => sum + (parseFloat(row.kg) || parseFloat(row.qty) || 0), 0),
+        timestamp: new Date(),
+        submittedBy: user.username,
+      };
+
+      const docRef = await addDoc(collection(db, 'purchases'), payload);
+      setPurchases((prev) => [{ id: docRef.id, ...payload }, ...prev]);
+      setPurchaseForm(createDefaultPurchaseForm());
+      alert('Purchase entry saved! ✅');
+    } catch (error) {
+      alert(`Purchase Error: ${error.message}`);
+    }
+    setPurchaseSubmitting(false);
+  };
+
+  const handleDeletePurchase = async (purchase) => {
+    if (!window.confirm(`Delete purchase bill ${purchase.billNo} from ${purchase.shopName}?`)) return;
+    setPurchaseDeleting(purchase.id);
+    try {
+      await updateDoc(doc(db, 'purchases', purchase.id), { is_deleted: true });
+      setPurchases((prev) => prev.filter((item) => item.id !== purchase.id));
+    } catch (error) {
+      alert(`Delete Error: ${error.message}`);
+    }
+    setPurchaseDeleting(null);
+  };
+
+  const filteredPurchases = purchases.filter((purchase) => {
+    const dateMatch = purchaseFilters.date ? purchase.billDate === purchaseFilters.date : true;
+    const shopMatch = purchaseFilters.shop
+      ? (purchase.shopName || '').toLowerCase().includes(purchaseFilters.shop.toLowerCase())
+      : true;
+    return dateMatch && shopMatch;
+  });
+
+  return (
+    <>
+      <motion.div
+        initial={{ y: -20, opacity: 0 }}
+        animate={{ y: 0, opacity: 1 }}
+        className="bg-gradient-to-b from-[#1e1e1e] to-[#181818] p-4 sm:p-6 rounded-2xl sm:rounded-3xl border border-white/5 mb-6 sm:mb-8 shadow-xl"
+      >
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <div className="flex items-center gap-2 text-violet-400 font-bold uppercase text-xs tracking-widest">
+              <Box size={16} /> Purchased Material
+            </div>
+            <h2 className="mt-2 text-xl sm:text-2xl font-black text-white">દુકાન માંથી ખરીદેલ માલ</h2>
+            <p className="mt-2 text-sm text-gray-400 max-w-2xl">
+              Admin-only purchase log. These entries are added into report income (આવક).
+            </p>
+          </div>
+          <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }} onClick={() => setPurchaseForm(createDefaultPurchaseForm())}
+            className="text-gray-400 hover:text-white flex items-center justify-center gap-1.5 text-xs font-bold uppercase transition-all bg-white/5 hover:bg-white/10 px-3 py-2 rounded-xl border border-white/10">
+            <Eraser size={14} /> Clear
+          </motion.button>
+        </div>
+
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 mt-6">
+          <div>
+            <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Shop Name *</label>
+            <input
+              className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-violet-500/50 transition-all text-sm"
+              value={purchaseForm.shopName}
+              onChange={(e) => setPurchaseForm((prev) => ({ ...prev, shopName: e.target.value }))}
+              placeholder="દુકાનનું નામ"
+            />
+          </div>
+          <div>
+            <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Bill Number *</label>
+            <input
+              className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-violet-500/50 transition-all text-sm"
+              value={purchaseForm.billNo}
+              onChange={(e) => setPurchaseForm((prev) => ({ ...prev, billNo: e.target.value }))}
+              placeholder="બિલ નંબર"
+            />
+          </div>
+          <div>
+            <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Bill Date *</label>
+            <input
+              type="date"
+              className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-violet-500/50 transition-all text-sm"
+              value={purchaseForm.billDate}
+              onChange={(e) => setPurchaseForm((prev) => ({ ...prev, billDate: e.target.value }))}
+            />
+          </div>
+        </div>
+
+        <div className="mt-5 rounded-2xl border border-white/10 bg-white/5 overflow-hidden">
+          <div className="p-4 border-b border-white/10 flex items-center justify-between">
+            <p className="text-[11px] font-bold uppercase tracking-widest text-gray-500">Purchased Items</p>
+            <span className="text-xs text-violet-300 font-bold">{filledRows.length} rows filled</span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-[#151515]">
+                <tr>
+                  <th className="p-3 text-left text-gray-500 font-bold text-xs uppercase w-10">No</th>
+                  <th className="p-3 text-left text-gray-500 font-bold text-xs uppercase">Item Name</th>
+                  <th className="p-3 text-center text-gray-500 font-bold text-xs uppercase w-24">Qty</th>
+                  <th className="p-3 text-center text-gray-500 font-bold text-xs uppercase w-24">KG</th>
+                  <th className="p-3 w-10" />
+                </tr>
+              </thead>
+              <tbody>
+                {purchaseForm.rows.map((row, index) => (
+                  <tr key={row.id} className={`border-t border-white/5 ${row.itemName ? 'bg-violet-500/5' : ''}`}>
+                    <td className="p-2 text-gray-500 text-center text-xs font-mono">{index + 1}</td>
+                    <td className="p-2">
+                      <input
+                        className="w-full p-2 bg-[#252525] border border-white/5 rounded-lg text-white outline-none focus:border-violet-500/50 text-sm transition-all placeholder-gray-600"
+                        placeholder={`Item ${index + 1}...`}
+                        value={row.itemName}
+                        onChange={(e) => updatePurchaseRow(row.id, 'itemName', e.target.value)}
+                      />
+                    </td>
+                    <td className="p-2">
+                      <input
+                        type="number"
+                        min="0"
+                        className="w-full p-2 bg-[#252525] border border-white/5 rounded-lg text-white outline-none focus:border-violet-500/50 text-sm text-center transition-all"
+                        placeholder="0"
+                        value={row.qty}
+                        onChange={(e) => updatePurchaseRow(row.id, 'qty', e.target.value)}
+                      />
+                    </td>
+                    <td className="p-2">
+                      <input
+                        type="number"
+                        min="0"
+                        className="w-full p-2 bg-[#252525] border border-white/5 rounded-lg text-white outline-none focus:border-violet-500/50 text-sm text-center transition-all"
+                        placeholder="0"
+                        value={row.kg}
+                        onChange={(e) => updatePurchaseRow(row.id, 'kg', e.target.value)}
+                      />
+                    </td>
+                    <td className="p-2 text-center">
+                      <motion.button whileTap={{ scale: 0.9 }} onClick={() => removePurchaseRow(row.id)}
+                        className="text-red-400/40 hover:text-red-400 transition-colors p-1 rounded">
+                        <X size={14} />
+                      </motion.button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="p-3 border-t border-white/5">
+            <motion.button whileHover={{ scale: 1.01 }} whileTap={{ scale: 0.98 }} onClick={addPurchaseRow}
+              className="w-full p-3 bg-[#252525] hover:bg-[#2d2d2d] border border-dashed border-white/10 hover:border-violet-500/30 rounded-xl text-gray-400 hover:text-violet-400 font-bold text-sm flex items-center justify-center gap-2 transition-all">
+              <Plus size={16} /> New Row Umero
+            </motion.button>
+          </div>
+        </div>
+
+        <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={handlePurchaseSubmit}
+          disabled={purchaseSubmitting}
+          className="mt-5 w-full bg-gradient-to-r from-violet-500 to-fuchsia-600 text-white p-4 rounded-xl font-bold shadow-xl shadow-violet-500/20 flex items-center justify-center gap-2 text-sm sm:text-base disabled:opacity-50">
+          {purchaseSubmitting ? <Loader2 size={18} className="animate-spin" /> : <CheckCircle size={18} />} Save Purchase Entry
+        </motion.button>
+      </motion.div>
+
+      <motion.div
+        initial={{ y: 10, opacity: 0 }}
+        animate={{ y: 0, opacity: 1 }}
+        className="bg-gradient-to-b from-[#1e1e1e] to-[#181818] p-4 sm:p-6 rounded-2xl sm:rounded-3xl border border-white/5 shadow-xl"
+      >
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-center gap-2 text-violet-400 font-bold uppercase text-xs tracking-widest">
+            <Search size={16} /> Purchase Log
+          </div>
+          <div className="flex gap-2 sm:gap-3">
+            <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }} onClick={fetchPurchases}
+              className="text-gray-400 hover:text-violet-400 flex items-center justify-center gap-1.5 text-xs font-bold uppercase transition-all bg-white/5 hover:bg-violet-500/10 px-3 py-2 rounded-xl border border-white/10">
+              <RefreshCw size={14} /> Refresh
+            </motion.button>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-5">
+          <input
+            type="date"
+            className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-violet-500/50 transition-all text-sm"
+            value={purchaseFilters.date}
+            onChange={(e) => setPurchaseFilters((prev) => ({ ...prev, date: e.target.value }))}
+          />
+          <input
+            placeholder="Shop name..."
+            className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-violet-500/50 transition-all text-sm placeholder-gray-500"
+            value={purchaseFilters.shop}
+            onChange={(e) => setPurchaseFilters((prev) => ({ ...prev, shop: e.target.value }))}
+          />
+        </div>
+
+        {purchaseLoading ? (
+          <div className="flex justify-center py-20">
+            <motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: "linear" }}>
+              <Loader2 size={48} className="text-violet-500" />
+            </motion.div>
+          </div>
+        ) : filteredPurchases.length > 0 ? (
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 mt-6">
+            {filteredPurchases.map((purchase) => (
+              <div key={purchase.id} className="bg-[#181818] rounded-2xl border border-white/5 overflow-hidden">
+                <div className="p-4 border-b border-white/5 bg-gradient-to-r from-violet-500/10 to-fuchsia-500/5">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="font-black text-white text-sm">{purchase.shopName}</p>
+                      <p className="text-xs text-violet-300 mt-1">Bill #{purchase.billNo}</p>
+                    </div>
+                    <p className="text-xs text-gray-400">{formatDisplayDate(purchase.billDate)}</p>
+                  </div>
+                </div>
+                <div className="p-4 space-y-3">
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="bg-[#252525] p-3 rounded-xl text-center border border-white/5">
+                      <p className="text-[10px] text-gray-500 uppercase font-bold">Items</p>
+                      <p className="font-black text-white">{(purchase.items || []).length}</p>
+                    </div>
+                    <div className="bg-violet-500/10 p-3 rounded-xl text-center border border-violet-500/20">
+                      <p className="text-[10px] text-violet-300 uppercase font-bold">KG</p>
+                      <p className="font-black text-violet-200">{formatMetric(purchase.totalKg)}</p>
+                    </div>
+                  </div>
+                  <div className="rounded-xl border border-white/5 bg-[#252525] p-3 text-xs text-gray-400 space-y-1">
+                    {(purchase.items || []).slice(0, 3).map((item, index) => (
+                      <p key={`${purchase.id}-${index}`} className="truncate">
+                        <span className="font-bold text-white">{item.itemName}</span> - {item.kg || item.qty || 0}
+                      </p>
+                    ))}
+                    {(purchase.items || []).length > 3 && (
+                      <p className="text-violet-300 font-bold">+ {(purchase.items || []).length - 3} more items</p>
+                    )}
+                  </div>
+                  <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={() => handleDeletePurchase(purchase)}
+                    disabled={purchaseDeleting === purchase.id}
+                    className="w-full bg-red-500/10 hover:bg-red-500/20 text-red-400 p-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-all border border-red-500/20 disabled:opacity-50">
+                    {purchaseDeleting === purchase.id ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />} Delete
+                  </motion.button>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="text-center py-20">
+            <Box size={64} className="text-gray-600 mx-auto mb-4" />
+            <p className="text-gray-400 text-lg font-bold">No purchase entries found</p>
+            <p className="text-gray-500 text-sm mt-2">Saved purchase entries appear here and feed into report income.</p>
+          </motion.div>
+        )}
+      </motion.div>
     </>
   );
 }
@@ -2337,15 +2612,14 @@ function UserHub({ user }) {
             <div className="w-14 h-14 sm:w-16 sm:h-16 bg-gradient-to-br from-orange-500 to-orange-700 rounded-2xl flex items-center justify-center mb-5 shadow-lg shadow-orange-500/30">
               <ShoppingCart size={28} className="text-white" />
             </div>
-            <h3 className="text-lg sm:text-xl font-black text-white uppercase tracking-tight mb-2 group-hover:text-orange-400 transition-colors">
-              Request Materials
+            <h3 className="text-lg sm:text-xl font-black text-white tracking-tight mb-2 group-hover:text-orange-400 transition-colors">
+              કોઠારમાંથી વસ્તુ મંગાવવા માટે
             </h3>
             <p className="text-[11px] sm:text-sm text-gray-500 leading-relaxed mb-5">
-              Kothar mathi items / vastuon ni request karo.<br />
-              Chalan auto-generate thase.
+              કોઠારમાંથી વસ્તુ મંગાવવા માટે અહીં ક્લિક કરો
             </p>
-            <div className="inline-flex items-center gap-2 text-orange-500 font-bold text-xs sm:text-sm uppercase tracking-wider bg-orange-500/10 px-4 py-2 rounded-xl border border-orange-500/20">
-              Form Kholo <ArrowLeft size={14} className="rotate-180" />
+            <div className="inline-flex items-center gap-2 text-orange-500 font-bold text-xs sm:text-sm tracking-wider bg-orange-500/10 px-4 py-2 rounded-xl border border-orange-500/20">
+              અહીં ક્લિક કરો <ArrowLeft size={14} className="rotate-180" />
             </div>
           </div>
         </motion.button>
@@ -2363,15 +2637,14 @@ function UserHub({ user }) {
             <div className="w-14 h-14 sm:w-16 sm:h-16 bg-gradient-to-br from-blue-500 to-blue-700 rounded-2xl flex items-center justify-center mb-5 shadow-lg shadow-blue-500/30">
               <Send size={28} className="text-white" />
             </div>
-            <h3 className="text-lg sm:text-xl font-black text-white uppercase tracking-tight mb-2 group-hover:text-blue-400 transition-colors">
-              Send Materials
+            <h3 className="text-lg sm:text-xl font-black text-white tracking-tight mb-2 group-hover:text-blue-400 transition-colors">
+              વસ્તુ મોકલવા માટે
             </h3>
             <p className="text-[11px] sm:text-sm text-gray-500 leading-relaxed mb-5">
-              Center mathi Swaminarayan Dham ne vastuon moklo.<br />
-              Seva chalan banavo.
+              આપના સેન્ટરમાંથી વસ્તુ મુખ્ય કોઠાર, સ્વામિનારાયણ ધામ મોકલવા માટે અહીં ક્લિક કરશો.
             </p>
-            <div className="inline-flex items-center gap-2 text-blue-500 font-bold text-xs sm:text-sm uppercase tracking-wider bg-blue-500/10 px-4 py-2 rounded-xl border border-blue-500/20">
-              Form Kholo <ArrowLeft size={14} className="rotate-180" />
+            <div className="inline-flex items-center gap-2 text-blue-500 font-bold text-xs sm:text-sm tracking-wider bg-blue-500/10 px-4 py-2 rounded-xl border border-blue-500/20">
+              અહીં ક્લિક કરો <ArrowLeft size={14} className="rotate-180" />
             </div>
           </div>
         </motion.button>
@@ -2393,6 +2666,7 @@ function SendDashboard({ user, onBack }) {
     senderName: '',
     mobileNumber: '',
     post: '',
+    globalId: '',
     email: '',
   });
   const [rows, setRows] = useState(
@@ -2427,39 +2701,41 @@ function SendDashboard({ user, onBack }) {
   const removeRow = (id) => { if (rows.length > 1) setRows(prev => prev.filter(r => r.id !== id)); };
 
   const filledRows = rows.filter(r => r.itemName.trim());
-  const effectiveCenter = formData.fromCenter === 'Other' ? formData.fromCenterOther : formData.fromCenter;
+  const effectiveCenter = formData.fromCenter === 'Other' ? formData.fromCenterOther.trim() : formData.fromCenter;
 
   const handleSubmit = async () => {
     setLoading(true);
     try {
-      const docRef = await addDoc(collection(db, 'send-orders'), {
+      const payload = {
         type: 'send',
         chalanNo: formData.chalanNo,
         date: formData.date,
         fromCenter: effectiveCenter,
         toCenter: 'Swaminarayan Dham Center',
-        senderName: formData.senderName,
-        mobileNumber: formData.mobileNumber,
-        post: formData.post,
+        senderName: formData.senderName.trim(),
+        mobileNumber: formData.mobileNumber.trim(),
+        post: formData.post.trim(),
+        globalId: formData.globalId.trim(),
         email: formData.email.trim(),
         items: filledRows,
         timestamp: new Date(),
         submittedBy: user.username,
-      });
+      };
+      const docRef = await addDoc(collection(db, 'send-orders'), payload);
       setStep('done');
-      const emailInput = formData.email.trim();
-      const isValidEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailInput);
-      const recipientEmail = isValidEmail ? emailInput : 'jakasaniyaparthiv@gmail.com';
-      const formattedDate = formData.date.split('-').reverse().join('-');
-      emailjs.send('service_es31jwq', 'template_0xnrlbm', {
-        email: recipientEmail,
+      sendEmailWithConfig(SEND_MAIL_CONFIG, {
+        email: formData.email.trim(),
+        cc_email: DEFAULT_CC_EMAIL,
+        bcc_email: DEFAULT_BCC_EMAIL,
         to_name: effectiveCenter,
         chalan_no: formData.chalanNo,
-        date: formattedDate,
-        sender: formData.senderName,
+        date: formatDisplayDate(formData.date),
+        sender: formData.senderName.trim(),
+        receiver: formData.senderName.trim(),
+        global_id: formData.globalId.trim(),
         order_id: formData.chalanNo,
         pdf_link: `${window.location.origin}?sendOrderId=${docRef.id}`,
-      }, '_E6nBjN6vCMGEW6I8').catch(err => console.warn('Email send failed:', err));
+      }).catch(err => console.warn('Email send failed:', err));
     } catch (e) { alert('Error: ' + e.message); }
     setLoading(false);
   };
@@ -2468,6 +2744,8 @@ function SendDashboard({ user, onBack }) {
     if (!formData.fromCenter) return alert('Center select karo!');
     if (formData.fromCenter === 'Other' && !formData.fromCenterOther.trim()) return alert('Center name likho!');
     if (!formData.senderName.trim() || !formData.mobileNumber.trim()) return alert('Sender Name ane Mobile fill karo!');
+    if (!isDigitsOnly(formData.globalId)) return alert('Global ID ma only number allowed.');
+    if (!isValidEmail(formData.email)) return alert('Valid email fill karo!');
     if (filledRows.length === 0) return alert('Ochha me ek item add karo!');
     setStep('review');
   };
@@ -2489,7 +2767,7 @@ function SendDashboard({ user, onBack }) {
           <p className="text-gray-500 mb-8 text-sm sm:text-base">
             Chalan No: <span className="text-blue-400 font-bold">#{formData.chalanNo}</span><br />
             From: <span className="text-white font-bold">{effectiveCenter}</span><br />
-            Items: <span className="text-green-400 font-bold">{filledRows.length}</span>
+            Email: <span className="text-green-400 font-bold">{formData.email}</span>
           </p>
           <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={onBack}
             className="w-full bg-gradient-to-r from-blue-500 to-blue-600 text-white py-4 rounded-xl font-bold flex justify-center items-center gap-2 shadow-xl shadow-blue-500/20">
@@ -2515,9 +2793,10 @@ function SendDashboard({ user, onBack }) {
             <div><p className="text-[10px] text-gray-500 font-bold uppercase mb-0.5">From Center</p><p className="font-bold text-white">{effectiveCenter}</p></div>
             <div className="text-right"><p className="text-[10px] text-gray-500 font-bold uppercase mb-0.5">To</p><p className="font-bold text-blue-400">Swaminarayan Dham</p></div>
             <div><p className="text-[10px] text-gray-500 font-bold uppercase mb-0.5">Chalan No</p><p className="font-bold text-blue-400">#{formData.chalanNo}</p></div>
-            <div className="text-right"><p className="text-[10px] text-gray-500 font-bold uppercase mb-0.5">Date</p><p className="font-bold text-white">{formData.date.split('-').reverse().join('-')}</p></div>
+            <div className="text-right"><p className="text-[10px] text-gray-500 font-bold uppercase mb-0.5">Date</p><p className="font-bold text-white">{formatDisplayDate(formData.date)}</p></div>
             <div><p className="text-[10px] text-gray-500 font-bold uppercase mb-0.5">Sender</p><p className="font-bold text-white">{formData.senderName}</p></div>
-            <div className="text-right"><p className="text-[10px] text-gray-500 font-bold uppercase mb-0.5">Total Items</p><p className="font-bold text-green-400">{filledRows.length}</p></div>
+            <div className="text-right"><p className="text-[10px] text-gray-500 font-bold uppercase mb-0.5">Global ID</p><p className="font-bold text-green-400">{formData.globalId}</p></div>
+            <div className="col-span-2"><p className="text-[10px] text-gray-500 font-bold uppercase mb-0.5">Email</p><p className="font-bold text-white break-all">{formData.email}</p></div>
           </div>
           <div className="overflow-x-auto mb-6 max-h-60 overflow-y-auto rounded-xl border border-white/5 bg-[#151515] custom-scroll">
             <table className="w-full text-sm">
@@ -2525,7 +2804,8 @@ function SendDashboard({ user, onBack }) {
                 <tr>
                   <th className="p-3 text-left text-gray-400 font-bold text-xs uppercase w-10">No</th>
                   <th className="p-3 text-left text-gray-400 font-bold text-xs uppercase">Item Name</th>
-                  <th className="p-3 text-center text-gray-400 font-bold text-xs uppercase w-28">KG</th>
+                  <th className="p-3 text-center text-gray-400 font-bold text-xs uppercase w-20">Qty</th>
+                  <th className="p-3 text-center text-gray-400 font-bold text-xs uppercase w-20">KG</th>
                 </tr>
               </thead>
               <tbody>
@@ -2533,6 +2813,7 @@ function SendDashboard({ user, onBack }) {
                   <tr key={row.id} className="border-t border-white/5">
                     <td className="p-3 text-gray-500 text-center text-xs">{i + 1}</td>
                     <td className="p-3 font-medium text-white">{row.itemName}</td>
+                    <td className="p-3 text-center font-bold text-blue-300">{row.qty || '-'}</td>
                     <td className="p-3 text-center font-bold text-blue-400">{row.kg || '-'}</td>
                   </tr>
                 ))}
@@ -2561,7 +2842,7 @@ function SendDashboard({ user, onBack }) {
         <h2 className="text-lg sm:text-xl font-bold mb-4 text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-blue-600 flex items-center gap-2">
           <Send size={22} /> Center thi Kothar ne Moko
         </h2>
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
             <label className="text-[10px] text-gray-500 font-bold uppercase block mb-1">Chalan No (Auto)</label>
             <div className="w-full p-3 bg-[#1a1a1a] border border-blue-500/30 rounded-xl text-blue-400 font-black text-sm flex items-center gap-2">
@@ -2573,11 +2854,11 @@ function SendDashboard({ user, onBack }) {
             <input type="date" required className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none text-sm"
               value={formData.date} onChange={e => setFormData(p => ({ ...p, date: e.target.value }))} />
           </div>
-          <div className="col-span-2">
+          <div className="col-span-1 sm:col-span-2">
             <label className="text-[10px] text-gray-500 font-bold uppercase block mb-1">To (Fixed)</label>
             <div className="w-full p-3 bg-[#1a1a1a] border border-blue-500/20 rounded-xl text-blue-300 font-bold text-sm">🏛 Swaminarayan Dham Center</div>
           </div>
-          <div className="col-span-2">
+          <div className="col-span-1 sm:col-span-2">
             <label className="text-[10px] text-gray-500 font-bold uppercase block mb-1">From Center *</label>
             <select required className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none text-sm appearance-none cursor-pointer"
               value={formData.fromCenter} onChange={e => setFormData(p => ({ ...p, fromCenter: e.target.value }))}>
@@ -2586,33 +2867,38 @@ function SendDashboard({ user, onBack }) {
             </select>
           </div>
           {formData.fromCenter === 'Other' && (
-            <div className="col-span-2">
-              <label className="text-[10px] text-gray-500 font-bold uppercase block mb-1">Center Name Likho *</label>
+            <div className="col-span-1 sm:col-span-2">
+              <label className="text-[10px] text-gray-500 font-bold uppercase block mb-1">Center Name *</label>
               <input className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none text-sm focus:border-blue-500/50 transition-all"
                 placeholder="Center name..." value={formData.fromCenterOther} onChange={e => setFormData(p => ({ ...p, fromCenterOther: e.target.value }))} />
             </div>
           )}
-          <div className="col-span-2">
+          <div className="col-span-1 sm:col-span-2">
             <label className="text-[10px] text-gray-500 font-bold uppercase block mb-1">Sender Name *</label>
-            <input required className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none text-sm focus:border-blue-500/50 transition-all"
-              placeholder="Sender Full Name" value={formData.senderName} onChange={e => setFormData(p => ({ ...p, senderName: e.target.value }))} />
+            <input className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none text-sm focus:border-blue-500/50 transition-all"
+              placeholder="મોકલનારનું નામ" value={formData.senderName} onChange={e => setFormData(p => ({ ...p, senderName: e.target.value }))} />
           </div>
           <div>
-            <label className="text-[10px] text-gray-500 font-bold uppercase block mb-1">Mobile *</label>
-            <input required className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none text-sm focus:border-blue-500/50 transition-all"
-              placeholder="Mobile No." value={formData.mobileNumber} onChange={e => setFormData(p => ({ ...p, mobileNumber: e.target.value }))} />
+            <label className="text-[10px] text-gray-500 font-bold uppercase block mb-1">Mobile Number *</label>
+            <input className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none text-sm focus:border-blue-500/50 transition-all"
+              placeholder="મોબાઇલ નંબર" value={formData.mobileNumber} onChange={e => setFormData(p => ({ ...p, mobileNumber: e.target.value }))} />
           </div>
           <div>
             <label className="text-[10px] text-gray-500 font-bold uppercase block mb-1">Post</label>
             <input className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none text-sm focus:border-blue-500/50 transition-all"
-              placeholder="Designation / Post (optional)" value={formData.post} onChange={e => setFormData(p => ({ ...p, post: e.target.value }))} />
+              placeholder="પદ (optional)" value={formData.post} onChange={e => setFormData(p => ({ ...p, post: e.target.value }))} />
           </div>
-          <div className="col-span-2">
-            <label className="text-[10px] text-gray-500 font-bold uppercase block mb-1">Email (optional)</label>
+          <div>
+            <label className="text-[10px] text-gray-500 font-bold uppercase block mb-1">Global ID *</label>
+            <input inputMode="numeric" className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none text-sm focus:border-blue-500/50 transition-all"
+              placeholder="Number only" value={formData.globalId} onChange={e => setFormData(p => ({ ...p, globalId: e.target.value.replace(/\D/g, '') }))} />
+          </div>
+          <div>
+            <label className="text-[10px] text-gray-500 font-bold uppercase block mb-1">Email *</label>
             <input
               type="email"
               className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none text-sm focus:border-blue-500/50 transition-all"
-              placeholder="Notification email (leave blank for default)"
+              placeholder="you@example.com"
               value={formData.email}
               onChange={e => setFormData(p => ({ ...p, email: e.target.value }))}
             />
@@ -2635,7 +2921,8 @@ function SendDashboard({ user, onBack }) {
               <tr>
                 <th className="p-3 text-left text-gray-500 font-bold text-xs uppercase w-10">No</th>
                 <th className="p-3 text-left text-gray-500 font-bold text-xs uppercase">Item Name</th>
-                <th className="p-3 text-center text-gray-500 font-bold text-xs uppercase w-28">KG</th>
+                <th className="p-3 text-center text-gray-500 font-bold text-xs uppercase w-20">Qty</th>
+                <th className="p-3 text-center text-gray-500 font-bold text-xs uppercase w-20">KG</th>
                 <th className="p-3 w-10"></th>
               </tr>
             </thead>
@@ -2649,6 +2936,13 @@ function SendDashboard({ user, onBack }) {
                       placeholder={`Item ${idx + 1}...`}
                       value={row.itemName}
                       onChange={e => updateRow(row.id, 'itemName', e.target.value)}
+                    />
+                  </td>
+                  <td className="p-2">
+                    <input type="number" min="0"
+                      className="w-full p-2 bg-[#252525] border border-white/5 rounded-lg text-white outline-none focus:border-blue-500/50 text-sm text-center transition-all"
+                      placeholder="0" value={row.qty}
+                      onChange={e => updateRow(row.id, 'qty', e.target.value)}
                     />
                   </td>
                   <td className="p-2">
@@ -2692,11 +2986,12 @@ function UserDashboard({ user, onBack = null }) {
     chalanNo: '',
     date: new Date().toISOString().split('T')[0],
     center: '',
-    centerContactName: '',
-    centerPhone: '',
+    centerOther: '',
     senderName: '',
     mobileNumber: '',
-    post: ''
+    post: '',
+    globalId: '',
+    email: '',
   });
   const [cart, setCart] = useState([]);
   const [openCategory, setOpenCategory] = useState(null);
@@ -2725,12 +3020,7 @@ function UserDashboard({ user, onBack = null }) {
   }, []);
 
   const handleCenterChange = (center) => {
-    const entry = centerData.find(c => c.center === center);
-    if (entry && entry.name) {
-      setFormData(prev => ({ ...prev, center, centerContactName: entry.name, centerPhone: entry.phone }));
-    } else {
-      setFormData(prev => ({ ...prev, center, centerContactName: '', centerPhone: '' }));
-    }
+    setFormData((prev) => ({ ...prev, center }));
   };
 
   const updateQuantity = (itemName, category, unit, qty) => {
@@ -2745,18 +3035,35 @@ function UserDashboard({ user, onBack = null }) {
     setLoading(true);
     try {
       const { totalKg } = calculateTotals(cart);
-      const docRef = await addDoc(collection(db, "orders"), {
-        ...formData, items: cart, totalKg, timestamp: new Date(), submittedBy: user.username
-      });
-      const formattedDate = formData.date.split('-').reverse().join('-');
-      setLoading(false);
+      const payload = {
+        ...formData,
+        center: formData.center === 'Other' ? formData.centerOther.trim() : formData.center,
+        senderName: formData.senderName.trim(),
+        mobileNumber: formData.mobileNumber.trim(),
+        post: formData.post.trim(),
+        globalId: formData.globalId.trim(),
+        email: formData.email.trim(),
+        items: cart,
+        totalKg,
+        timestamp: new Date(),
+        submittedBy: user.username,
+      };
+      const docRef = await addDoc(collection(db, "orders"), payload);
       setStep('download');
-      emailjs.send("service_1ug481j", "template_djuyjcq", {
-        email: 'jakasaniyaparthiv@gmail.com',
-        from_name: formData.center, chalan_no: formData.chalanNo, date: formattedDate,
-        receiver: formData.senderName, pdf_link: `${window.location.origin}?orderId=${docRef.id}`
+      sendEmailWithConfig(REQUEST_MAIL_CONFIG, {
+        email: formData.email.trim(),
+        cc_email: DEFAULT_CC_EMAIL,
+        bcc_email: DEFAULT_BCC_EMAIL,
+        from_name: payload.center,
+        chalan_no: formData.chalanNo,
+        date: formatDisplayDate(formData.date),
+        receiver: formData.senderName.trim(),
+        sender: formData.senderName.trim(),
+        global_id: formData.globalId.trim(),
+        pdf_link: `${window.location.origin}?orderId=${docRef.id}`,
       }).catch(err => console.warn('Email send failed:', err));
     } catch (error) { alert(`❌ Error: ${error.message}`); setLoading(false); }
+    setLoading(false);
   };
 
   // Filter items based on search
@@ -2767,8 +3074,6 @@ function UserDashboard({ user, onBack = null }) {
         return acc;
       }, {})
     : categories;
-
-  const centerEntry = centerData.find(c => c.center === formData.center);
 
   if (step === 'form') {
     return (
@@ -2791,7 +3096,7 @@ function UserDashboard({ user, onBack = null }) {
           <h2 className="text-lg sm:text-xl font-bold mb-4 sm:mb-6 text-transparent bg-clip-text bg-gradient-to-r from-orange-400 to-orange-600 flex items-center gap-2">
             <FileText size={24} /> New Stock Request
           </h2>
-          <div className="grid grid-cols-2 gap-3 sm:gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4">
             {/* Chalan No - Auto Generated */}
             <div>
               <label className="text-[10px] text-gray-500 font-bold uppercase block mb-1">Chalan No (Auto)</label>
@@ -2811,7 +3116,7 @@ function UserDashboard({ user, onBack = null }) {
               />
             </div>
             {/* Center Dropdown */}
-            <div className="col-span-2">
+            <div className="col-span-1 sm:col-span-2">
               <label className="text-[10px] text-gray-500 font-bold uppercase block mb-1">Center *</label>
               <select
                 className="w-full p-3 sm:p-3.5 bg-[#252525] border border-white/10 rounded-xl sm:rounded-2xl text-white outline-none transition-all text-sm appearance-none cursor-pointer"
@@ -2823,65 +3128,34 @@ function UserDashboard({ user, onBack = null }) {
                 {centerData.map(c => <option key={c.center} value={c.center}>{c.center}</option>)}
               </select>
             </div>
-            {/* Contact info — shown after center selection */}
-            {formData.center && (
-              centerEntry?.name ? (
-                <>
-                  <div>
-                    <label className="text-[10px] text-gray-500 font-bold uppercase block mb-1">Contact Name (Auto)</label>
-                    <div className="w-full p-3 sm:p-3.5 bg-[#1a1a1a] border border-green-500/20 rounded-xl sm:rounded-2xl text-green-400 font-medium text-sm flex items-center gap-2">
-                      <CheckCircle size={14} className="text-green-500 flex-shrink-0" />{formData.centerContactName}
-                    </div>
-                  </div>
-                  <div>
-                    <label className="text-[10px] text-gray-500 font-bold uppercase block mb-1">Contact Phone (Auto)</label>
-                    <div className="w-full p-3 sm:p-3.5 bg-[#1a1a1a] border border-green-500/20 rounded-xl sm:rounded-2xl text-green-400 font-medium text-sm flex items-center gap-2">
-                      <CheckCircle size={14} className="text-green-500 flex-shrink-0" />{formData.centerPhone}
-                    </div>
-                  </div>
-                </>
-              ) : (
-                <>
-                  <div>
-                    <label className="text-[10px] text-gray-500 font-bold uppercase block mb-1">Contact Name</label>
-                    <input
-                      className="w-full p-3 sm:p-3.5 bg-[#252525] border border-white/10 rounded-xl sm:rounded-2xl text-white outline-none focus:border-orange-500/50 transition-all text-sm"
-                      placeholder="Contact Person Name"
-                      value={formData.centerContactName}
-                      onChange={e => setFormData({...formData, centerContactName: e.target.value})}
-                    />
-                  </div>
-                  <div>
-                    <label className="text-[10px] text-gray-500 font-bold uppercase block mb-1">Contact Phone</label>
-                    <input
-                      className="w-full p-3 sm:p-3.5 bg-[#252525] border border-white/10 rounded-xl sm:rounded-2xl text-white outline-none focus:border-orange-500/50 transition-all text-sm"
-                      placeholder="Phone Number"
-                      value={formData.centerPhone}
-                      onChange={e => setFormData({...formData, centerPhone: e.target.value})}
-                    />
-                  </div>
-                </>
-              )
+            {formData.center === 'Other' && (
+              <div className="col-span-1 sm:col-span-2">
+                <label className="text-[10px] text-gray-500 font-bold uppercase block mb-1">Center Name *</label>
+                <input
+                  className="w-full p-3 sm:p-3.5 bg-[#252525] border border-white/10 rounded-xl sm:rounded-2xl text-white outline-none focus:border-orange-500/50 transition-all text-sm"
+                  placeholder="Center Name"
+                  value={formData.centerOther}
+                  onChange={e => setFormData({ ...formData, centerOther: e.target.value })}
+                />
+              </div>
             )}
-            {/* Sender Name */}
-            <div className="col-span-2">
+            <div className="col-span-1 sm:col-span-2">
               <label className="text-[10px] text-gray-500 font-bold uppercase block mb-1">Sender Name *</label>
               <input
                 className="w-full p-3 sm:p-3.5 bg-[#252525] border border-white/10 rounded-xl sm:rounded-2xl text-white outline-none focus:border-orange-500/50 transition-all text-sm"
-                placeholder="Sender Full Name"
+                placeholder="મોકલનારનું નામ"
                 value={formData.senderName}
-                onChange={e => setFormData({...formData, senderName: e.target.value})}
+                onChange={e => setFormData({ ...formData, senderName: e.target.value })}
                 required
               />
             </div>
-            {/* Mobile Number */}
             <div>
               <label className="text-[10px] text-gray-500 font-bold uppercase block mb-1">Mobile Number *</label>
               <input
                 className="w-full p-3 sm:p-3.5 bg-[#252525] border border-white/10 rounded-xl sm:rounded-2xl text-white outline-none focus:border-orange-500/50 transition-all text-sm"
-                placeholder="Mobile No."
+                placeholder="મોબાઇલ નંબર"
                 value={formData.mobileNumber}
-                onChange={e => setFormData({...formData, mobileNumber: e.target.value})}
+                onChange={e => setFormData({ ...formData, mobileNumber: e.target.value })}
                 required
               />
             </div>
@@ -2893,6 +3167,26 @@ function UserDashboard({ user, onBack = null }) {
                 placeholder="Designation / Post (optional)"
                 value={formData.post}
                 onChange={e => setFormData({...formData, post: e.target.value})}
+              />
+            </div>
+            <div>
+              <label className="text-[10px] text-gray-500 font-bold uppercase block mb-1">Global ID *</label>
+              <input
+                inputMode="numeric"
+                className="w-full p-3 sm:p-3.5 bg-[#252525] border border-white/10 rounded-xl sm:rounded-2xl text-white outline-none focus:border-orange-500/50 transition-all text-sm"
+                placeholder="Number only"
+                value={formData.globalId}
+                onChange={e => setFormData({ ...formData, globalId: e.target.value.replace(/\D/g, '') })}
+              />
+            </div>
+            <div className="col-span-1 sm:col-span-2">
+              <label className="text-[10px] text-gray-500 font-bold uppercase block mb-1">Email *</label>
+              <input
+                type="email"
+                className="w-full p-3 sm:p-3.5 bg-[#252525] border border-white/10 rounded-xl sm:rounded-2xl text-white outline-none focus:border-orange-500/50 transition-all text-sm"
+                placeholder="you@example.com"
+                value={formData.email}
+                onChange={e => setFormData({ ...formData, email: e.target.value })}
               />
             </div>
           </div>
@@ -3020,7 +3314,10 @@ function UserDashboard({ user, onBack = null }) {
             whileTap={{ scale: 0.98 }}
             onClick={() => {
               if (!formData.center) return alert("Center select karo!");
+              if (formData.center === 'Other' && !formData.centerOther.trim()) return alert("Center name likho!");
               if (!formData.senderName || !formData.mobileNumber) return alert("Sender Name ane Mobile Number fill karo!");
+              if (!isDigitsOnly(formData.globalId)) return alert("Global ID ma only number allowed.");
+              if (!isValidEmail(formData.email)) return alert("Valid email fill karo!");
               if (cart.length === 0) return alert("Add at least one item!");
               setStep('review');
             }} 
@@ -3058,12 +3355,20 @@ function UserDashboard({ user, onBack = null }) {
           </h2>
           <div className="grid grid-cols-2 gap-3 sm:gap-4 bg-[#252525] p-4 sm:p-5 rounded-2xl sm:rounded-3xl mb-6 sm:mb-8 border border-white/5 text-center">
             <div>
-              <p className="text-[10px] text-gray-500 font-bold uppercase">Items</p>
-              <p className="font-black text-white text-xl sm:text-2xl">{totals.totalItems}</p>
+              <p className="text-[10px] text-gray-500 font-bold uppercase">Center</p>
+              <p className="font-black text-white text-base sm:text-lg">{formData.center === 'Other' ? formData.centerOther : formData.center}</p>
             </div>
             <div>
               <p className="text-[10px] text-orange-400 font-bold uppercase">Total Kg</p>
               <p className="font-black text-orange-400 text-xl sm:text-2xl">{totals.totalKg}</p>
+            </div>
+            <div>
+              <p className="text-[10px] text-gray-500 font-bold uppercase">Global ID</p>
+              <p className="font-black text-white text-base">{formData.globalId}</p>
+            </div>
+            <div>
+              <p className="text-[10px] text-gray-500 font-bold uppercase">Email</p>
+              <p className="font-bold text-white text-xs break-all">{formData.email}</p>
             </div>
           </div>
           <div className="max-h-60 sm:max-h-72 overflow-y-auto mb-6 sm:mb-10 border border-white/5 rounded-2xl sm:rounded-3xl p-2 bg-[#151515] custom-scroll">
@@ -3138,7 +3443,8 @@ function UserDashboard({ user, onBack = null }) {
             className="text-gray-500 mb-8 sm:mb-10 text-base sm:text-lg"
           >
             Chalan No: <span className="text-orange-500 font-bold">#{formData.chalanNo}</span>
-            <br />Center: <span className="text-white font-bold">{formData.center}</span>
+            <br />Center: <span className="text-white font-bold">{formData.center === 'Other' ? formData.centerOther : formData.center}</span>
+            <br />Email: <span className="text-white font-bold">{formData.email}</span>
           </motion.p>
           <motion.button 
             initial={{ y: 20, opacity: 0 }}
@@ -3148,7 +3454,7 @@ function UserDashboard({ user, onBack = null }) {
             whileTap={{ scale: 0.98 }}
             onClick={async () => {
               const nextNo = await fetchNextChalanNo();
-              setFormData({ chalanNo: nextNo, date: new Date().toISOString().split('T')[0], center: '', centerContactName: '', centerPhone: '', senderName: '', mobileNumber: '', post: '' });
+              setFormData({ chalanNo: nextNo, date: new Date().toISOString().split('T')[0], center: '', centerOther: '', senderName: '', mobileNumber: '', post: '', globalId: '', email: '' });
               setCart([]);
               setStep('form');
             }} 
@@ -3448,7 +3754,7 @@ function SingleReportView({ reportId, onBack }) {
         await navigator.share({
           files: [file],
           title: report.title,
-          text: `${report.reportKind === 'send' ? 'Dispatch' : 'Request'} summary report - ${report.centerLabel}`,
+          text: `${report.title} - ${report.monthLabel}`,
         });
       } else {
         const link = document.createElement('a');
@@ -3485,7 +3791,7 @@ function SingleReportView({ reportId, onBack }) {
     );
   }
 
-  const reportTheme = getReportTheme(report.reportKind);
+  const reportTheme = getReportTheme();
 
   return (
     <motion.div
@@ -3499,7 +3805,7 @@ function SingleReportView({ reportId, onBack }) {
           animate={{ y: 0, opacity: 1 }}
           className="bg-gradient-to-b from-[#1e1e1e] to-[#181818] rounded-2xl sm:rounded-[2rem] shadow-2xl border border-white/5 overflow-hidden"
         >
-          <div className={`bg-gradient-to-r ${report.reportKind === 'send' ? 'from-blue-500 to-blue-600' : 'from-orange-500 to-orange-600'} p-5 sm:p-6 text-white flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between`}>
+          <div className="bg-gradient-to-r from-emerald-500 to-emerald-600 p-5 sm:p-6 text-white flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <h2 className="text-lg sm:text-xl font-extrabold uppercase tracking-tight">{reportTheme.title}</h2>
               <p className="text-white/80 text-xs mt-0.5">{report.title}</p>

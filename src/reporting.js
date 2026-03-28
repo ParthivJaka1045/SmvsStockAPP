@@ -2,47 +2,14 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import gujaratiFontBoldUrl from './assets/fonts/NotoSansGujarati-Bold.ttf?url';
 import gujaratiFontRegularUrl from './assets/fonts/NotoSansGujarati-Regular.ttf?url';
+import { categories } from './data';
 
-export const REPORT_TITLE = 'SMVS STOCK SUMMARY REPORT';
+export const REPORT_TITLE = 'SMVS MONTHLY STOCK REPORT';
 
 const REPORT_FONT_FAMILY = 'NotoSansGujarati';
 const DEFAULT_PDF_FONT_FAMILY = 'helvetica';
 
-export const createDefaultReportOptions = () => ({
-  sections: {
-    centerBreakdown: true,
-    itemSummary: true,
-    detailedEntries: true,
-  },
-  metrics: {
-    totalEntries: true,
-    activeCenters: true,
-    lineItems: true,
-    valueTotal: true,
-  },
-});
-
-const normalizeReportOptions = (options) => {
-  const defaults = createDefaultReportOptions();
-  const sections = options?.sections || {};
-  const metrics = options?.metrics || {};
-
-  return {
-    sections: {
-      centerBreakdown: sections.centerBreakdown ?? defaults.sections.centerBreakdown,
-      itemSummary: true,
-      detailedEntries: sections.detailedEntries ?? defaults.sections.detailedEntries,
-    },
-    metrics: {
-      totalEntries: metrics.totalEntries ?? defaults.metrics.totalEntries,
-      activeCenters: metrics.activeCenters ?? defaults.metrics.activeCenters,
-      lineItems: metrics.lineItems ?? defaults.metrics.lineItems,
-      valueTotal: metrics.valueTotal ?? defaults.metrics.valueTotal,
-    },
-  };
-};
-
-export const getReportValueMetricLabel = (reportKind) => (reportKind === 'send' ? 'KG Total' : 'Qty Total');
+export const createDefaultReportOptions = () => ({});
 
 let reportFontAssetsPromise = null;
 
@@ -117,6 +84,40 @@ const toDateObject = (value) => {
 
 const padValue = (value) => String(value).padStart(2, '0');
 
+const getTodayDateValue = () => {
+  const today = new Date();
+  return `${today.getFullYear()}-${padValue(today.getMonth() + 1)}-${padValue(today.getDate())}`;
+};
+
+const getMonthValueFromDate = (value) => {
+  const date = toDateObject(value);
+  if (!date) return '';
+  return `${date.getFullYear()}-${padValue(date.getMonth() + 1)}`;
+};
+
+const getLastDateOfMonth = (monthValue) => {
+  if (!monthValue || !/^\d{4}-\d{2}$/.test(monthValue)) return getTodayDateValue();
+  const [year, month] = monthValue.split('-').map(Number);
+  const date = new Date(year, month, 0);
+  return `${date.getFullYear()}-${padValue(date.getMonth() + 1)}-${padValue(date.getDate())}`;
+};
+
+const ensureDateInMonth = (monthValue, selectedDate) => {
+  if (!monthValue) return selectedDate || getTodayDateValue();
+  if (selectedDate && selectedDate.startsWith(monthValue)) return selectedDate;
+  const today = getTodayDateValue();
+  if (today.startsWith(monthValue)) return today;
+  return getLastDateOfMonth(monthValue);
+};
+
+const getMonthStartDate = (monthValue) => `${monthValue}-01`;
+
+const getNormalizedMonthValue = (value) => {
+  if (typeof value === 'string' && /^\d{4}-\d{2}$/.test(value)) return value;
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) return value.slice(0, 7);
+  return getMonthValueFromDate(new Date());
+};
+
 export const formatDisplayDate = (value) => {
   if (!value) return '-';
   if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
@@ -139,281 +140,181 @@ export const formatMetric = (value) => {
   return numeric.toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1');
 };
 
-export const formatDateRangeLabel = (fromDate, toDate) => {
-  if (fromDate && toDate) {
-    return fromDate === toDate
-      ? formatDisplayDate(fromDate)
-      : `${formatDisplayDate(fromDate)} to ${formatDisplayDate(toDate)}`;
-  }
-  if (fromDate) return `From ${formatDisplayDate(fromDate)}`;
-  if (toDate) return `Up to ${formatDisplayDate(toDate)}`;
-  return 'All Dates';
+export const formatMonthLabel = (monthValue) => {
+  if (!monthValue || !/^\d{4}-\d{2}$/.test(monthValue)) return '-';
+  const [year, month] = monthValue.split('-').map(Number);
+  return new Intl.DateTimeFormat('en-US', { month: 'long', year: 'numeric' }).format(new Date(year, month - 1, 1));
 };
 
-export const getReportTheme = (reportKind) => {
-  if (reportKind === 'send') {
+const getRangeLabel = (selectedDate) => `તા. 1 થી ${formatDisplayDate(selectedDate)}`;
+
+const buildBaseRow = (itemName, monthLabel) => ({
+  itemName: itemName || '-',
+  monthLabel,
+  income: 0,
+  outgoing: 0,
+  totalStock: 0,
+});
+
+const addMovement = (rowMap, itemName, monthLabel, field, amount) => {
+  const normalizedName = (itemName || '').toString().trim();
+  if (!normalizedName) return;
+  const key = normalizeText(normalizedName);
+  const existing = rowMap.get(key) || buildBaseRow(normalizedName, monthLabel);
+  existing[field] = roundMetric(existing[field] + safeNumber(amount));
+  existing.totalStock = roundMetric(existing.income - existing.outgoing);
+  rowMap.set(key, existing);
+};
+
+const isDateWithinSelectedMonth = (value, monthValue, selectedDate) => {
+  const dateValue = typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)
+    ? value
+    : (() => {
+        const date = toDateObject(value);
+        return date
+          ? `${date.getFullYear()}-${padValue(date.getMonth() + 1)}-${padValue(date.getDate())}`
+          : '';
+      })();
+
+  if (!dateValue) return false;
+  return dateValue >= getMonthStartDate(monthValue) && dateValue <= selectedDate;
+};
+
+const getSendItemValue = (item) => safeNumber(item?.kg ?? item?.qty);
+
+const getRequestItemValue = (item) => safeNumber(item?.qty);
+
+const getPurchaseItemValue = (item) => safeNumber(item?.kg ?? item?.qty);
+
+const buildLegacyRows = (report, monthLabel) => {
+  if (!Array.isArray(report.itemBreakdown)) return [];
+  return report.itemBreakdown.map((row) => {
+    const income = report.reportKind === 'send' ? safeNumber(row.totalKg) : 0;
+    const outgoing = report.reportKind === 'request' ? safeNumber(row.totalQuantity) : 0;
     return {
-      key: 'send',
-      title: 'Material Dispatch Summary',
-      primary: [37, 99, 235],
-      accent: [59, 130, 246],
-      surface: [239, 246, 255],
-      line: [191, 219, 254],
-      text: [30, 64, 175],
-      dark: [30, 41, 59],
+      itemName: row.itemName || '-',
+      monthLabel,
+      income: roundMetric(income),
+      outgoing: roundMetric(outgoing),
+      totalStock: roundMetric(income - outgoing),
     };
-  }
-
-  return {
-    key: 'request',
-    title: 'Stock Request Summary',
-    primary: [234, 88, 12],
-    accent: [249, 115, 22],
-    surface: [255, 247, 237],
-    line: [254, 215, 170],
-    text: [154, 52, 18],
-    dark: [41, 37, 36],
-  };
-};
-
-const sortByDateDesc = (left, right) => {
-  const leftValue = left.date || '';
-  const rightValue = right.date || '';
-  if (leftValue === rightValue) {
-    return String(right.chalanNo || '').localeCompare(String(left.chalanNo || ''));
-  }
-  return rightValue.localeCompare(leftValue);
-};
-
-const buildRequestRecord = (order) => {
-  const items = Array.isArray(order.items) ? order.items : [];
-  const normalizedItems = items.map((item) => ({
-    itemName: item.name || '-',
-    unit: item.unit || '',
-    quantity: roundMetric(item.qty),
-  }));
-  const totalQuantity = roundMetric(
-    normalizedItems.reduce((sum, item) => sum + safeNumber(item.quantity), 0),
-  );
-
-  return {
-    sourceId: order.id,
-    chalanNo: order.chalanNo || '-',
-    date: order.date || '',
-    center: order.center || '-',
-    senderName: order.senderName || order.centerContactName || '-',
-    lineItems: normalizedItems.length,
-    totalQuantity,
-    totalKg: totalQuantity,
-    email: order.email || '',
-    submittedBy: order.submittedBy || '',
-    items: normalizedItems,
-  };
-};
-
-const buildSendRecord = (order) => {
-  const rows = Array.isArray(order.items)
-    ? order.items.filter((item) => item.itemName && item.itemName.trim())
-    : [];
-  const normalizedItems = rows.map((item) => ({
-    itemName: item.itemName || '-',
-    quantity: roundMetric(item.qty),
-    totalKg: roundMetric(item.kg),
-  }));
-  const totalQuantity = roundMetric(
-    normalizedItems.reduce((sum, item) => sum + safeNumber(item.quantity), 0),
-  );
-  const totalKg = roundMetric(
-    normalizedItems.reduce((sum, item) => sum + safeNumber(item.totalKg), 0),
-  );
-
-  return {
-    sourceId: order.id,
-    chalanNo: order.chalanNo || '-',
-    date: order.date || '',
-    center: order.fromCenter || '-',
-    senderName: order.senderName || '-',
-    lineItems: normalizedItems.length,
-    totalQuantity,
-    totalKg,
-    email: order.email || '',
-    submittedBy: order.submittedBy || '',
-    items: normalizedItems,
-  };
-};
-
-const addCenterAggregation = (centerMap, record) => {
-  const key = record.center || 'Unknown';
-  const existing = centerMap.get(key) || {
-    center: key,
-    recordsCount: 0,
-    lineItems: 0,
-    totalQuantity: 0,
-    totalKg: 0,
-    lastEntryDate: '',
-  };
-
-  existing.recordsCount += 1;
-  existing.lineItems += safeNumber(record.lineItems);
-  existing.totalQuantity = roundMetric(existing.totalQuantity + safeNumber(record.totalQuantity));
-  existing.totalKg = roundMetric(existing.totalKg + safeNumber(record.totalKg));
-  existing.lastEntryDate =
-    !existing.lastEntryDate || existing.lastEntryDate < record.date ? record.date : existing.lastEntryDate;
-
-  centerMap.set(key, existing);
-};
-
-const addRequestItemAggregation = (itemMap, record) => {
-  record.items.forEach((item) => {
-    const itemKey = `${item.itemName}__${item.unit}`;
-    const existing = itemMap.get(itemKey) || {
-      itemName: item.itemName,
-      unit: item.unit,
-      lineItems: 0,
-      totalQuantity: 0,
-      totalKg: 0,
-    };
-
-    existing.lineItems += 1;
-    existing.totalQuantity = roundMetric(existing.totalQuantity + safeNumber(item.quantity));
-    existing.totalKg = existing.totalQuantity;
-    itemMap.set(itemKey, existing);
   });
 };
 
-const addSendItemAggregation = (itemMap, record) => {
-  record.items.forEach((item) => {
-    const itemKey = item.itemName;
-    const existing = itemMap.get(itemKey) || {
-      itemName: item.itemName,
-      unit: '',
-      lineItems: 0,
-      totalQuantity: 0,
-      totalKg: 0,
-    };
-
-    existing.lineItems += 1;
-    existing.totalQuantity = roundMetric(existing.totalQuantity + safeNumber(item.quantity));
-    existing.totalKg = roundMetric(existing.totalKg + safeNumber(item.totalKg));
-    itemMap.set(itemKey, existing);
-  });
-};
+const summarizeRows = (rows) => ({
+  totalRows: rows.length,
+  totalIncome: roundMetric(rows.reduce((sum, row) => sum + safeNumber(row.income), 0)),
+  totalOutgoing: roundMetric(rows.reduce((sum, row) => sum + safeNumber(row.outgoing), 0)),
+  totalStock: roundMetric(rows.reduce((sum, row) => sum + safeNumber(row.totalStock), 0)),
+});
 
 export const hydrateReport = (report) => {
-  const summary = report.summary || {};
+  const month = getNormalizedMonthValue(report.month || report.monthValue || report.fromDate || report.toDate);
+  const selectedDate = ensureDateInMonth(month, report.selectedDate || report.toDate || report.generatedAtIso || report.generatedAt);
+  const monthLabel = report.monthLabel || formatMonthLabel(month);
+
+  const rows = Array.isArray(report.rows) && report.rows.length > 0
+    ? report.rows.map((row) => ({
+        itemName: row.itemName || '-',
+        monthLabel: row.monthLabel || monthLabel,
+        income: roundMetric(row.income),
+        outgoing: roundMetric(row.outgoing),
+        totalStock: roundMetric(
+          row.totalStock ?? (safeNumber(row.income) - safeNumber(row.outgoing)),
+        ),
+      }))
+    : buildLegacyRows(report, monthLabel);
+
+  const summarySource = report.summary || {};
+  const computedSummary = summarizeRows(rows);
+
   return {
     ...report,
     title: report.title || REPORT_TITLE,
-    reportKind: report.reportKind || 'request',
-    scope: report.scope || 'full',
-    center: report.center || '',
-    centerLabel: report.centerLabel || (report.scope === 'center' ? report.center || '-' : 'All Centers'),
-    rangeLabel: report.rangeLabel || formatDateRangeLabel(report.fromDate, report.toDate),
+    month,
+    monthLabel,
+    selectedDate,
+    rangeLabel: report.rangeLabel || getRangeLabel(selectedDate),
     generatedAtIso:
       report.generatedAtIso || getIsoString(report.generatedAt) || getIsoString(report.generatedOn) || new Date().toISOString(),
     createdBy: report.createdBy || 'Admin',
     email: report.email || '',
-    records: Array.isArray(report.records) ? report.records : [],
-    centerBreakdown: Array.isArray(report.centerBreakdown) ? report.centerBreakdown : [],
-    itemBreakdown: Array.isArray(report.itemBreakdown) ? report.itemBreakdown : [],
-    options: normalizeReportOptions(report.options),
+    rows,
     summary: {
-      totalRecords: safeNumber(summary.totalRecords),
-      totalCenters: safeNumber(summary.totalCenters),
-      totalLineItems: safeNumber(summary.totalLineItems),
-      totalQuantity: roundMetric(summary.totalQuantity),
-      totalKg: roundMetric(summary.totalKg),
+      totalRows: safeNumber(summarySource.totalRows ?? computedSummary.totalRows),
+      totalIncome: roundMetric(summarySource.totalIncome ?? computedSummary.totalIncome),
+      totalOutgoing: roundMetric(summarySource.totalOutgoing ?? computedSummary.totalOutgoing),
+      totalStock: roundMetric(summarySource.totalStock ?? computedSummary.totalStock),
     },
   };
 };
 
 export const getVisibleReportMetrics = (reportInput) => {
   const report = hydrateReport(reportInput);
-  const metrics = [
-    { key: 'totalEntries', label: 'Total Entries', value: formatMetric(report.summary.totalRecords) },
-    { key: 'activeCenters', label: 'Active Centers', value: formatMetric(report.summary.totalCenters) },
-    { key: 'lineItems', label: 'Line Items', value: formatMetric(report.summary.totalLineItems) },
-    {
-      key: 'valueTotal',
-      label: getReportValueMetricLabel(report.reportKind),
-      value: formatMetric(report.reportKind === 'send' ? report.summary.totalKg : report.summary.totalQuantity),
-    },
+  return [
+    { key: 'rows', label: 'Rows', value: formatMetric(report.summary.totalRows) },
+    { key: 'income', label: 'Aavak', value: formatMetric(report.summary.totalIncome) },
+    { key: 'outgoing', label: 'Javak', value: formatMetric(report.summary.totalOutgoing) },
+    { key: 'stock', label: 'Kul Stock', value: formatMetric(report.summary.totalStock) },
   ];
-
-  return metrics.filter((metric) => report.options.metrics[metric.key]);
 };
 
 export const buildSummaryReport = ({
   orders = [],
   sendOrders = [],
-  reportKind = 'request',
-  scope = 'full',
-  center = '',
-  fromDate = '',
-  toDate = '',
+  purchases = [],
+  month = '',
+  selectedDate = '',
   createdBy = 'Admin',
-  options = createDefaultReportOptions(),
 }) => {
-  const isSend = reportKind === 'send';
-  const sourceRecords = isSend ? sendOrders : orders;
-  const targetCenter = normalizeText(center);
+  const normalizedMonth = getNormalizedMonthValue(month || selectedDate || new Date());
+  const normalizedSelectedDate = ensureDateInMonth(normalizedMonth, selectedDate);
+  const monthLabel = formatMonthLabel(normalizedMonth);
+  const rowMap = new Map();
 
-  const filteredRecords = sourceRecords
-    .filter((record) => {
-      const recordDate = record.date || '';
-      const recordCenter = normalizeText(isSend ? record.fromCenter : record.center);
-      const inRange = (!fromDate || recordDate >= fromDate) && (!toDate || recordDate <= toDate);
-      const matchesCenter = scope !== 'center' || recordCenter === targetCenter;
-      return inRange && matchesCenter;
-    })
-    .map((record) => (isSend ? buildSendRecord(record) : buildRequestRecord(record)))
-    .sort(sortByDateDesc);
+  orders
+    .filter((order) => isDateWithinSelectedMonth(order.date, normalizedMonth, normalizedSelectedDate))
+    .forEach((order) => {
+      const items = Array.isArray(order.items) ? order.items : [];
+      items.forEach((item) => {
+        addMovement(rowMap, item.name, monthLabel, 'outgoing', getRequestItemValue(item));
+      });
+    });
 
-  const centerMap = new Map();
-  const itemMap = new Map();
+  sendOrders
+    .filter((order) => isDateWithinSelectedMonth(order.date, normalizedMonth, normalizedSelectedDate))
+    .forEach((order) => {
+      const items = Array.isArray(order.items) ? order.items : [];
+      items.forEach((item) => {
+        addMovement(rowMap, item.itemName, monthLabel, 'income', getSendItemValue(item));
+      });
+    });
 
-  filteredRecords.forEach((record) => {
-    addCenterAggregation(centerMap, record);
-    if (isSend) addSendItemAggregation(itemMap, record);
-    else addRequestItemAggregation(itemMap, record);
-  });
+  purchases
+    .filter((purchase) => isDateWithinSelectedMonth(purchase.billDate || purchase.date, normalizedMonth, normalizedSelectedDate))
+    .forEach((purchase) => {
+      const items = Array.isArray(purchase.items) ? purchase.items : [];
+      items.forEach((item) => {
+        addMovement(rowMap, item.itemName, monthLabel, 'income', getPurchaseItemValue(item));
+      });
+    });
 
-  const centerBreakdown = Array.from(centerMap.values()).sort((left, right) =>
-    left.center.localeCompare(right.center),
-  );
-  const itemBreakdown = Array.from(itemMap.values()).sort((left, right) => {
-    if (safeNumber(right.totalQuantity) === safeNumber(left.totalQuantity)) {
-      return left.itemName.localeCompare(right.itemName);
-    }
-    return safeNumber(right.totalQuantity) - safeNumber(left.totalQuantity);
-  });
-
-  const summary = {
-    totalRecords: filteredRecords.length,
-    totalCenters: centerBreakdown.length,
-    totalLineItems: filteredRecords.reduce((sum, record) => sum + safeNumber(record.lineItems), 0),
-    totalQuantity: roundMetric(filteredRecords.reduce((sum, record) => sum + safeNumber(record.totalQuantity), 0)),
-    totalKg: roundMetric(filteredRecords.reduce((sum, record) => sum + safeNumber(record.totalKg), 0)),
-  };
+  const rows = Array.from(rowMap.values())
+    .filter((row) => safeNumber(row.income) !== 0 || safeNumber(row.outgoing) !== 0 || safeNumber(row.totalStock) !== 0)
+    .sort((left, right) => left.itemName.localeCompare(right.itemName));
 
   return hydrateReport({
-    type: 'summary-report',
-    reportKind,
-    scope,
-    center,
-    centerLabel: scope === 'center' ? center || '-' : 'All Centers',
-    fromDate,
-    toDate,
-    rangeLabel: formatDateRangeLabel(fromDate, toDate),
+    type: 'monthly-stock-report',
+    month: normalizedMonth,
+    monthLabel,
+    selectedDate: normalizedSelectedDate,
+    rangeLabel: getRangeLabel(normalizedSelectedDate),
     title: REPORT_TITLE,
     createdBy,
     generatedAt: new Date(),
     generatedAtIso: new Date().toISOString(),
-    summary,
-    options: normalizeReportOptions(options),
-    centerBreakdown,
-    itemBreakdown,
-    records: filteredRecords,
+    summary: summarizeRows(rows),
+    rows,
   });
 };
 
@@ -423,19 +324,23 @@ const sanitizeFilePart = (value) =>
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9]+/gi, '-')
-    .replace(/^-+|-+$/g, '') || 'summary';
+    .replace(/^-+|-+$/g, '') || 'report';
 
 export const getReportFileName = (reportInput) => {
   const report = hydrateReport(reportInput);
-  const parts = [
-    'smvs',
-    report.reportKind === 'send' ? 'dispatch' : 'request',
-    report.scope === 'center' ? sanitizeFilePart(report.center || 'center') : 'all-centers',
-    report.fromDate || 'all',
-    report.toDate || report.fromDate || 'all',
-  ];
-  return `${parts.join('-')}.pdf`;
+  return `smvs-monthly-stock-${sanitizeFilePart(report.month)}-${sanitizeFilePart(report.selectedDate)}.pdf`;
 };
+
+export const getReportTheme = () => ({
+  key: 'monthly',
+  title: 'Monthly Stock Report',
+  primary: [5, 150, 105],
+  accent: [16, 185, 129],
+  surface: [236, 253, 245],
+  line: [167, 243, 208],
+  text: [6, 95, 70],
+  dark: [20, 83, 45],
+});
 
 const drawFirstPageHeader = (pdf, report, fontFamily) => {
   const pageWidth = pdf.internal.pageSize.getWidth();
@@ -448,9 +353,9 @@ const drawFirstPageHeader = (pdf, report, fontFamily) => {
 
   pdf.setFont(fontFamily, 'normal');
   pdf.setFontSize(10);
-  pdf.text(`Center : ${report.centerLabel}`, centeredX, 26, { align: 'center' });
+  pdf.text(`Month: ${report.monthLabel}`, centeredX, 26, { align: 'center' });
   pdf.text(`Range: ${report.rangeLabel}`, centeredX, 32, { align: 'center' });
-  pdf.text(`Scope: ${report.scope === 'center' ? 'Center-wise' : 'Full Report'}`, centeredX, 38, { align: 'center' });
+  pdf.text(`Generated: ${formatDisplayDate(report.generatedAtIso)}`, centeredX, 38, { align: 'center' });
 
   pdf.setDrawColor(156, 163, 175);
   pdf.line(14, 42, pageWidth - 14, 42);
@@ -465,7 +370,7 @@ const drawContinuationHeader = (pdf, report, fontFamily) => {
   pdf.text(REPORT_TITLE, 14, 15);
 
   pdf.setFont(fontFamily, 'normal');
-  pdf.text(`Center: ${report.centerLabel}`, pageWidth - 14, 15, { align: 'right' });
+  pdf.text(report.monthLabel, pageWidth - 14, 15, { align: 'right' });
 
   pdf.setDrawColor(209, 213, 219);
   pdf.line(14, 18, pageWidth - 14, 18);
@@ -487,16 +392,19 @@ const drawPageFooter = (pdf, report, fontFamily) => {
   pdf.text(`Page ${currentPage} / ${totalPages}`, pageWidth - 14, pageHeight - 7, { align: 'right' });
 };
 
-const drawSummaryMetricRow = (pdf, y, metrics, fontFamily) => {
-  if (metrics.length === 0) return y;
-
+const drawSummaryMetricRow = (pdf, y, report, fontFamily) => {
+  const metrics = [
+    { label: 'Rows', value: formatMetric(report.summary.totalRows) },
+    { label: 'Aavak', value: formatMetric(report.summary.totalIncome) },
+    { label: 'Javak', value: formatMetric(report.summary.totalOutgoing) },
+    { label: 'Kul Stock', value: formatMetric(report.summary.totalStock) },
+  ];
   const pageWidth = pdf.internal.pageSize.getWidth();
   const usableWidth = pageWidth - 28;
   const columnWidth = usableWidth / metrics.length;
-  const labelSize = metrics.length >= 4 ? 8.5 : 9;
 
   pdf.setFont(fontFamily, 'bold');
-  pdf.setFontSize(labelSize);
+  pdf.setFontSize(8.8);
   pdf.setTextColor(55, 65, 81);
   metrics.forEach((metric, index) => {
     const x = 14 + (columnWidth * index) + (columnWidth / 2);
@@ -517,123 +425,50 @@ const drawSummaryMetricRow = (pdf, y, metrics, fontFamily) => {
   return y + 18;
 };
 
-const ensureSectionSpace = (pdf, startY, neededHeight, report, fontFamily) => {
-  const pageHeight = pdf.internal.pageSize.getHeight();
-  if (startY + neededHeight <= pageHeight - 18) return startY;
-  pdf.addPage();
-  drawContinuationHeader(pdf, report, fontFamily);
-  return 26;
-};
+const getTableConfig = (report) => ({
+  head: [[
+    'વસ્તુનું નામ',
+    'મહિનો',
+    `${report.rangeLabel} આવક`,
+    `${report.rangeLabel} જાવક`,
+    'કુલ સ્ટોક',
+  ]],
+  body: report.rows.map((row) => [
+    row.itemName,
+    row.monthLabel,
+    formatMetric(row.income),
+    formatMetric(row.outgoing),
+    formatMetric(row.totalStock),
+  ]),
+});
 
-const drawSectionLabel = (pdf, y, label, fontFamily) => {
-  const pageWidth = pdf.internal.pageSize.getWidth();
+export const generateSummaryReportPDFBlob = async (reportInput) => {
+  const report = hydrateReport(reportInput);
+  const pdf = new jsPDF('p', 'mm', 'a4');
+  const fontFamily = await ensureReportFont(pdf);
 
-  pdf.setFont(fontFamily, 'bold');
-  pdf.setFontSize(11);
-  pdf.setTextColor(17, 24, 39);
-  pdf.text(label.toUpperCase(), 14, y);
+  drawFirstPageHeader(pdf, report, fontFamily);
+  drawSummaryMetricRow(pdf, 52, report, fontFamily);
 
-  pdf.setDrawColor(209, 213, 219);
-  pdf.line(14, y + 2, pageWidth - 14, y + 2);
-
-  return y + 7;
-};
-
-const buildCenterTableConfig = (report) => {
-  if (report.reportKind === 'send') {
-    return {
-      head: [['Center', 'Entries', 'Line Items', 'KG Total', 'Last Date']],
-      body: report.centerBreakdown.map((row) => [
-        row.center,
-        formatMetric(row.recordsCount),
-        formatMetric(row.lineItems),
-        formatMetric(row.totalKg),
-        formatDisplayDate(row.lastEntryDate),
-      ]),
-    };
-  }
-
-  return {
-    head: [['Center', 'Entries', 'Line Items', 'Last Date']],
-    body: report.centerBreakdown.map((row) => [
-      row.center,
-      formatMetric(row.recordsCount),
-      formatMetric(row.lineItems),
-      formatDisplayDate(row.lastEntryDate),
-    ]),
-  };
-};
-
-const buildItemTableConfig = (report) => {
-  if (report.reportKind === 'send') {
-    return {
-      head: [['Item Name', 'Line Items', 'KG Total']],
-      body: report.itemBreakdown.map((row) => [
-        row.itemName,
-        formatMetric(row.lineItems),
-        formatMetric(row.totalKg),
-      ]),
-    };
-  }
-
-  return {
-    head: [['Item Name', 'Unit', 'Line Items']],
-    body: report.itemBreakdown.map((row) => [
-      row.itemName,
-      row.unit || '-',
-      formatMetric(row.lineItems),
-    ]),
-  };
-};
-
-const buildRecordTableConfig = (report) => {
-  if (report.reportKind === 'send') {
-    return {
-      head: [['Date', 'Chalan', 'From Center', 'Sender', 'Items', 'Qty', 'KG']],
-      body: report.records.map((row) => [
-        formatDisplayDate(row.date),
-        `#${row.chalanNo}`,
-        row.center,
-        row.senderName || '-',
-        formatMetric(row.lineItems),
-        formatMetric(row.totalQuantity),
-        formatMetric(row.totalKg),
-      ]),
-    };
-  }
-
-  return {
-    head: [['Date', 'Chalan', 'Center', 'Sender', 'Items', 'Quantity']],
-    body: report.records.map((row) => [
-      formatDisplayDate(row.date),
-      `#${row.chalanNo}`,
-      row.center,
-      row.senderName || '-',
-      formatMetric(row.lineItems),
-      formatMetric(row.totalQuantity),
-    ]),
-  };
-};
-
-const applyReportTable = (pdf, report, fontFamily, config) => {
   autoTable(pdf, {
-    ...config,
+    startY: 74,
+    ...getTableConfig(report),
     margin: { top: 26, right: 14, bottom: 16, left: 14 },
     styles: {
       font: fontFamily,
-      fontSize: 8.4,
-      cellPadding: 2.2,
+      fontSize: 8.6,
+      cellPadding: 2.4,
       textColor: [31, 41, 55],
       lineColor: [209, 213, 219],
       lineWidth: 0.15,
       overflow: 'linebreak',
     },
     headStyles: {
-      fillColor: [243, 244, 246],
-      textColor: [17, 24, 39],
+      fillColor: [236, 253, 245],
+      textColor: [6, 95, 70],
       fontStyle: 'bold',
-      lineColor: [156, 163, 175],
-      lineWidth: 0.15,
+      lineColor: [167, 243, 208],
+      lineWidth: 0.18,
     },
     alternateRowStyles: {
       fillColor: [249, 250, 251],
@@ -648,45 +483,6 @@ const applyReportTable = (pdf, report, fontFamily, config) => {
       drawPageFooter(pdf, report, fontFamily);
     },
   });
-};
-
-export const generateSummaryReportPDFBlob = async (reportInput) => {
-  const report = hydrateReport(reportInput);
-  const pdf = new jsPDF('p', 'mm', 'a4');
-  const fontFamily = await ensureReportFont(pdf);
-
-  drawFirstPageHeader(pdf, report, fontFamily);
-
-  let cursorY = drawSummaryMetricRow(pdf, 52, getVisibleReportMetrics(report), fontFamily);
-
-  if (report.options.sections.centerBreakdown && report.centerBreakdown.length > 0) {
-    cursorY = ensureSectionSpace(pdf, cursorY, 26, report, fontFamily);
-    cursorY = drawSectionLabel(pdf, cursorY, 'Center Breakdown', fontFamily);
-    applyReportTable(pdf, report, fontFamily, {
-      startY: cursorY,
-      ...buildCenterTableConfig(report),
-    });
-    cursorY = (pdf.lastAutoTable?.finalY || cursorY) + 10;
-  }
-
-  if (report.itemBreakdown.length > 0) {
-    cursorY = ensureSectionSpace(pdf, cursorY, 26, report, fontFamily);
-    cursorY = drawSectionLabel(pdf, cursorY, 'Item Summary', fontFamily);
-    applyReportTable(pdf, report, fontFamily, {
-      startY: cursorY,
-      ...buildItemTableConfig(report),
-    });
-    cursorY = (pdf.lastAutoTable?.finalY || cursorY) + 10;
-  }
-
-  if (report.options.sections.detailedEntries) {
-    cursorY = ensureSectionSpace(pdf, cursorY, 26, report, fontFamily);
-    cursorY = drawSectionLabel(pdf, cursorY, 'Detailed Entries', fontFamily);
-    applyReportTable(pdf, report, fontFamily, {
-      startY: cursorY,
-      ...buildRecordTableConfig(report),
-    });
-  }
 
   if (!pdf.lastAutoTable) {
     drawPageFooter(pdf, report, fontFamily);
@@ -694,3 +490,7 @@ export const generateSummaryReportPDFBlob = async (reportInput) => {
 
   return pdf.output('blob');
 };
+
+export const getReportMasterItems = () => (
+  Object.values(categories).flat().map((item) => item.name)
+);
