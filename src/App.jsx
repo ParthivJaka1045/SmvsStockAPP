@@ -805,36 +805,16 @@ function ReportPreviewContent({ report }) {
   return (
     <div className="space-y-6 font-report-gujarati">
       <div className={`rounded-3xl border ${uiTheme.border} bg-gradient-to-r ${uiTheme.soft} p-5 sm:p-7`}>
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+        <div className="flex flex-col gap-4">
           <div>
             <p className={`text-[11px] font-black uppercase tracking-[0.25em] ${uiTheme.text}`}>Monthly Report</p>
             <h2 className="mt-2 text-2xl sm:text-3xl font-black text-slate-900">{REPORT_TITLE}</h2>
             <p className="mt-2 text-sm text-slate-600">Simple monthly stock table with fixed format.</p>
-            <div className="mt-3 inline-flex items-center rounded-full border border-emerald-200 bg-white px-3 py-1 text-xs font-bold text-emerald-700">
-              {preparedReport.centerLabel}
-            </div>
           </div>
-          <div className="grid grid-cols-2 gap-3 text-sm text-slate-600 sm:text-right">
-            <div>
-              <p className="font-bold text-slate-900">Month</p>
-              <p>{preparedReport.monthLabel}</p>
-            </div>
-            <div>
-              <p className="font-bold text-slate-900">Scope</p>
-              <p>{preparedReport.scope === 'center' ? 'Centewise' : 'All Centers'}</p>
-            </div>
-            <div>
-              <p className="font-bold text-slate-900">Range</p>
-              <p>{preparedReport.rangeLabel}</p>
-            </div>
-            <div>
-              <p className="font-bold text-slate-900">Number of Item</p>
-              <p>{formatMetric(preparedReport.summary.totalRows)}</p>
-            </div>
-            <div className="col-span-2">
-              <p className="font-bold text-slate-900">Generated</p>
-              <p>{formatDisplayDate(preparedReport.generatedAtIso)}</p>
-            </div>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <PreviewInfoCard label="Month" value={preparedReport.monthLabel} />
+            <PreviewInfoCard label="Center" value={preparedReport.centerLabel} />
+            <PreviewInfoCard label="Range" value={preparedReport.rangeLabel} />
           </div>
         </div>
       </div>
@@ -878,20 +858,31 @@ function ReportPreviewContent({ report }) {
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-          <p className="text-[11px] font-bold uppercase tracking-widest text-slate-400">Number of Item</p>
-          <p className="mt-2 text-2xl font-black text-slate-900">{formatMetric(preparedReport.summary.totalRows)}</p>
+          <div className="min-h-[2.5rem]">
+            <p className="text-[10px] font-bold uppercase tracking-wide leading-tight text-slate-400">Number of Item</p>
+          </div>
+          <p className="mt-2 text-xl sm:text-2xl font-black text-slate-900">{formatMetric(preparedReport.summary.totalRows)}</p>
         </div>
         <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-          <p className="text-[11px] font-bold uppercase tracking-widest text-slate-400">આવક (કિલો)</p>
-          <p className={`mt-2 text-2xl font-black ${uiTheme.text}`}>{formatMetric(preparedReport.summary.totalIncome)}</p>
+          <div className="min-h-[2.5rem]">
+            <p className="text-[10px] font-bold uppercase tracking-wide leading-tight text-slate-400">આવક</p>
+            <p className="text-[10px] font-bold uppercase tracking-wide leading-tight text-slate-400">કિલો</p>
+          </div>
+          <p className={`mt-2 text-xl sm:text-2xl font-black ${uiTheme.text}`}>{formatMetric(preparedReport.summary.totalIncome)}</p>
         </div>
         <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-          <p className="text-[11px] font-bold uppercase tracking-widest text-slate-400">જાવક (કિલો)</p>
-          <p className="mt-2 text-2xl font-black text-slate-900">{formatMetric(preparedReport.summary.totalOutgoing)}</p>
+          <div className="min-h-[2.5rem]">
+            <p className="text-[10px] font-bold uppercase tracking-wide leading-tight text-slate-400">જાવક</p>
+            <p className="text-[10px] font-bold uppercase tracking-wide leading-tight text-slate-400">કિલો</p>
+          </div>
+          <p className="mt-2 text-xl sm:text-2xl font-black text-slate-900">{formatMetric(preparedReport.summary.totalOutgoing)}</p>
         </div>
         <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-          <p className="text-[11px] font-bold uppercase tracking-widest text-slate-400">કુલ સ્ટોક (કિલો)</p>
-          <p className="mt-2 text-2xl font-black text-slate-900">{formatMetric(preparedReport.summary.totalStock)}</p>
+          <div className="min-h-[2.5rem]">
+            <p className="text-[10px] font-bold uppercase tracking-wide leading-tight text-slate-400">કુલ સ્ટોક</p>
+            <p className="text-[10px] font-bold uppercase tracking-wide leading-tight text-slate-400">કિલો</p>
+          </div>
+          <p className="mt-2 text-xl sm:text-2xl font-black text-slate-900">{formatMetric(preparedReport.summary.totalStock)}</p>
         </div>
       </div>
     </div>

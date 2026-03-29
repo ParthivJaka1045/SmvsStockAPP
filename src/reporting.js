@@ -265,9 +265,9 @@ export const getVisibleReportMetrics = (reportInput) => {
   const report = hydrateReport(reportInput);
   return [
     { key: 'rows', label: 'Number of Item', value: formatMetric(report.summary.totalRows) },
-    { key: 'income', label: 'આવક (કિલો)', value: formatMetric(report.summary.totalIncome) },
-    { key: 'outgoing', label: 'જાવક (કિલો)', value: formatMetric(report.summary.totalOutgoing) },
-    { key: 'stock', label: 'કુલ સ્ટોક (કિલો)', value: formatMetric(report.summary.totalStock) },
+    { key: 'income', label: 'આવક કિલો', value: formatMetric(report.summary.totalIncome) },
+    { key: 'outgoing', label: 'જાવક કિલો', value: formatMetric(report.summary.totalOutgoing) },
+    { key: 'stock', label: 'કુલ સ્ટોક કિલો', value: formatMetric(report.summary.totalStock) },
   ];
 };
 
@@ -431,10 +431,10 @@ const drawPageFooter = (pdf, report, fontFamily) => {
 
 const drawSummaryMetricRow = (pdf, y, report, fontFamily) => {
   const metrics = [
-    { label: 'Number of Item', value: formatMetric(report.summary.totalRows) },
-    { label: 'આવક (કિલો)', value: formatMetric(report.summary.totalIncome) },
-    { label: 'જાવક (કિલો)', value: formatMetric(report.summary.totalOutgoing) },
-    { label: 'કુલ સ્ટોક (કિલો)', value: formatMetric(report.summary.totalStock) },
+    { labelLines: ['Number of', 'Item'], value: formatMetric(report.summary.totalRows), font: DEFAULT_PDF_FONT_FAMILY },
+    { labelLines: ['આવક', 'કિલો'], value: formatMetric(report.summary.totalIncome), font: fontFamily },
+    { labelLines: ['જાવક', 'કિલો'], value: formatMetric(report.summary.totalOutgoing), font: fontFamily },
+    { labelLines: ['કુલ સ્ટોક', 'કિલો'], value: formatMetric(report.summary.totalStock), font: fontFamily },
   ];
   const pageWidth = pdf.internal.pageSize.getWidth();
   const usableWidth = pageWidth - 28;
@@ -446,11 +446,10 @@ const drawSummaryMetricRow = (pdf, y, report, fontFamily) => {
     pdf.setFillColor(236, 253, 245);
     pdf.roundedRect(cardX, y - 2, columnWidth - 1.5, 16, 2, 2, 'F');
 
-    pdf.setFont(fontFamily, 'bold');
-    pdf.setFontSize(5.7);
+    pdf.setFont(metric.font, 'bold');
+    pdf.setFontSize(5.4);
     pdf.setTextColor(6, 95, 70);
-    const labelLines = pdf.splitTextToSize(metric.label, columnWidth - 8);
-    pdf.text(labelLines, x, y, { align: 'center' });
+    pdf.text(metric.labelLines, x, y - 0.5, { align: 'center' });
   });
 
   metrics.forEach((metric, index) => {
