@@ -801,12 +801,12 @@ function ReportSummaryCard({ labelLines, value, accentClass = 'text-slate-900' }
     <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm min-h-[112px] flex flex-col justify-between">
       <div className="min-h-[2.75rem] space-y-0.5">
         {labelLines.map((label, index) => (
-          <p key={`${label}-${index}`} className="text-[10px] sm:text-[11px] font-bold uppercase tracking-wide leading-tight text-slate-400">
+          <p key={`${label}-${index}`} className="text-[12px] sm:text-[13px] font-bold uppercase tracking-wide leading-tight text-slate-400">
             {label}
           </p>
         ))}
       </div>
-      <p className={`mt-2 text-base sm:text-lg font-black ${accentClass}`}>{value}</p>
+      <p className={`mt-2 text-sm sm:text-base font-black ${accentClass}`}>{value}</p>
     </div>
   );
 }

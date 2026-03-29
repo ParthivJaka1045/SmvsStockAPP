@@ -491,7 +491,7 @@ const drawSummaryMetricRow = (pdf, y, report, fontFamily) => {
     pdf.roundedRect(cardX, y - 2, columnWidth - 1.5, 18, 2.5, 2.5, 'F');
 
     pdf.setFont(metric.font, 'bold');
-    pdf.setFontSize(5.8);
+    pdf.setFontSize(6.8);
     pdf.setTextColor(6, 95, 70);
     pdf.text(metric.labelLines, x, y, { align: 'center' });
   });
@@ -499,7 +499,7 @@ const drawSummaryMetricRow = (pdf, y, report, fontFamily) => {
   metrics.forEach((metric, index) => {
     const x = 14 + (columnWidth * index) + (columnWidth / 2);
     pdf.setFont(DEFAULT_PDF_FONT_FAMILY, 'bold');
-    pdf.setFontSize(11);
+    pdf.setFontSize(9);
     pdf.setTextColor(17, 24, 39);
     pdf.text(String(metric.value), x, y + 10, { align: 'center' });
   });
@@ -545,6 +545,8 @@ export const generateSummaryReportPDFBlob = async (reportInput) => {
     headStyles: {
       fillColor: [236, 253, 245],
       textColor: [6, 95, 70],
+      font: DEFAULT_PDF_FONT_FAMILY,
+      fontSize: 9,
       fontStyle: 'bold',
       lineColor: [167, 243, 208],
       lineWidth: 0.18,
@@ -554,6 +556,13 @@ export const generateSummaryReportPDFBlob = async (reportInput) => {
     },
     bodyStyles: {
       valign: 'middle',
+    },
+    didParseCell: (data) => {
+      if (data.section === 'head') {
+        data.cell.styles.font = DEFAULT_PDF_FONT_FAMILY;
+      } else {
+        data.cell.styles.font = fontFamily;
+      }
     },
     didDrawPage: () => {
       if (pdf.getCurrentPageInfo().pageNumber > 1) {
