@@ -264,7 +264,7 @@ export const hydrateReport = (report) => {
 export const getVisibleReportMetrics = (reportInput) => {
   const report = hydrateReport(reportInput);
   return [
-    { key: 'rows', label: 'Number of Item', value: formatMetric(report.summary.totalRows) },
+    { key: 'rows', label: 'વસ્તુઓની સંખ્યા', value: formatMetric(report.summary.totalRows) },
     { key: 'income', label: 'આવક KG', value: formatMetric(report.summary.totalIncome) },
     { key: 'outgoing', label: 'જાવક KG', value: formatMetric(report.summary.totalOutgoing) },
     { key: 'stock', label: 'કુલ સ્ટોક KG', value: formatMetric(report.summary.totalStock) },
@@ -376,14 +376,13 @@ const drawHeaderInfoCards = (pdf, startY, report, fontFamily) => {
   const gap = 4;
   const cardWidth = (pageWidth - 28 - (gap * 2)) / 3;
   const cards = [
-    { label: 'Month', value: report.monthLabel },
-    { label: 'Center', value: report.centerLabel },
-    { label: 'Range', value: report.rangeLabel },
+    { label: 'Month', value: report.monthLabel, valueFont: DEFAULT_PDF_FONT_FAMILY },
+    { label: 'Center', value: report.centerLabel, valueFont: DEFAULT_PDF_FONT_FAMILY },
+    { label: 'Range', value: report.rangeLabel, valueFont: fontFamily },
   ];
 
   cards.forEach((card, index) => {
     const x = 14 + (index * (cardWidth + gap));
-    const valueLines = pdf.splitTextToSize(String(card.value || '-'), cardWidth - 6).slice(0, 2);
 
     pdf.setFillColor(255, 255, 255);
     pdf.setDrawColor(209, 213, 219);
@@ -394,8 +393,9 @@ const drawHeaderInfoCards = (pdf, startY, report, fontFamily) => {
     pdf.setTextColor(148, 163, 184);
     pdf.text(card.label.toUpperCase(), x + 3, startY + 4.5);
 
-    pdf.setFont(fontFamily, 'bold');
+    pdf.setFont(card.valueFont, 'bold');
     pdf.setFontSize(8.6);
+    const valueLines = pdf.splitTextToSize(String(card.value || '-'), cardWidth - 6).slice(0, 2);
     pdf.setTextColor(15, 23, 42);
     pdf.text(valueLines, x + 3, startY + 9.2);
   });
@@ -442,7 +442,7 @@ const drawFirstPageHeader = (pdf, report, fontFamily) => {
   return drawTableSectionHeader(pdf, cardsBottomY);
 };
 
-const drawContinuationHeader = (pdf, report, fontFamily) => {
+const drawContinuationHeader = (pdf, report) => {
   const pageWidth = pdf.internal.pageSize.getWidth();
 
   pdf.setFont(DEFAULT_PDF_FONT_FAMILY, 'bold');
@@ -450,7 +450,7 @@ const drawContinuationHeader = (pdf, report, fontFamily) => {
   pdf.setTextColor(6, 95, 70);
   pdf.text(REPORT_TITLE, 14, 15);
 
-  pdf.setFont(fontFamily, 'normal');
+  pdf.setFont(DEFAULT_PDF_FONT_FAMILY, 'normal');
   pdf.text(`${report.monthLabel} | ${report.centerLabel}`, pageWidth - 14, 15, { align: 'right' });
 
   pdf.setDrawColor(16, 185, 129);
@@ -475,7 +475,7 @@ const drawPageFooter = (pdf, report, fontFamily) => {
 
 const drawSummaryMetricRow = (pdf, y, report, fontFamily) => {
   const metrics = [
-    { labelLines: ['Number of', 'Item'], value: formatMetric(report.summary.totalRows), font: DEFAULT_PDF_FONT_FAMILY },
+    { labelLines: ['વસ્તુઓની', 'સંખ્યા'], value: formatMetric(report.summary.totalRows), font: fontFamily },
     { labelLines: ['આવક', 'KG'], value: formatMetric(report.summary.totalIncome), font: fontFamily },
     { labelLines: ['જાવક', 'KG'], value: formatMetric(report.summary.totalOutgoing), font: fontFamily },
     { labelLines: ['કુલ સ્ટોક', 'KG'], value: formatMetric(report.summary.totalStock), font: fontFamily },
@@ -491,7 +491,7 @@ const drawSummaryMetricRow = (pdf, y, report, fontFamily) => {
     pdf.roundedRect(cardX, y - 2, columnWidth - 1.5, 18, 2.5, 2.5, 'F');
 
     pdf.setFont(metric.font, 'bold');
-    pdf.setFontSize(6.1);
+    pdf.setFontSize(5.8);
     pdf.setTextColor(6, 95, 70);
     pdf.text(metric.labelLines, x, y, { align: 'center' });
   });
@@ -509,15 +509,13 @@ const drawSummaryMetricRow = (pdf, y, report, fontFamily) => {
 
 const getTableConfig = (report) => ({
   head: [[
-    'વસ્તુનું નામ',
-    'મહિનો',
-    `${report.rangeLabel} આવક (KG)`,
-    `${report.rangeLabel} જાવક (KG)`,
-    'કુલ સ્ટોક (KG)',
+    'Item Name',
+    'Income (KG)',
+    'Outgoing (KG)',
+    'Total Stock (KG)',
   ]],
   body: report.rows.map((row) => [
     row.itemName,
-    row.monthLabel,
     formatMetric(row.income),
     formatMetric(row.outgoing),
     formatMetric(row.totalStock),
@@ -559,7 +557,7 @@ export const generateSummaryReportPDFBlob = async (reportInput) => {
     },
     didDrawPage: () => {
       if (pdf.getCurrentPageInfo().pageNumber > 1) {
-        drawContinuationHeader(pdf, report, fontFamily);
+        drawContinuationHeader(pdf, report);
       }
       drawPageFooter(pdf, report, fontFamily);
     },

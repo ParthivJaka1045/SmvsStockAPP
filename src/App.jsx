@@ -801,12 +801,12 @@ function ReportSummaryCard({ labelLines, value, accentClass = 'text-slate-900' }
     <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm min-h-[112px] flex flex-col justify-between">
       <div className="min-h-[2.75rem] space-y-0.5">
         {labelLines.map((label, index) => (
-          <p key={`${label}-${index}`} className="text-[11px] font-bold uppercase tracking-wide leading-tight text-slate-400">
+          <p key={`${label}-${index}`} className="text-[10px] sm:text-[11px] font-bold uppercase tracking-wide leading-tight text-slate-400">
             {label}
           </p>
         ))}
       </div>
-      <p className={`mt-2 text-lg sm:text-xl font-black ${accentClass}`}>{value}</p>
+      <p className={`mt-2 text-base sm:text-lg font-black ${accentClass}`}>{value}</p>
     </div>
   );
 }
@@ -840,18 +840,16 @@ function ReportPreviewContent({ report }) {
           <table className="w-full min-w-[760px] text-sm">
             <thead className="bg-slate-900 text-white">
               <tr>
-                <th className="px-4 py-3 text-left">વસ્તુનું નામ</th>
-                <th className="px-4 py-3 text-left">મહિનો</th>
-                <th className="px-4 py-3 text-center">{preparedReport.rangeLabel} આવક (KG)</th>
-                <th className="px-4 py-3 text-center">{preparedReport.rangeLabel} જાવક (KG)</th>
-                <th className="px-4 py-3 text-center">કુલ સ્ટોક (KG)</th>
+                <th className="px-4 py-3 text-left">Item Name</th>
+                <th className="px-4 py-3 text-center">Income (KG)</th>
+                <th className="px-4 py-3 text-center">Outgoing (KG)</th>
+                <th className="px-4 py-3 text-center">Total Stock (KG)</th>
               </tr>
             </thead>
             <tbody>
               {preparedReport.rows.map((row, index) => (
                 <tr key={`${row.itemName}-${index}`} className="border-t border-slate-200">
                   <td className="px-4 py-3 font-bold text-slate-900">{row.itemName}</td>
-                  <td className="px-4 py-3 text-slate-600">{row.monthLabel}</td>
                   <td className={`px-4 py-3 text-center font-bold ${uiTheme.text}`}>{formatMetric(row.income)}</td>
                   <td className="px-4 py-3 text-center font-bold text-slate-900">{formatMetric(row.outgoing)}</td>
                   <td className="px-4 py-3 text-center font-black text-slate-900">{formatMetric(row.totalStock)}</td>
@@ -859,7 +857,7 @@ function ReportPreviewContent({ report }) {
               ))}
               {preparedReport.rows.length === 0 && (
                 <tr>
-                  <td colSpan={5} className="px-4 py-10 text-center text-sm font-bold text-slate-400">
+                  <td colSpan={4} className="px-4 py-10 text-center text-sm font-bold text-slate-400">
                     No items found for the selected month.
                   </td>
                 </tr>
@@ -870,7 +868,7 @@ function ReportPreviewContent({ report }) {
       </div>
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <ReportSummaryCard labelLines={['Number of Item']} value={formatMetric(preparedReport.summary.totalRows)} />
+        <ReportSummaryCard labelLines={['વસ્તુઓની', 'સંખ્યા']} value={formatMetric(preparedReport.summary.totalRows)} />
         <ReportSummaryCard labelLines={['આવક', 'KG']} value={formatMetric(preparedReport.summary.totalIncome)} accentClass={uiTheme.text} />
         <ReportSummaryCard labelLines={['જાવક', 'KG']} value={formatMetric(preparedReport.summary.totalOutgoing)} />
         <ReportSummaryCard labelLines={['કુલ સ્ટોક', 'KG']} value={formatMetric(preparedReport.summary.totalStock)} />
