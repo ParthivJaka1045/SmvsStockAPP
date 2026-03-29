@@ -511,6 +511,35 @@ const drawPdfMetaGrid = (pdf, startY, metaEntries, accent, surface) => {
   return startY + (rows * (cardHeight + 3));
 };
 
+const drawPdfCompactMetaRows = (pdf, startY, metaRows, accent) => {
+  if (!metaRows.length) return startY;
+
+  const pageWidth = pdf.internal.pageSize.getWidth();
+  const rowWidth = pageWidth - 28;
+  const leftValueX = 36;
+  const rightLabelX = (pageWidth / 2) + 2;
+  const rightValueX = rightLabelX + 22;
+
+  metaRows.forEach((row, index) => {
+    const y = startY + (index * 9.5);
+
+    pdf.setFillColor(248, 250, 252);
+    pdf.roundedRect(14, y - 1.5, rowWidth, 7.5, 2, 2, 'F');
+
+    pdf.setFont(PDF_FALLBACK_FONT, 'bold');
+    pdf.setFontSize(7.5);
+    pdf.setTextColor(...accent);
+    pdf.text(`${row.leftLabel}:`, 18, y + 3);
+    pdf.text(`${row.rightLabel}:`, rightLabelX, y + 3);
+
+    pdf.setTextColor(15, 23, 42);
+    pdf.text(compactPdfValue(row.leftValue), leftValueX, y + 3);
+    pdf.text(compactPdfValue(row.rightValue), rightValueX, y + 3);
+  });
+
+  return startY + (metaRows.length * 9.5);
+};
+
 const drawPdfStatCards = (pdf, startY, statEntries, accent, surface) => {
   if (!statEntries.length) return startY;
 
@@ -546,7 +575,9 @@ const createStructuredPdfBlob = async ({
   surface,
   footerText,
   metaEntries,
+  compactMetaRows = [],
   statEntries,
+  bottomStatEntries = [],
   head,
   body,
   columnStyles = {},
@@ -571,14 +602,16 @@ const createStructuredPdfBlob = async ({
   pdf.setLineWidth(0.8);
   pdf.line(20, 27, pageWidth - 20, 27);
 
-  let startY = drawPdfMetaGrid(pdf, 33, metaEntries, accent, [248, 250, 252]);
+  let startY = compactMetaRows.length
+    ? drawPdfCompactMetaRows(pdf, 33, compactMetaRows, accent)
+    : drawPdfMetaGrid(pdf, 33, metaEntries, accent, [248, 250, 252]);
   startY = drawPdfStatCards(pdf, startY + 2, statEntries, accent, surface);
 
   autoTable(pdf, {
     startY: startY + 4,
     head: [head],
     body,
-    margin: { top: 22, right: 14, bottom: 16, left: 14 },
+    margin: { top: 22, right: 14, bottom: bottomStatEntries.length ? 40 : 16, left: 14 },
     styles: {
       font: bodyFont,
       fontSize: 8.5,
@@ -622,6 +655,10 @@ const createStructuredPdfBlob = async ({
     drawPdfFooter(pdf, footerText);
   }
 
+  if (bottomStatEntries.length && pdf.lastAutoTable) {
+    drawPdfStatCards(pdf, pdf.lastAutoTable.finalY + 5, bottomStatEntries, accent, surface);
+  }
+
   return pdf.output('blob');
 };
 
@@ -631,23 +668,21 @@ const generatePDFBlobReliable = async (order) => {
 
   return createStructuredPdfBlob({
     title: 'SMVS STOCK REQUEST',
-    subtitle: `Center: ${order.center || '-'}  |  Date: ${formatDisplayDate(order.date)}`,
+    subtitle: '',
     accent: [234, 88, 12],
     surface: [255, 247, 237],
     footerText: `Request Chalan #${order.chalanNo || '-'}${order.center ? ` | ${order.center}` : ''}`,
-    metaEntries: [
-      { label: 'Center', value: order.center || '-' },
-      { label: 'Chalan No', value: `#${order.chalanNo || '-'}` },
-      { label: 'Date', value: formatDisplayDate(order.date) },
-      { label: 'Sender Name', value: order.senderName || '-' },
-      { label: 'Mobile Number', value: order.mobileNumber || '-' },
-      { label: 'Global ID', value: order.globalId || '-' },
-      { label: 'Post', value: order.post || '-' },
-      { label: 'Email', value: order.email || '-' },
+    metaEntries: [],
+    compactMetaRows: [
+      { leftLabel: 'Center', leftValue: order.center || '-', rightLabel: 'Chalan No', rightValue: `#${order.chalanNo || '-'}` },
+      { leftLabel: 'Order Date', leftValue: formatDisplayDate(order.date), rightLabel: 'Sender', rightValue: order.senderName || '-' },
+      { leftLabel: 'Post', leftValue: order.post || '-', rightLabel: 'Mobile', rightValue: order.mobileNumber || '-' },
+      { leftLabel: 'Global ID', leftValue: order.globalId || '-', rightLabel: 'Email', rightValue: order.email || '-' },
     ],
-    statEntries: [
+    statEntries: [],
+    bottomStatEntries: [
       { label: 'Items', value: items.length },
-      { label: 'Total Qty', value: formatMetric(totals.totalKg) },
+      { label: 'Total KG', value: formatMetric(totals.totalKg) },
     ],
     head: ['No', 'Item Name', 'Qty', 'Unit'],
     body: items.map((item, index) => [
