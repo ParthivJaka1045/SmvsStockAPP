@@ -789,9 +789,24 @@ const createDefaultReportForm = () => {
 
 function PreviewInfoCard({ label, value, accentClass = 'text-slate-900', className = '' }) {
   return (
-    <div className={`rounded-2xl border border-gray-200 bg-white px-4 py-3 shadow-sm ${className}`}>
-      <p className="text-gray-400 text-[10px] font-sans font-bold uppercase tracking-[0.14em] mb-1">{label}</p>
-      <p className={`font-black text-sm sm:text-base break-words ${accentClass}`}>{value || '-'}</p>
+    <div className={`rounded-2xl border border-gray-200 bg-white px-4 py-4 shadow-sm min-h-[96px] flex flex-col justify-between ${className}`}>
+      <p className="text-gray-400 text-[11px] font-sans font-bold uppercase tracking-[0.14em]">{label}</p>
+      <p className={`font-black text-base sm:text-lg leading-snug break-words ${accentClass}`}>{value || '-'}</p>
+    </div>
+  );
+}
+
+function ReportSummaryCard({ labelLines, value, accentClass = 'text-slate-900' }) {
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm min-h-[112px] flex flex-col justify-between">
+      <div className="min-h-[2.75rem] space-y-0.5">
+        {labelLines.map((label, index) => (
+          <p key={`${label}-${index}`} className="text-[11px] font-bold uppercase tracking-wide leading-tight text-slate-400">
+            {label}
+          </p>
+        ))}
+      </div>
+      <p className={`mt-2 text-lg sm:text-xl font-black ${accentClass}`}>{value}</p>
     </div>
   );
 }
@@ -802,12 +817,12 @@ function ReportPreviewContent({ report }) {
 
   return (
     <div className="space-y-6 font-report-gujarati">
-      <div className={`rounded-3xl border ${uiTheme.border} bg-gradient-to-r ${uiTheme.soft} p-5 sm:p-7`}>
+      <div className={`rounded-3xl border ${uiTheme.border} bg-gradient-to-r ${uiTheme.soft} p-6 sm:p-8`}>
         <div className="flex flex-col gap-4">
           <div>
-            <p className={`text-[11px] font-black uppercase tracking-[0.25em] ${uiTheme.text}`}>Monthly Report</p>
-            <h2 className="mt-2 text-2xl sm:text-3xl font-black text-slate-900">{REPORT_TITLE}</h2>
-            <p className="mt-2 text-sm text-slate-600">Simple monthly stock table with fixed format.</p>
+            <p className={`text-xs font-black uppercase tracking-[0.25em] ${uiTheme.text}`}>Monthly Report</p>
+            <h2 className="mt-2 text-3xl sm:text-4xl font-black text-slate-900">{REPORT_TITLE}</h2>
+            <p className="mt-2 text-[13px] sm:text-sm text-slate-600">Simple monthly stock table with fixed format.</p>
           </div>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
             <PreviewInfoCard label="Month" value={preparedReport.monthLabel} />
@@ -855,33 +870,10 @@ function ReportPreviewContent({ report }) {
       </div>
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div className="min-h-[2.5rem]">
-            <p className="text-[10px] font-bold uppercase tracking-wide leading-tight text-slate-400">Number of Item</p>
-          </div>
-          <p className="mt-2 text-xl sm:text-2xl font-black text-slate-900">{formatMetric(preparedReport.summary.totalRows)}</p>
-        </div>
-        <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div className="min-h-[2.5rem]">
-            <p className="text-[10px] font-bold uppercase tracking-wide leading-tight text-slate-400">આવક</p>
-            <p className="text-[10px] font-bold uppercase tracking-wide leading-tight text-slate-400">KG</p>
-          </div>
-          <p className={`mt-2 text-xl sm:text-2xl font-black ${uiTheme.text}`}>{formatMetric(preparedReport.summary.totalIncome)}</p>
-        </div>
-        <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div className="min-h-[2.5rem]">
-            <p className="text-[10px] font-bold uppercase tracking-wide leading-tight text-slate-400">જાવક</p>
-            <p className="text-[10px] font-bold uppercase tracking-wide leading-tight text-slate-400">KG</p>
-          </div>
-          <p className="mt-2 text-xl sm:text-2xl font-black text-slate-900">{formatMetric(preparedReport.summary.totalOutgoing)}</p>
-        </div>
-        <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div className="min-h-[2.5rem]">
-            <p className="text-[10px] font-bold uppercase tracking-wide leading-tight text-slate-400">કુલ સ્ટોક</p>
-            <p className="text-[10px] font-bold uppercase tracking-wide leading-tight text-slate-400">KG</p>
-          </div>
-          <p className="mt-2 text-xl sm:text-2xl font-black text-slate-900">{formatMetric(preparedReport.summary.totalStock)}</p>
-        </div>
+        <ReportSummaryCard labelLines={['Number of Item']} value={formatMetric(preparedReport.summary.totalRows)} />
+        <ReportSummaryCard labelLines={['આવક', 'KG']} value={formatMetric(preparedReport.summary.totalIncome)} accentClass={uiTheme.text} />
+        <ReportSummaryCard labelLines={['જાવક', 'KG']} value={formatMetric(preparedReport.summary.totalOutgoing)} />
+        <ReportSummaryCard labelLines={['કુલ સ્ટોક', 'KG']} value={formatMetric(preparedReport.summary.totalStock)} />
       </div>
     </div>
   );

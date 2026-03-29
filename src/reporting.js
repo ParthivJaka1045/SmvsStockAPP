@@ -371,31 +371,75 @@ export const getReportTheme = () => ({
   dark: [20, 83, 45],
 });
 
+const drawHeaderInfoCards = (pdf, startY, report, fontFamily) => {
+  const pageWidth = pdf.internal.pageSize.getWidth();
+  const gap = 4;
+  const cardWidth = (pageWidth - 28 - (gap * 2)) / 3;
+  const cards = [
+    { label: 'Month', value: report.monthLabel },
+    { label: 'Center', value: report.centerLabel },
+    { label: 'Range', value: report.rangeLabel },
+  ];
+
+  cards.forEach((card, index) => {
+    const x = 14 + (index * (cardWidth + gap));
+    const valueLines = pdf.splitTextToSize(String(card.value || '-'), cardWidth - 6).slice(0, 2);
+
+    pdf.setFillColor(255, 255, 255);
+    pdf.setDrawColor(209, 213, 219);
+    pdf.roundedRect(x, startY, cardWidth, 16, 3, 3, 'FD');
+
+    pdf.setFont(DEFAULT_PDF_FONT_FAMILY, 'bold');
+    pdf.setFontSize(6.4);
+    pdf.setTextColor(148, 163, 184);
+    pdf.text(card.label.toUpperCase(), x + 3, startY + 4.5);
+
+    pdf.setFont(fontFamily, 'bold');
+    pdf.setFontSize(8.6);
+    pdf.setTextColor(15, 23, 42);
+    pdf.text(valueLines, x + 3, startY + 9.2);
+  });
+
+  return startY + 20;
+};
+
+const drawTableSectionHeader = (pdf, y) => {
+  const pageWidth = pdf.internal.pageSize.getWidth();
+
+  pdf.setFillColor(236, 253, 245);
+  pdf.roundedRect(14, y, pageWidth - 28, 8, 3, 3, 'F');
+
+  pdf.setFont(DEFAULT_PDF_FONT_FAMILY, 'bold');
+  pdf.setFontSize(8.2);
+  pdf.setTextColor(6, 95, 70);
+  pdf.text('MONTHLY TABLE', 18, y + 5.2);
+
+  return y + 12;
+};
+
 const drawFirstPageHeader = (pdf, report, fontFamily) => {
   const pageWidth = pdf.internal.pageSize.getWidth();
 
   pdf.setFillColor(236, 253, 245);
-  pdf.roundedRect(14, 10, pageWidth - 28, 32, 4, 4, 'F');
+  pdf.roundedRect(14, 10, pageWidth - 28, 46, 5, 5, 'F');
 
   pdf.setFont(DEFAULT_PDF_FONT_FAMILY, 'bold');
-  pdf.setFontSize(16);
+  pdf.setFontSize(8.5);
   pdf.setTextColor(6, 95, 70);
-  pdf.text(REPORT_TITLE, pageWidth / 2, 18, { align: 'center' });
+  pdf.text('MONTHLY REPORT', 20, 18);
 
   pdf.setFont(DEFAULT_PDF_FONT_FAMILY, 'bold');
-  pdf.setFontSize(8.2);
+  pdf.setFontSize(17.5);
+  pdf.setTextColor(15, 23, 42);
+  pdf.text(REPORT_TITLE, 20, 26);
+
+  pdf.setFont(DEFAULT_PDF_FONT_FAMILY, 'normal');
+  pdf.setFontSize(8.8);
   pdf.setTextColor(100, 116, 139);
-  pdf.text(`Month: ${report.monthLabel}`, 20, 27);
-  pdf.text(`Center: ${report.centerLabel}`, pageWidth - 20, 27, { align: 'right' });
+  pdf.text('Simple monthly stock table with fixed format.', 20, 32);
 
-  pdf.setFont(fontFamily, 'normal');
-  pdf.setFontSize(9.2);
-  pdf.setTextColor(31, 41, 55);
-  pdf.text(`Range: ${report.rangeLabel}`, 20, 34);
-
-  pdf.setDrawColor(16, 185, 129);
-  pdf.setLineWidth(0.7);
-  pdf.line(20, 45, pageWidth - 20, 45);
+  const cardsBottomY = drawHeaderInfoCards(pdf, 36, report, fontFamily);
+  return drawTableSectionHeader(pdf, cardsBottomY);
 };
 
 const drawContinuationHeader = (pdf, report, fontFamily) => {
@@ -444,23 +488,23 @@ const drawSummaryMetricRow = (pdf, y, report, fontFamily) => {
     const cardX = 14 + (columnWidth * index);
     const x = cardX + (columnWidth / 2);
     pdf.setFillColor(236, 253, 245);
-    pdf.roundedRect(cardX, y - 2, columnWidth - 1.5, 16, 2, 2, 'F');
+    pdf.roundedRect(cardX, y - 2, columnWidth - 1.5, 18, 2.5, 2.5, 'F');
 
     pdf.setFont(metric.font, 'bold');
-    pdf.setFontSize(5.4);
+    pdf.setFontSize(6.1);
     pdf.setTextColor(6, 95, 70);
-    pdf.text(metric.labelLines, x, y - 0.5, { align: 'center' });
+    pdf.text(metric.labelLines, x, y, { align: 'center' });
   });
 
   metrics.forEach((metric, index) => {
     const x = 14 + (columnWidth * index) + (columnWidth / 2);
     pdf.setFont(DEFAULT_PDF_FONT_FAMILY, 'bold');
-    pdf.setFontSize(12);
+    pdf.setFontSize(11);
     pdf.setTextColor(17, 24, 39);
-    pdf.text(String(metric.value), x, y + 7.5, { align: 'center' });
+    pdf.text(String(metric.value), x, y + 10, { align: 'center' });
   });
 
-  return y + 18;
+  return y + 20;
 };
 
 const getTableConfig = (report) => ({
@@ -485,12 +529,12 @@ export const generateSummaryReportPDFBlob = async (reportInput) => {
   const pdf = new jsPDF('p', 'mm', 'a4');
   const fontFamily = await ensureReportFont(pdf);
 
-  drawFirstPageHeader(pdf, report, fontFamily);
+  const tableStartY = drawFirstPageHeader(pdf, report, fontFamily);
 
   autoTable(pdf, {
-    startY: 54,
+    startY: tableStartY,
     ...getTableConfig(report),
-    margin: { top: 26, right: 14, bottom: 42, left: 14 },
+    margin: { top: 26, right: 14, bottom: 44, left: 14 },
     styles: {
       font: fontFamily,
       fontSize: 8.6,
