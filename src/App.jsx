@@ -682,7 +682,7 @@ const generatePDFBlobReliable = async (order) => {
     statEntries: [],
     bottomStatEntries: [
       { label: 'Items', value: items.length },
-      { label: 'કુલ કિલો', value: formatMetric(totals.totalKg) },
+      { label: 'Total KG', value: formatMetric(totals.totalKg) },
     ],
     head: ['No', 'Item Name', 'Qty', 'Unit'],
     body: items.map((item, index) => [
@@ -719,9 +719,9 @@ const generateSendPDFBlobReliable = async (order) => {
     statEntries: [],
     bottomStatEntries: [
       { label: 'Items', value: items.length },
-      { label: 'કુલ કિલો', value: formatMetric(totals.totalKg) },
+      { label: 'Total KG', value: formatMetric(totals.totalKg) },
     ],
-    head: ['No', 'Item Name', 'કિલો'],
+    head: ['No', 'Item Name', 'KG'],
     body: items.map((item, index) => [
       String(index + 1),
       item.itemName || '-',
@@ -740,23 +740,21 @@ const generatePurchasePDFBlob = async (purchase) => {
 
   return createStructuredPdfBlob({
     title: 'SMVS PURCHASE REPORT',
-    subtitle: `Center: ${purchase.center || '-'}  |  Bill Date: ${formatDisplayDate(purchase.billDate || purchase.date)}`,
+    subtitle: '',
     accent: [139, 92, 246],
     surface: [245, 243, 255],
     footerText: `Purchase Bill #${purchase.billNo || '-'}${purchase.shopName ? ` | ${purchase.shopName}` : ''}`,
-    metaEntries: [
-      { label: 'Center', value: purchase.center || '-' },
-      { label: 'Shop Name', value: purchase.shopName || '-' },
-      { label: 'Bill Number', value: purchase.billNo || '-' },
-      { label: 'Bill Date', value: formatDisplayDate(purchase.billDate || purchase.date) },
-      { label: 'Submitted By', value: purchase.submittedBy || '-' },
-      { label: 'Saved Email', value: purchase.email || '-' },
+    metaEntries: [],
+    compactMetaRows: [
+      { leftLabel: 'Shop Name', leftValue: purchase.shopName || '-', rightLabel: 'Bill Number', rightValue: `#${purchase.billNo || '-'}` },
+      { leftLabel: 'Bill Date', leftValue: formatDisplayDate(purchase.billDate || purchase.date), rightLabel: 'Entry Date', rightValue: formatDisplayDate(purchase.date || purchase.billDate) },
     ],
-    statEntries: [
-      { label: 'Items', value: items.length },
-      { label: 'કુલ કિલો', value: formatMetric(totals.totalKg) },
+    statEntries: [],
+    bottomStatEntries: [
+      { label: 'Number of Items', value: items.length },
+      { label: 'Total KG', value: formatMetric(totals.totalKg) },
     ],
-    head: ['No', 'Item Name', 'કિલો'],
+    head: ['No', 'Item Name', 'KG'],
     body: items.map((item, index) => [
       String(index + 1),
       item.itemName || '-',
@@ -829,9 +827,9 @@ function ReportPreviewContent({ report }) {
               <tr>
                 <th className="px-4 py-3 text-left">વસ્તુનું નામ</th>
                 <th className="px-4 py-3 text-left">મહિનો</th>
-                <th className="px-4 py-3 text-center">{preparedReport.rangeLabel} આવક (કિલો)</th>
-                <th className="px-4 py-3 text-center">{preparedReport.rangeLabel} જાવક (કિલો)</th>
-                <th className="px-4 py-3 text-center">કુલ સ્ટોક (કિલો)</th>
+                <th className="px-4 py-3 text-center">{preparedReport.rangeLabel} આવક (KG)</th>
+                <th className="px-4 py-3 text-center">{preparedReport.rangeLabel} જાવક (KG)</th>
+                <th className="px-4 py-3 text-center">કુલ સ્ટોક (KG)</th>
               </tr>
             </thead>
             <tbody>
@@ -866,21 +864,21 @@ function ReportPreviewContent({ report }) {
         <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
           <div className="min-h-[2.5rem]">
             <p className="text-[10px] font-bold uppercase tracking-wide leading-tight text-slate-400">આવક</p>
-            <p className="text-[10px] font-bold uppercase tracking-wide leading-tight text-slate-400">કિલો</p>
+            <p className="text-[10px] font-bold uppercase tracking-wide leading-tight text-slate-400">KG</p>
           </div>
           <p className={`mt-2 text-xl sm:text-2xl font-black ${uiTheme.text}`}>{formatMetric(preparedReport.summary.totalIncome)}</p>
         </div>
         <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
           <div className="min-h-[2.5rem]">
             <p className="text-[10px] font-bold uppercase tracking-wide leading-tight text-slate-400">જાવક</p>
-            <p className="text-[10px] font-bold uppercase tracking-wide leading-tight text-slate-400">કિલો</p>
+            <p className="text-[10px] font-bold uppercase tracking-wide leading-tight text-slate-400">KG</p>
           </div>
           <p className="mt-2 text-xl sm:text-2xl font-black text-slate-900">{formatMetric(preparedReport.summary.totalOutgoing)}</p>
         </div>
         <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
           <div className="min-h-[2.5rem]">
             <p className="text-[10px] font-bold uppercase tracking-wide leading-tight text-slate-400">કુલ સ્ટોક</p>
-            <p className="text-[10px] font-bold uppercase tracking-wide leading-tight text-slate-400">કિલો</p>
+            <p className="text-[10px] font-bold uppercase tracking-wide leading-tight text-slate-400">KG</p>
           </div>
           <p className="mt-2 text-xl sm:text-2xl font-black text-slate-900">{formatMetric(preparedReport.summary.totalStock)}</p>
         </div>
@@ -1415,7 +1413,7 @@ function AdminDashboard({ user }) {
                           <p className="font-black text-white text-sm sm:text-base">{order.items.length}</p>
                         </div>
                         <div className="bg-gradient-to-br from-orange-500/10 to-orange-600/5 p-2 sm:p-3 rounded-xl border border-orange-500/20 text-center">
-                          <p className="text-[10px] text-orange-400 uppercase font-bold">કિલો</p>
+                          <p className="text-[10px] text-orange-400 uppercase font-bold">Total KG</p>
                           <p className="font-black text-orange-400 text-sm sm:text-base">{calculateTotals(order.items).totalKg}</p>
                         </div>
                       </div>
@@ -1539,7 +1537,7 @@ function AdminDashboard({ user }) {
                             <p className="font-black text-white text-sm sm:text-base">{filledItems.length}</p>
                           </div>
                           <div className="bg-gradient-to-br from-blue-500/10 to-blue-600/5 p-2 sm:p-3 rounded-xl border border-blue-500/20 text-center">
-                            <p className="text-[10px] text-blue-400 uppercase font-bold">કિલો</p>
+                            <p className="text-[10px] text-blue-400 uppercase font-bold">Total KG</p>
                             <p className="font-black text-blue-400 text-sm sm:text-base">{totalKg}</p>
                           </div>
                         </div>
@@ -1760,17 +1758,17 @@ function AdminDashboard({ user }) {
                             <p className="font-black text-white text-base">{formatMetric(preparedReport.summary.totalRows)}</p>
                           </div>
                           <div className={`bg-gradient-to-br ${uiTheme.soft} p-3 rounded-xl border ${uiTheme.border} text-center`}>
-                            <p className={`text-[10px] uppercase font-bold ${uiTheme.muted}`}>આવક (કિલો)</p>
+                            <p className={`text-[10px] uppercase font-bold ${uiTheme.muted}`}>આવક (KG)</p>
                             <p className={`font-black text-base ${uiTheme.text}`}>{formatMetric(preparedReport.summary.totalIncome)}</p>
                           </div>
                           <div className="bg-[#252525] p-3 rounded-xl border border-white/5 text-center">
-                            <p className="text-[10px] text-gray-500 uppercase font-bold">જાવક (કિલો)</p>
+                            <p className="text-[10px] text-gray-500 uppercase font-bold">જાવક (KG)</p>
                             <p className="font-black text-white text-base">{formatMetric(preparedReport.summary.totalOutgoing)}</p>
                           </div>
                         </div>
                         <div className="mb-4 space-y-1 text-xs text-gray-400">
                           <p><span className="font-bold text-gray-200">Scope:</span> {preparedReport.scope === 'center' ? 'Centewise' : 'All Centers'}</p>
-                          <p><span className="font-bold text-gray-200">કુલ સ્ટોક (કિલો):</span> {formatMetric(preparedReport.summary.totalStock)}</p>
+                          <p><span className="font-bold text-gray-200">કુલ સ્ટોક (KG):</span> {formatMetric(preparedReport.summary.totalStock)}</p>
                           <p><span className="font-bold text-gray-200">Saved Email:</span> {preparedReport.email || '-'}</p>
                         </div>
                         <div className="grid grid-cols-2 gap-2">
@@ -1867,7 +1865,7 @@ function AdminDashboard({ user }) {
               </div>
               <div className="mt-6 sm:mt-10 grid grid-cols-2 border-4 border-black p-3 sm:p-5 font-black text-center uppercase text-xs sm:text-sm tracking-tighter">
                 <div className="border-r border-gray-200">ITEMS: {previewOrder.items.length}</div>
-                <div>કિલો: {calculateTotals(previewOrder.items).totalKg}</div>
+                <div>TOTAL KG: {calculateTotals(previewOrder.items).totalKg}</div>
               </div>
             </motion.div>
           </motion.div>
@@ -1907,7 +1905,7 @@ function AdminDashboard({ user }) {
                     <tr>
                       <th className="border p-2 w-10 sm:w-12 text-center">No</th>
                       <th className="border p-2 text-left">Item Name</th>
-                      <th className="border p-2 w-16 sm:w-20 text-center">કિલો</th>
+                      <th className="border p-2 w-16 sm:w-20 text-center">KG</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1927,7 +1925,7 @@ function AdminDashboard({ user }) {
                 return (
                   <div className="mt-6 sm:mt-10 grid grid-cols-2 border-4 border-black p-3 sm:p-5 font-black text-center uppercase text-xs sm:text-sm tracking-tighter">
                     <div className="border-r border-gray-200">ITEMS: {filledItems.length}</div>
-                    <div>કિલો: {totalKg}</div>
+                    <div>TOTAL KG: {totalKg}</div>
                   </div>
                 );
               })()}
@@ -2426,7 +2424,7 @@ function PurchaseAdminPanel({ user }) {
                 <tr>
                   <th className="p-3 text-left text-gray-500 font-bold text-xs uppercase w-10">No</th>
                   <th className="p-3 text-left text-gray-500 font-bold text-xs uppercase">Item Name</th>
-                  <th className="p-3 text-center text-gray-500 font-bold text-xs uppercase w-24">કિલો</th>
+                  <th className="p-3 text-center text-gray-500 font-bold text-xs uppercase w-24">KG</th>
                   <th className="p-3 w-10" />
                 </tr>
               </thead>
@@ -2547,14 +2545,14 @@ function PurchaseAdminPanel({ user }) {
                       <p className="font-black text-white">{(purchase.items || []).length}</p>
                     </div>
                     <div className="bg-violet-500/10 p-3 rounded-xl text-center border border-violet-500/20">
-                      <p className="text-[10px] text-violet-300 uppercase font-bold">કિલો</p>
+                      <p className="text-[10px] text-violet-300 uppercase font-bold">Total KG</p>
                       <p className="font-black text-violet-200">{formatMetric(purchase.totalKg)}</p>
                     </div>
                   </div>
                   <div className="rounded-xl border border-white/5 bg-[#252525] p-3 text-xs text-gray-400 space-y-1">
                     {(purchase.items || []).slice(0, 3).map((item, index) => (
                       <p key={`${purchase.id}-${index}`} className="truncate">
-                        <span className="font-bold text-white">{item.itemName}</span> - {item.kg || 0}
+                        <span className="font-bold text-white">{item.itemName}</span> - {item.kg || 0} KG
                       </p>
                     ))}
                     {(purchase.items || []).length > 3 && (
@@ -2623,13 +2621,10 @@ function PurchaseAdminPanel({ user }) {
                 <p className="text-gray-500 text-xs mt-1 font-bold uppercase tracking-[0.2em]">દુકાન માંથી ખરીદેલ માલ</p>
               </div>
 
-              <div className="grid grid-cols-2 gap-3 sm:gap-4 text-sm mb-6 bg-gray-50 p-4 sm:p-5 rounded-2xl border border-gray-100">
-                <div><p className="text-gray-400 text-[10px] font-bold uppercase mb-1">Center</p><p className="font-bold">{previewPurchase.center || '-'}</p></div>
-                <div className="text-right"><p className="text-gray-400 text-[10px] font-bold uppercase mb-1">Shop Name</p><p className="font-bold">{previewPurchase.shopName}</p></div>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 text-sm mb-6 bg-gray-50 p-4 sm:p-5 rounded-2xl border border-gray-100">
+                <div><p className="text-gray-400 text-[10px] font-bold uppercase mb-1">Shop Name</p><p className="font-bold">{previewPurchase.shopName}</p></div>
                 <div><p className="text-gray-400 text-[10px] font-bold uppercase mb-1">Bill Number</p><p className="font-bold">#{previewPurchase.billNo}</p></div>
-                <div className="text-right"><p className="text-gray-400 text-[10px] font-bold uppercase mb-1">Bill Date</p><p className="font-bold">{formatDisplayDate(previewPurchase.billDate || previewPurchase.date)}</p></div>
-                <div><p className="text-gray-400 text-[10px] font-bold uppercase mb-1">Submitted By</p><p className="font-bold">{previewPurchase.submittedBy || '-'}</p></div>
-                <div className="text-right"><p className="text-gray-400 text-[10px] font-bold uppercase mb-1">Saved Email</p><p className="font-bold break-all">{previewPurchase.email || '-'}</p></div>
+                <div><p className="text-gray-400 text-[10px] font-bold uppercase mb-1">Bill Date</p><p className="font-bold">{formatDisplayDate(previewPurchase.billDate || previewPurchase.date)}</p></div>
               </div>
 
               <div className="overflow-x-auto">
@@ -2638,7 +2633,7 @@ function PurchaseAdminPanel({ user }) {
                     <tr>
                       <th className="border p-2 w-12 text-center">No</th>
                       <th className="border p-2 text-left">Item Name</th>
-                      <th className="border p-2 w-20 text-center">કિલો</th>
+                      <th className="border p-2 w-20 text-center">KG</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -2651,6 +2646,10 @@ function PurchaseAdminPanel({ user }) {
                     ))}
                   </tbody>
                 </table>
+              </div>
+              <div className="mt-6 sm:mt-10 grid grid-cols-2 border-4 border-black p-3 sm:p-5 font-black text-center uppercase text-xs sm:text-sm tracking-tighter">
+                <div className="border-r border-gray-200">NUMBER OF ITEMS: {(previewPurchase.items || []).length}</div>
+                <div>TOTAL KG: {formatMetric(calculateKgTotals(previewPurchase.items || []).totalKg)}</div>
               </div>
             </motion.div>
           </motion.div>
@@ -3048,7 +3047,7 @@ function EditSendOrderScreen({ order, onBack }) {
               />
               <input
                 type="number"
-                                placeholder="કિલો"
+                        placeholder="KG"
                 value={row.kg}
                 onChange={e => updateRow(row.id, 'kg', e.target.value)}
                 className="p-2.5 bg-[#252525] border border-white/10 rounded-xl text-white text-sm outline-none focus:border-blue-500/50 transition-all placeholder-gray-600 text-center"
@@ -3325,7 +3324,7 @@ function SendDashboard({ user, onBack }) {
                 <tr>
                   <th className="p-3 text-left text-gray-400 font-bold text-xs uppercase w-10">No</th>
                   <th className="p-3 text-left text-gray-400 font-bold text-xs uppercase">Item Name</th>
-                            <th className="p-3 text-center text-gray-400 font-bold text-xs uppercase w-20">કિલો</th>
+                            <th className="p-3 text-center text-gray-400 font-bold text-xs uppercase w-20">KG</th>
                 </tr>
               </thead>
               <tbody>
@@ -3440,7 +3439,7 @@ function SendDashboard({ user, onBack }) {
               <tr>
                 <th className="p-3 text-left text-gray-500 font-bold text-xs uppercase w-10">No</th>
                 <th className="p-3 text-left text-gray-500 font-bold text-xs uppercase">Item Name</th>
-                          <th className="p-3 text-center text-gray-500 font-bold text-xs uppercase w-20">કિલો</th>
+                <th className="p-3 text-center text-gray-500 font-bold text-xs uppercase w-20">KG</th>
                 <th className="p-3 w-10"></th>
               </tr>
             </thead>
@@ -3870,7 +3869,7 @@ function UserDashboard({ user, onBack = null }) {
               <p className="font-black text-white text-base sm:text-lg">{formData.center === 'Other' ? formData.centerOther : formData.center}</p>
             </div>
             <div>
-          <p className="text-[10px] text-orange-400 font-bold uppercase">કુલ કિલો</p>
+          <p className="text-[10px] text-orange-400 font-bold uppercase">Total KG</p>
               <p className="font-black text-orange-400 text-xl sm:text-2xl">{totals.totalKg}</p>
             </div>
             <div>

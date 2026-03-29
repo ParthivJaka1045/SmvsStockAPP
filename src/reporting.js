@@ -265,9 +265,9 @@ export const getVisibleReportMetrics = (reportInput) => {
   const report = hydrateReport(reportInput);
   return [
     { key: 'rows', label: 'Number of Item', value: formatMetric(report.summary.totalRows) },
-    { key: 'income', label: 'આવક કિલો', value: formatMetric(report.summary.totalIncome) },
-    { key: 'outgoing', label: 'જાવક કિલો', value: formatMetric(report.summary.totalOutgoing) },
-    { key: 'stock', label: 'કુલ સ્ટોક કિલો', value: formatMetric(report.summary.totalStock) },
+    { key: 'income', label: 'આવક KG', value: formatMetric(report.summary.totalIncome) },
+    { key: 'outgoing', label: 'જાવક KG', value: formatMetric(report.summary.totalOutgoing) },
+    { key: 'stock', label: 'કુલ સ્ટોક KG', value: formatMetric(report.summary.totalStock) },
   ];
 };
 
@@ -432,9 +432,9 @@ const drawPageFooter = (pdf, report, fontFamily) => {
 const drawSummaryMetricRow = (pdf, y, report, fontFamily) => {
   const metrics = [
     { labelLines: ['Number of', 'Item'], value: formatMetric(report.summary.totalRows), font: DEFAULT_PDF_FONT_FAMILY },
-    { labelLines: ['આવક', 'કિલો'], value: formatMetric(report.summary.totalIncome), font: fontFamily },
-    { labelLines: ['જાવક', 'કિલો'], value: formatMetric(report.summary.totalOutgoing), font: fontFamily },
-    { labelLines: ['કુલ સ્ટોક', 'કિલો'], value: formatMetric(report.summary.totalStock), font: fontFamily },
+    { labelLines: ['આવક', 'KG'], value: formatMetric(report.summary.totalIncome), font: fontFamily },
+    { labelLines: ['જાવક', 'KG'], value: formatMetric(report.summary.totalOutgoing), font: fontFamily },
+    { labelLines: ['કુલ સ્ટોક', 'KG'], value: formatMetric(report.summary.totalStock), font: fontFamily },
   ];
   const pageWidth = pdf.internal.pageSize.getWidth();
   const usableWidth = pageWidth - 28;
@@ -467,9 +467,9 @@ const getTableConfig = (report) => ({
   head: [[
     'વસ્તુનું નામ',
     'મહિનો',
-    `${report.rangeLabel} આવક (કિલો)`,
-    `${report.rangeLabel} જાવક (કિલો)`,
-    'કુલ સ્ટોક (કિલો)',
+    `${report.rangeLabel} આવક (KG)`,
+    `${report.rangeLabel} જાવક (KG)`,
+    'કુલ સ્ટોક (KG)',
   ]],
   body: report.rows.map((row) => [
     row.itemName,
