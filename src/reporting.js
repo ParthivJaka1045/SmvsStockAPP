@@ -143,7 +143,8 @@ export const formatMetric = (value) => {
 export const formatMonthLabel = (monthValue) => {
   if (!monthValue || !/^\d{4}-\d{2}$/.test(monthValue)) return '-';
   const [year, month] = monthValue.split('-').map(Number);
-  return new Intl.DateTimeFormat('en-US', { month: 'long', year: 'numeric' }).format(new Date(year, month - 1, 1));
+  const monthName = new Intl.DateTimeFormat('en-US', { month: 'long' }).format(new Date(year, month - 1, 1));
+  return `${monthName}_${year}`;
 };
 
 const getRangeLabel = (selectedDate) => `તા. 1 થી ${formatDisplayDate(selectedDate)}`;
@@ -263,10 +264,10 @@ export const hydrateReport = (report) => {
 export const getVisibleReportMetrics = (reportInput) => {
   const report = hydrateReport(reportInput);
   return [
-    { key: 'rows', label: 'Rows', value: formatMetric(report.summary.totalRows) },
-    { key: 'income', label: 'Aavak', value: formatMetric(report.summary.totalIncome) },
-    { key: 'outgoing', label: 'Javak', value: formatMetric(report.summary.totalOutgoing) },
-    { key: 'stock', label: 'Kul Stock', value: formatMetric(report.summary.totalStock) },
+    { key: 'rows', label: 'Number of Item', value: formatMetric(report.summary.totalRows) },
+    { key: 'income', label: 'આવક (કિલો)', value: formatMetric(report.summary.totalIncome) },
+    { key: 'outgoing', label: 'જાવક (કિલો)', value: formatMetric(report.summary.totalOutgoing) },
+    { key: 'stock', label: 'કુલ સ્ટોક (કિલો)', value: formatMetric(report.summary.totalStock) },
   ];
 };
 
@@ -370,31 +371,34 @@ export const getReportTheme = () => ({
   dark: [20, 83, 45],
 });
 
-const drawFirstPageHeader = (pdf, report) => {
+const drawFirstPageHeader = (pdf, report, fontFamily) => {
   const pageWidth = pdf.internal.pageSize.getWidth();
-  const centeredX = pageWidth / 2;
 
   pdf.setFillColor(236, 253, 245);
-  pdf.roundedRect(14, 10, pageWidth - 28, 34, 4, 4, 'F');
+  pdf.roundedRect(14, 10, pageWidth - 28, 32, 4, 4, 'F');
 
   pdf.setFont(DEFAULT_PDF_FONT_FAMILY, 'bold');
   pdf.setFontSize(16);
   pdf.setTextColor(6, 95, 70);
-  pdf.text(REPORT_TITLE, centeredX, 20, { align: 'center' });
+  pdf.text(REPORT_TITLE, pageWidth / 2, 18, { align: 'center' });
 
   pdf.setFont(DEFAULT_PDF_FONT_FAMILY, 'bold');
-  pdf.setFontSize(8.5);
+  pdf.setFontSize(8.2);
   pdf.setTextColor(100, 116, 139);
-  pdf.text(`Month: ${report.monthLabel}`, centeredX, 27, { align: 'center' });
-  pdf.text(`Range: ${report.rangeLabel}`, centeredX, 32.5, { align: 'center' });
-  pdf.text(`Center: ${report.centerLabel}`, centeredX, 38, { align: 'center' });
+  pdf.text(`Month: ${report.monthLabel}`, 20, 27);
+  pdf.text(`Center: ${report.centerLabel}`, pageWidth - 20, 27, { align: 'right' });
+
+  pdf.setFont(fontFamily, 'normal');
+  pdf.setFontSize(9.2);
+  pdf.setTextColor(31, 41, 55);
+  pdf.text(`Range: ${report.rangeLabel}`, 20, 34);
 
   pdf.setDrawColor(16, 185, 129);
   pdf.setLineWidth(0.7);
-  pdf.line(20, 47, pageWidth - 20, 47);
+  pdf.line(20, 45, pageWidth - 20, 45);
 };
 
-const drawContinuationHeader = (pdf, report) => {
+const drawContinuationHeader = (pdf, report, fontFamily) => {
   const pageWidth = pdf.internal.pageSize.getWidth();
 
   pdf.setFont(DEFAULT_PDF_FONT_FAMILY, 'bold');
@@ -402,14 +406,14 @@ const drawContinuationHeader = (pdf, report) => {
   pdf.setTextColor(6, 95, 70);
   pdf.text(REPORT_TITLE, 14, 15);
 
-  pdf.setFont(DEFAULT_PDF_FONT_FAMILY, 'normal');
+  pdf.setFont(fontFamily, 'normal');
   pdf.text(`${report.monthLabel} | ${report.centerLabel}`, pageWidth - 14, 15, { align: 'right' });
 
   pdf.setDrawColor(16, 185, 129);
   pdf.line(14, 18, pageWidth - 14, 18);
 };
 
-const drawPageFooter = (pdf, report) => {
+const drawPageFooter = (pdf, report, fontFamily) => {
   const pageWidth = pdf.internal.pageSize.getWidth();
   const pageHeight = pdf.internal.pageSize.getHeight();
   const currentPage = pdf.getCurrentPageInfo().pageNumber;
@@ -418,39 +422,42 @@ const drawPageFooter = (pdf, report) => {
   pdf.setDrawColor(209, 213, 219);
   pdf.line(14, pageHeight - 12, pageWidth - 14, pageHeight - 12);
 
-  pdf.setFont(DEFAULT_PDF_FONT_FAMILY, 'normal');
+  pdf.setFont(fontFamily, 'normal');
   pdf.setFontSize(8);
   pdf.setTextColor(107, 114, 128);
   pdf.text(`Range: ${report.rangeLabel}`, 14, pageHeight - 7);
   pdf.text(`Page ${currentPage} / ${totalPages}`, pageWidth - 14, pageHeight - 7, { align: 'right' });
 };
 
-const drawSummaryMetricRow = (pdf, y, report) => {
+const drawSummaryMetricRow = (pdf, y, report, fontFamily) => {
   const metrics = [
-    { label: 'Rows', value: formatMetric(report.summary.totalRows) },
-    { label: 'Aavak', value: formatMetric(report.summary.totalIncome) },
-    { label: 'Javak', value: formatMetric(report.summary.totalOutgoing) },
-    { label: 'Kul Stock', value: formatMetric(report.summary.totalStock) },
+    { label: 'Number of Item', value: formatMetric(report.summary.totalRows) },
+    { label: 'આવક (કિલો)', value: formatMetric(report.summary.totalIncome) },
+    { label: 'જાવક (કિલો)', value: formatMetric(report.summary.totalOutgoing) },
+    { label: 'કુલ સ્ટોક (કિલો)', value: formatMetric(report.summary.totalStock) },
   ];
   const pageWidth = pdf.internal.pageSize.getWidth();
   const usableWidth = pageWidth - 28;
   const columnWidth = usableWidth / metrics.length;
 
-  pdf.setFont(DEFAULT_PDF_FONT_FAMILY, 'bold');
-  pdf.setFontSize(6.8);
-  pdf.setTextColor(6, 95, 70);
   metrics.forEach((metric, index) => {
-    const x = 14 + (columnWidth * index) + (columnWidth / 2);
+    const cardX = 14 + (columnWidth * index);
+    const x = cardX + (columnWidth / 2);
     pdf.setFillColor(236, 253, 245);
-    pdf.roundedRect(14 + (columnWidth * index), y - 2, columnWidth - 1.5, 15, 2, 2, 'F');
-    pdf.text(metric.label, x, y, { align: 'center' });
+    pdf.roundedRect(cardX, y - 2, columnWidth - 1.5, 16, 2, 2, 'F');
+
+    pdf.setFont(fontFamily, 'bold');
+    pdf.setFontSize(5.7);
+    pdf.setTextColor(6, 95, 70);
+    const labelLines = pdf.splitTextToSize(metric.label, columnWidth - 8);
+    pdf.text(labelLines, x, y, { align: 'center' });
   });
 
-  pdf.setFont(DEFAULT_PDF_FONT_FAMILY, 'bold');
-  pdf.setFontSize(13);
-  pdf.setTextColor(17, 24, 39);
   metrics.forEach((metric, index) => {
     const x = 14 + (columnWidth * index) + (columnWidth / 2);
+    pdf.setFont(DEFAULT_PDF_FONT_FAMILY, 'bold');
+    pdf.setFontSize(12);
+    pdf.setTextColor(17, 24, 39);
     pdf.text(String(metric.value), x, y + 7.5, { align: 'center' });
   });
 
@@ -461,9 +468,9 @@ const getTableConfig = (report) => ({
   head: [[
     'વસ્તુનું નામ',
     'મહિનો',
-    `${report.rangeLabel} આવક`,
-    `${report.rangeLabel} જાવક`,
-    'કુલ સ્ટોક',
+    `${report.rangeLabel} આવક (કિલો)`,
+    `${report.rangeLabel} જાવક (કિલો)`,
+    'કુલ સ્ટોક (કિલો)',
   ]],
   body: report.rows.map((row) => [
     row.itemName,
@@ -479,13 +486,12 @@ export const generateSummaryReportPDFBlob = async (reportInput) => {
   const pdf = new jsPDF('p', 'mm', 'a4');
   const fontFamily = await ensureReportFont(pdf);
 
-  drawFirstPageHeader(pdf, report);
-  drawSummaryMetricRow(pdf, 54, report);
+  drawFirstPageHeader(pdf, report, fontFamily);
 
   autoTable(pdf, {
-    startY: 76,
+    startY: 54,
     ...getTableConfig(report),
-    margin: { top: 26, right: 14, bottom: 16, left: 14 },
+    margin: { top: 26, right: 14, bottom: 42, left: 14 },
     styles: {
       font: fontFamily,
       fontSize: 8.6,
@@ -510,14 +516,18 @@ export const generateSummaryReportPDFBlob = async (reportInput) => {
     },
     didDrawPage: () => {
       if (pdf.getCurrentPageInfo().pageNumber > 1) {
-        drawContinuationHeader(pdf, report);
+        drawContinuationHeader(pdf, report, fontFamily);
       }
-      drawPageFooter(pdf, report);
+      drawPageFooter(pdf, report, fontFamily);
     },
   });
 
+  if (pdf.lastAutoTable) {
+    drawSummaryMetricRow(pdf, pdf.lastAutoTable.finalY + 8, report, fontFamily);
+  }
+
   if (!pdf.lastAutoTable) {
-    drawPageFooter(pdf, report);
+    drawPageFooter(pdf, report, fontFamily);
   }
 
   return pdf.output('blob');
