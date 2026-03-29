@@ -180,6 +180,11 @@ const isDateWithinSelectedMonth = (value, monthValue, selectedDate) => {
   return dateValue >= getMonthStartDate(monthValue) && dateValue <= selectedDate;
 };
 
+const matchesCenterFilter = (candidateCenter, scope, targetCenter) => {
+  if (scope !== 'center') return true;
+  return normalizeText(candidateCenter) === normalizeText(targetCenter);
+};
+
 const getSendItemValue = (item) => safeNumber(item?.kg);
 
 const getRequestItemValue = (item) => safeNumber(item?.qty);
@@ -212,6 +217,9 @@ export const hydrateReport = (report) => {
   const month = getNormalizedMonthValue(report.month || report.monthValue || report.fromDate || report.toDate);
   const selectedDate = ensureDateInMonth(month, report.selectedDate || report.toDate || report.generatedAtIso || report.generatedAt);
   const monthLabel = report.monthLabel || formatMonthLabel(month);
+  const scope = report.scope === 'center' ? 'center' : 'all';
+  const center = (report.center || '').toString().trim();
+  const centerLabel = report.centerLabel || (scope === 'center' && center ? center : 'All Centers / Full Report');
 
   const rows = Array.isArray(report.rows) && report.rows.length > 0
     ? report.rows.map((row) => ({
@@ -234,6 +242,9 @@ export const hydrateReport = (report) => {
     month,
     monthLabel,
     selectedDate,
+    scope,
+    center,
+    centerLabel,
     rangeLabel: report.rangeLabel || getRangeLabel(selectedDate),
     generatedAtIso:
       report.generatedAtIso || getIsoString(report.generatedAt) || getIsoString(report.generatedOn) || new Date().toISOString(),
@@ -266,14 +277,21 @@ export const buildSummaryReport = ({
   month = '',
   selectedDate = '',
   createdBy = 'Admin',
+  scope = 'all',
+  center = '',
 }) => {
   const normalizedMonth = getNormalizedMonthValue(month || selectedDate || new Date());
   const normalizedSelectedDate = ensureDateInMonth(normalizedMonth, selectedDate);
   const monthLabel = formatMonthLabel(normalizedMonth);
+  const normalizedScope = scope === 'center' ? 'center' : 'all';
+  const normalizedCenter = (center || '').toString().trim();
   const rowMap = new Map();
 
   orders
-    .filter((order) => isDateWithinSelectedMonth(order.date, normalizedMonth, normalizedSelectedDate))
+    .filter((order) =>
+      isDateWithinSelectedMonth(order.date, normalizedMonth, normalizedSelectedDate)
+      && matchesCenterFilter(order.center, normalizedScope, normalizedCenter),
+    )
     .forEach((order) => {
       const items = Array.isArray(order.items) ? order.items : [];
       items.forEach((item) => {
@@ -282,7 +300,10 @@ export const buildSummaryReport = ({
     });
 
   sendOrders
-    .filter((order) => isDateWithinSelectedMonth(order.date, normalizedMonth, normalizedSelectedDate))
+    .filter((order) =>
+      isDateWithinSelectedMonth(order.date, normalizedMonth, normalizedSelectedDate)
+      && matchesCenterFilter(order.fromCenter, normalizedScope, normalizedCenter),
+    )
     .forEach((order) => {
       const items = Array.isArray(order.items) ? order.items : [];
       items.forEach((item) => {
@@ -291,7 +312,10 @@ export const buildSummaryReport = ({
     });
 
   purchases
-    .filter((purchase) => isDateWithinSelectedMonth(purchase.billDate || purchase.date, normalizedMonth, normalizedSelectedDate))
+    .filter((purchase) =>
+      isDateWithinSelectedMonth(purchase.billDate || purchase.date, normalizedMonth, normalizedSelectedDate)
+      && matchesCenterFilter(purchase.center, normalizedScope, normalizedCenter),
+    )
     .forEach((purchase) => {
       const items = Array.isArray(purchase.items) ? purchase.items : [];
       items.forEach((item) => {
@@ -308,6 +332,9 @@ export const buildSummaryReport = ({
     month: normalizedMonth,
     monthLabel,
     selectedDate: normalizedSelectedDate,
+    scope: normalizedScope,
+    center: normalizedCenter,
+    centerLabel: normalizedScope === 'center' && normalizedCenter ? normalizedCenter : 'All Centers / Full Report',
     rangeLabel: getRangeLabel(normalizedSelectedDate),
     title: REPORT_TITLE,
     createdBy,
@@ -328,7 +355,8 @@ const sanitizeFilePart = (value) =>
 
 export const getReportFileName = (reportInput) => {
   const report = hydrateReport(reportInput);
-  return `smvs-monthly-stock-${sanitizeFilePart(report.month)}-${sanitizeFilePart(report.selectedDate)}.pdf`;
+  const centerPart = report.scope === 'center' ? `-${sanitizeFilePart(report.centerLabel)}` : '';
+  return `smvs-monthly-stock-${sanitizeFilePart(report.month)}-${sanitizeFilePart(report.selectedDate)}${centerPart}.pdf`;
 };
 
 export const getReportTheme = () => ({
@@ -355,10 +383,11 @@ const drawFirstPageHeader = (pdf, report, fontFamily) => {
   pdf.setFontSize(10);
   pdf.text(`Month: ${report.monthLabel}`, centeredX, 26, { align: 'center' });
   pdf.text(`Range: ${report.rangeLabel}`, centeredX, 32, { align: 'center' });
-  pdf.text(`Generated: ${formatDisplayDate(report.generatedAtIso)}`, centeredX, 38, { align: 'center' });
+  pdf.text(`Center: ${report.centerLabel}`, centeredX, 38, { align: 'center' });
+  pdf.text(`Generated: ${formatDisplayDate(report.generatedAtIso)}`, centeredX, 44, { align: 'center' });
 
   pdf.setDrawColor(156, 163, 175);
-  pdf.line(14, 42, pageWidth - 14, 42);
+  pdf.line(14, 48, pageWidth - 14, 48);
 };
 
 const drawContinuationHeader = (pdf, report, fontFamily) => {
@@ -370,7 +399,7 @@ const drawContinuationHeader = (pdf, report, fontFamily) => {
   pdf.text(REPORT_TITLE, 14, 15);
 
   pdf.setFont(fontFamily, 'normal');
-  pdf.text(report.monthLabel, pageWidth - 14, 15, { align: 'right' });
+  pdf.text(`${report.monthLabel} | ${report.centerLabel}`, pageWidth - 14, 15, { align: 'right' });
 
   pdf.setDrawColor(209, 213, 219);
   pdf.line(14, 18, pageWidth - 14, 18);
@@ -448,10 +477,10 @@ export const generateSummaryReportPDFBlob = async (reportInput) => {
   const fontFamily = await ensureReportFont(pdf);
 
   drawFirstPageHeader(pdf, report, fontFamily);
-  drawSummaryMetricRow(pdf, 52, report, fontFamily);
+  drawSummaryMetricRow(pdf, 58, report, fontFamily);
 
   autoTable(pdf, {
-    startY: 74,
+    startY: 80,
     ...getTableConfig(report),
     margin: { top: 26, right: 14, bottom: 16, left: 14 },
     styles: {

@@ -4,7 +4,7 @@ import { db } from './firebase';
 import { collection, addDoc, getDocs, getDoc, query, orderBy, doc, where, updateDoc, deleteDoc } from 'firebase/firestore'; 
 import { categories, centerData } from './data';
 import jsPDF from 'jspdf';
-import html2canvas from 'html2canvas';
+import autoTable from 'jspdf-autotable';
 import emailjs from 'emailjs-com'; 
 import gujaratiFontBoldUrl from './assets/fonts/NotoSansGujarati-Bold.ttf?url';
 import gujaratiFontRegularUrl from './assets/fonts/NotoSansGujarati-Regular.ttf?url';
@@ -105,18 +105,22 @@ const getInitialRouteState = () => {
   const orderId = params.get('orderId');
   const sendOrderId = params.get('sendOrderId');
   const reportId = params.get('reportId');
+  const purchaseId = params.get('purchaseId');
 
   if (reportId) {
-    return { view: 'single-report', directOrderId: null, directSendOrderId: null, directReportId: reportId };
+    return { view: 'single-report', directOrderId: null, directSendOrderId: null, directReportId: reportId, directPurchaseId: null };
+  }
+  if (purchaseId) {
+    return { view: 'single-purchase', directOrderId: null, directSendOrderId: null, directReportId: null, directPurchaseId: purchaseId };
   }
   if (sendOrderId) {
-    return { view: 'single-send-order', directOrderId: null, directSendOrderId: sendOrderId, directReportId: null };
+    return { view: 'single-send-order', directOrderId: null, directSendOrderId: sendOrderId, directReportId: null, directPurchaseId: null };
   }
   if (orderId) {
-    return { view: 'single-order', directOrderId: orderId, directSendOrderId: null, directReportId: null };
+    return { view: 'single-order', directOrderId: orderId, directSendOrderId: null, directReportId: null, directPurchaseId: null };
   }
 
-  return { view: 'login', directOrderId: null, directSendOrderId: null, directReportId: null };
+  return { view: 'login', directOrderId: null, directSendOrderId: null, directReportId: null, directPurchaseId: null };
 };
 
 function App() {
@@ -130,6 +134,7 @@ function App() {
   const directOrderId = initialRoute.directOrderId;
   const directSendOrderId = initialRoute.directSendOrderId;
   const directReportId = initialRoute.directReportId;
+  const directPurchaseId = initialRoute.directPurchaseId;
 
   useEffect(() => {
     emailjs.init("m14CzkMDHuJeLH0VK"); 
@@ -161,6 +166,10 @@ function App() {
 
   if (view === 'single-report' && directReportId) {
     return <SingleReportView reportId={directReportId} onBack={() => { setView('login'); window.history.replaceState(null, '', '/'); }} />;
+  }
+
+  if (view === 'single-purchase' && directPurchaseId) {
+    return <SinglePurchaseView purchaseId={directPurchaseId} onBack={() => { setView('login'); window.history.replaceState(null, '', '/'); }} />;
   }
 
   return (
@@ -316,41 +325,88 @@ function App() {
 }
 
 // --- SHARED HELPERS ---
-// Last page has footer (totals + signatures) so fewer items fit
-const ITEMS_FULL_PAGE = 26;  // Pages WITHOUT footer (intermediate pages)
-const ITEMS_LAST_PAGE = 18;  // Pages WITH footer (last page / single page)
+const PDF_FONT_FAMILY = 'NotoSansGujaratiApp';
+const PDF_FALLBACK_FONT = 'helvetica';
+let pdfFontAssetsPromise = null;
 
-const getPages = (items) => {
-  const pages = [];
-  const all = [...items];
-  const totalItems = all.length;
+const sanitizeFilePart = (value) =>
+  (value || '')
+    .toString()
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gi, '-')
+    .replace(/^-+|-+$/g, '') || 'record';
 
-  // If all items fit on one page (with footer)
-  if (totalItems <= ITEMS_LAST_PAGE) {
-    pages.push(all);
-    return pages;
+const buildPublicRecordLink = (paramName, recordId) =>
+  `${window.location.origin}${window.location.pathname}?${paramName}=${encodeURIComponent(recordId)}`;
+
+const getResolvedCenterValue = (selectedCenter, otherCenter = '') =>
+  selectedCenter === 'Other' ? otherCenter.trim() : (selectedCenter || '').trim();
+
+const getCenterScopeLabel = (scope, center) =>
+  scope === 'center' && center ? center : 'All Centers / Full Report';
+
+const arrayBufferToBase64 = (buffer) => {
+  let binary = '';
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    const chunk = bytes.subarray(index, index + chunkSize);
+    binary += String.fromCharCode(...chunk);
   }
 
-  // Fill intermediate pages (no footer), reserve last page for footer
-  let remaining = [...all];
-  while (remaining.length > ITEMS_LAST_PAGE) {
-    pages.push(remaining.splice(0, ITEMS_FULL_PAGE));
+  return btoa(binary);
+};
+
+const loadPdfFontAssets = async () => {
+  if (!pdfFontAssetsPromise) {
+    pdfFontAssetsPromise = Promise.all([
+      { fileName: 'NotoSansGujarati-Regular.ttf', fontUrl: gujaratiFontRegularUrl, style: 'normal' },
+      { fileName: 'NotoSansGujarati-Bold.ttf', fontUrl: gujaratiFontBoldUrl, style: 'bold' },
+    ].map(async ({ fileName, fontUrl, style }) => {
+      const response = await fetch(fontUrl);
+      if (!response.ok) throw new Error(`Font download failed for ${fileName}`);
+      const buffer = await response.arrayBuffer();
+      return {
+        fileName,
+        style,
+        base64: arrayBufferToBase64(buffer),
+      };
+    }));
   }
-  // Last page (has footer)
-  if (remaining.length > 0) {
-    pages.push(remaining);
+
+  return pdfFontAssetsPromise;
+};
+
+const ensurePdfFont = async (pdf) => {
+  try {
+    const assets = await loadPdfFontAssets();
+    assets.forEach(({ fileName, style, base64 }) => {
+      if (!pdf.existsFileInVFS(fileName)) {
+        pdf.addFileToVFS(fileName, base64);
+      }
+      pdf.addFont(fileName, PDF_FONT_FAMILY, style);
+    });
+    return PDF_FONT_FAMILY;
+  } catch (error) {
+    console.warn('PDF Gujarati font load failed. Falling back to Helvetica.', error);
+    return PDF_FALLBACK_FONT;
   }
-  return pages;
 };
 
 const calculateTotals = (items) => {
   let totalKg = 0;
-  items.forEach(item => {
-    const qty = parseFloat(item.qty) || 0;
-    totalKg += qty;
+  items.forEach((item) => {
+    totalKg += parseFloat(item.qty) || 0;
   });
   return { totalItems: items.length, totalKg };
 };
+
+const calculateKgTotals = (items) => ({
+  totalItems: items.length,
+  totalKg: items.reduce((sum, item) => sum + (parseFloat(item.kg) || 0), 0),
+});
 
 const getSmartFileName = (order) => {
   const d = new Date(order.date);
@@ -359,6 +415,12 @@ const getSmartFileName = (order) => {
   const year = d.getFullYear();
   return `${day} ${month}_${year}_${order.center}`;
 };
+
+const getSendFileName = (order) =>
+  `send-${sanitizeFilePart(order?.fromCenter)}-${sanitizeFilePart(order?.chalanNo)}.pdf`;
+
+const getPurchaseFileName = (purchase) =>
+  `purchase-${sanitizeFilePart(purchase?.center || purchase?.shopName)}-${sanitizeFilePart(purchase?.billNo)}.pdf`;
 
 // Category icons for visual appeal
 const categoryIcons = {
@@ -373,275 +435,298 @@ const categoryIcons = {
   "અન્ય": "📦"
 };
 
-// --- Gujarati font loading for PDF HTML rendering ---
-let _gujaratiFontDataUrlPromise = null;
-const getGujaratiFontDataUrls = async () => {
-  if (!_gujaratiFontDataUrlPromise) {
-    _gujaratiFontDataUrlPromise = Promise.all(
-      [gujaratiFontRegularUrl, gujaratiFontBoldUrl].map(async (url) => {
-        const resp = await fetch(url);
-        const blob = await resp.blob();
-        return new Promise((resolve) => {
-          const reader = new FileReader();
-          reader.onloadend = () => resolve(reader.result);
-          reader.readAsDataURL(blob);
-        });
-      })
-    );
-  }
-  return _gujaratiFontDataUrlPromise;
+const compactPdfValue = (value) => {
+  const text = (value || '-').toString();
+  return text.length > 46 ? `${text.slice(0, 43)}...` : text;
 };
 
-const buildFontFaceCSS = (regularDataUrl, boldDataUrl) => `
-  @font-face {
-    font-family: 'NotoGujarati';
-    src: url('${regularDataUrl}') format('truetype');
-    font-weight: 400;
-    font-style: normal;
+const drawPdfFooter = (pdf, fontFamily, footerText = '') => {
+  const pageWidth = pdf.internal.pageSize.getWidth();
+  const pageHeight = pdf.internal.pageSize.getHeight();
+  const currentPage = pdf.getCurrentPageInfo().pageNumber;
+  const totalPages = pdf.getNumberOfPages();
+
+  pdf.setDrawColor(226, 232, 240);
+  pdf.line(14, pageHeight - 12, pageWidth - 14, pageHeight - 12);
+
+  pdf.setFont(fontFamily, 'normal');
+  pdf.setFontSize(8);
+  pdf.setTextColor(100, 116, 139);
+  if (footerText) {
+    pdf.text(footerText, 14, pageHeight - 7);
   }
-  @font-face {
-    font-family: 'NotoGujarati';
-    src: url('${boldDataUrl}') format('truetype');
-    font-weight: 700;
-    font-style: normal;
+  pdf.text(`Page ${currentPage} / ${totalPages}`, pageWidth - 14, pageHeight - 7, { align: 'right' });
+};
+
+const drawPdfContinuationHeader = (pdf, fontFamily, title, subtitle, accent) => {
+  const pageWidth = pdf.internal.pageSize.getWidth();
+
+  pdf.setFont(fontFamily, 'bold');
+  pdf.setFontSize(10);
+  pdf.setTextColor(...accent);
+  pdf.text(title, 14, 14);
+
+  if (subtitle) {
+    pdf.setFont(fontFamily, 'normal');
+    pdf.setFontSize(8.5);
+    pdf.setTextColor(100, 116, 139);
+    pdf.text(subtitle, pageWidth - 14, 14, { align: 'right' });
   }
-`;
 
-const GJ_FONT = "'NotoGujarati', sans-serif";
+  pdf.setDrawColor(...accent);
+  pdf.line(14, 17, pageWidth - 14, 17);
+};
 
-// --- RELIABLE PDF GENERATOR (pure inline styles, no Tailwind dependency) ---
-const buildPDFPageHTML = (order, pageItems, pageIndex, totalPages, startNo) => {
-  const totals = calculateTotals(order.items);
-  const isLastPage = pageIndex === totalPages - 1;
-  
-  let rowsHTML = pageItems.map((item, idx) => {
-    const itemNo = startNo + idx;
-    const bgColor = idx % 2 === 0 ? '#ffffff' : '#f9f9f9';
-    return `<tr style="background:${bgColor}">
-      <td style="border:1px solid #333;padding:6px 10px;text-align:center;font-family:${GJ_FONT};font-size:13px;color:#666">${itemNo}</td>
-      <td style="border:1px solid #333;padding:6px 10px;font-weight:700;font-size:14px;font-family:${GJ_FONT}">${item.name}</td>
-      <td style="border:1px solid #333;padding:6px 10px;text-align:center;font-weight:900;font-size:15px;color:#ea580c;font-family:${GJ_FONT}">${item.qty}</td>
-      <td style="border:1px solid #333;padding:6px 10px;text-align:center;font-size:11px;font-weight:700;text-transform:uppercase;color:#888;font-family:${GJ_FONT}">${item.unit}</td>
-    </tr>`;
-  }).join('');
+const drawPdfMetaGrid = (pdf, startY, fontFamily, metaEntries, accent, surface) => {
+  if (!metaEntries.length) return startY;
 
-  const formattedDate = order.date ? order.date.split('-').reverse().join('-') : '';
+  const pageWidth = pdf.internal.pageSize.getWidth();
+  const usableWidth = pageWidth - 28;
+  const columnGap = 4;
+  const columns = 2;
+  const cardWidth = (usableWidth - columnGap) / columns;
+  const cardHeight = 14;
+  const rows = Math.ceil(metaEntries.length / columns);
 
-  const footerHTML = isLastPage ? `
-    <div style="margin-top:auto;padding-top:15px">
-      <div style="border:3px solid #222;border-radius:12px;padding:14px 20px;display:flex;justify-content:space-around;font-weight:900;text-transform:uppercase;font-size:14px;font-family:${GJ_FONT};background:#f8f8f8">
-        <span style="color:#333">📦 ITEMS: <span style="color:#ea580c">${totals.totalItems}</span></span>
-        <span style="color:#333">⚖️ KG: <span style="color:#ea580c">${totals.totalKg}</span></span>
-      </div>
-      <div style="display:flex;justify-content:space-between;margin-top:40px;padding:0 40px">
-        <div style="text-align:center">
-          <div style="border-top:2px solid #333;width:150px;padding-top:8px;font-weight:700;font-size:11px;text-transform:uppercase;font-family:${GJ_FONT};color:#555">Receiver Sign</div>
-        </div>
-        <div style="text-align:center">
-          <div style="border-top:2px solid #333;width:150px;padding-top:8px;font-weight:700;font-size:11px;text-transform:uppercase;font-family:${GJ_FONT};color:#555">Verified By</div>
-        </div>
-      </div>
-    </div>
-  ` : '';
+  metaEntries.forEach((entry, index) => {
+    const rowIndex = Math.floor(index / columns);
+    const columnIndex = index % columns;
+    const x = 14 + (columnIndex * (cardWidth + columnGap));
+    const y = startY + (rowIndex * (cardHeight + 3));
 
-  return `
-    <div style="width:794px;height:1123px;padding:40px 45px;box-sizing:border-box;background:#ffffff;color:#000;font-family:${GJ_FONT};display:flex;flex-direction:column">
-      <!-- Header -->
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;padding-bottom:12px;border-bottom:4px solid #ea580c;margin-bottom:15px;flex-shrink:0">
-        <div>
-          <h1 style="color:#ea580c;font-size:26px;font-weight:900;margin:0;text-transform:uppercase;letter-spacing:-0.5px;font-family:${GJ_FONT}">SMVS STOCK REQUEST</h1>
-          <p style="font-size:9px;color:#999;margin:3px 0 0 0;font-weight:700;text-transform:uppercase;letter-spacing:2px;font-family:${GJ_FONT}">Samp Swarup Mandal Video Seva</p>
-        </div>
-        <div style="text-align:right">
-          <h2 style="font-size:18px;font-weight:800;margin:0;text-transform:uppercase;color:#333;font-family:${GJ_FONT}">${order.center}</h2>
-          <p style="font-weight:700;margin:3px 0 0 0;font-size:12px;font-family:${GJ_FONT};color:#666">#${order.chalanNo} &nbsp;|&nbsp; ${formattedDate}</p>
-          ${order.senderName ? `<p style="font-size:10px;color:#888;margin:2px 0 0 0;font-family:${GJ_FONT}">Sender: <strong style="color:#333">${order.senderName}</strong>${order.post ? ` (${order.post})` : ''}${order.mobileNumber ? ` | ${order.mobileNumber}` : ''}</p>` : ''}
-          ${order.globalId ? `<p style="font-size:10px;color:#888;margin:2px 0 0 0;font-family:${GJ_FONT}">Global ID: <strong style="color:#333">${order.globalId}</strong></p>` : ''}
-        </div>
-      </div>
-      ${totalPages > 1 ? `<div style="text-align:right;font-size:9px;color:#aaa;margin-bottom:5px;font-family:${GJ_FONT};font-weight:600;flex-shrink:0">Page ${pageIndex + 1} of ${totalPages}</div>` : ''}
-      <!-- Table -->
-      <table style="width:100%;border-collapse:collapse;border:2px solid #333;font-size:14px;flex-shrink:0">
-        <thead>
-          <tr style="background:linear-gradient(135deg,#ea580c,#dc2626)">
-            <th style="border:1px solid #333;padding:10px 8px;color:#fff;font-weight:800;font-size:12px;width:45px;font-family:${GJ_FONT}">No</th>
-            <th style="border:1px solid #333;padding:10px 8px;color:#fff;font-weight:800;font-size:12px;text-align:left;font-family:${GJ_FONT}">Item Name</th>
-            <th style="border:1px solid #333;padding:10px 8px;color:#fff;font-weight:800;font-size:12px;width:65px;font-family:${GJ_FONT}">Qty</th>
-            <th style="border:1px solid #333;padding:10px 8px;color:#fff;font-weight:800;font-size:12px;width:65px;font-family:${GJ_FONT}">Unit</th>
-          </tr>
-        </thead>
-        <tbody>${rowsHTML}</tbody>
-      </table>
-      ${footerHTML}
-    </div>
-  `;
+    pdf.setFillColor(...surface);
+    pdf.roundedRect(x, y, cardWidth, cardHeight, 2, 2, 'F');
+
+    pdf.setFont(fontFamily, 'bold');
+    pdf.setFontSize(6.5);
+    pdf.setTextColor(...accent);
+    pdf.text(entry.label, x + 3, y + 4.5);
+
+    pdf.setFont(fontFamily, 'normal');
+    pdf.setFontSize(8.3);
+    pdf.setTextColor(15, 23, 42);
+    pdf.text(compactPdfValue(entry.value), x + 3, y + 10);
+  });
+
+  return startY + (rows * (cardHeight + 3));
+};
+
+const drawPdfStatCards = (pdf, startY, fontFamily, statEntries, accent, surface) => {
+  if (!statEntries.length) return startY;
+
+  const pageWidth = pdf.internal.pageSize.getWidth();
+  const gap = 4;
+  const columns = Math.max(1, Math.min(statEntries.length, 3));
+  const cardWidth = (pageWidth - 28 - (gap * (columns - 1))) / columns;
+
+  statEntries.forEach((entry, index) => {
+    const x = 14 + (index * (cardWidth + gap));
+
+    pdf.setFillColor(...surface);
+    pdf.roundedRect(x, startY, cardWidth, 16, 2, 2, 'F');
+
+    pdf.setFont(fontFamily, 'bold');
+    pdf.setFontSize(6.8);
+    pdf.setTextColor(...accent);
+    pdf.text(entry.label, x + 3, startY + 5);
+
+    pdf.setFont(fontFamily, 'bold');
+    pdf.setFontSize(12);
+    pdf.setTextColor(15, 23, 42);
+    pdf.text(String(entry.value), x + 3, startY + 11.5);
+  });
+
+  return startY + 21;
+};
+
+const createStructuredPdfBlob = async ({
+  title,
+  subtitle,
+  accent,
+  surface,
+  footerText,
+  metaEntries,
+  statEntries,
+  head,
+  body,
+  columnStyles = {},
+}) => {
+  const pdf = new jsPDF('p', 'mm', 'a4');
+  const fontFamily = await ensurePdfFont(pdf);
+  const pageWidth = pdf.internal.pageSize.getWidth();
+
+  pdf.setFont(fontFamily, 'bold');
+  pdf.setFontSize(17);
+  pdf.setTextColor(...accent);
+  pdf.text(title, 14, 18);
+
+  if (subtitle) {
+    pdf.setFont(fontFamily, 'normal');
+    pdf.setFontSize(9);
+    pdf.setTextColor(100, 116, 139);
+    pdf.text(subtitle, 14, 24);
+  }
+
+  pdf.setDrawColor(...accent);
+  pdf.setLineWidth(0.6);
+  pdf.line(14, 28, pageWidth - 14, 28);
+
+  let startY = drawPdfMetaGrid(pdf, 33, fontFamily, metaEntries, accent, surface);
+  startY = drawPdfStatCards(pdf, startY + 1, fontFamily, statEntries, accent, surface);
+
+  autoTable(pdf, {
+    startY: startY + 2,
+    head: [head],
+    body,
+    margin: { top: 22, right: 14, bottom: 16, left: 14 },
+    styles: {
+      font: fontFamily,
+      fontSize: 8.5,
+      cellPadding: 2.4,
+      overflow: 'linebreak',
+      textColor: [31, 41, 55],
+      lineColor: [226, 232, 240],
+      lineWidth: 0.18,
+      valign: 'middle',
+    },
+    headStyles: {
+      fillColor: accent,
+      textColor: [255, 255, 255],
+      fontStyle: 'bold',
+      lineColor: accent,
+      lineWidth: 0.2,
+    },
+    alternateRowStyles: {
+      fillColor: [248, 250, 252],
+    },
+    bodyStyles: {
+      minCellHeight: 8.5,
+    },
+    columnStyles,
+    didDrawPage: () => {
+      if (pdf.getCurrentPageInfo().pageNumber > 1) {
+        drawPdfContinuationHeader(pdf, fontFamily, title, subtitle, accent);
+      }
+      drawPdfFooter(pdf, fontFamily, footerText);
+    },
+  });
+
+  if (!pdf.lastAutoTable) {
+    drawPdfFooter(pdf, fontFamily, footerText);
+  }
+
+  return pdf.output('blob');
 };
 
 const generatePDFBlobReliable = async (order) => {
-  const pages = getPages(order.items);
-  const totalPages = pages.length;
+  const items = (order.items || []).filter((item) => item?.name?.trim());
+  const totals = calculateTotals(items);
 
-  const [regularDataUrl, boldDataUrl] = await getGujaratiFontDataUrls();
-  const fontFaceCSS = buildFontFaceCSS(regularDataUrl, boldDataUrl);
-
-  const container = document.createElement('div');
-  container.style.cssText = 'position:fixed;left:-9999px;top:0;z-index:-1;';
-  document.body.appendChild(container);
-
-  const styleEl = document.createElement('style');
-  styleEl.textContent = fontFaceCSS;
-  container.appendChild(styleEl);
-
-  let startNo = 1;
-  const pagesHTML = pages.map((pageItems, i) => {
-    const html = buildPDFPageHTML(order, pageItems, i, totalPages, startNo);
-    startNo += pageItems.length;
-    return html;
-  }).join('');
-  container.insertAdjacentHTML('beforeend', pagesHTML);
-
-  await document.fonts.ready;
-  await new Promise(r => setTimeout(r, 600));
-
-  const pageElements = container.querySelectorAll(':scope > div');
-  const pdf = new jsPDF('p', 'mm', 'a4');
-
-  for (let i = 0; i < pageElements.length; i++) {
-    try {
-      const canvas = await html2canvas(pageElements[i], {
-        scale: 3,
-        useCORS: true,
-        backgroundColor: '#ffffff',
-        logging: false,
-        allowTaint: true,
-        width: 794,
-        height: 1123
-      });
-      const imgData = canvas.toDataURL('image/jpeg', 0.95);
-      if (i > 0) pdf.addPage();
-      pdf.addImage(imgData, 'JPEG', 0, 0, 210, 297);
-    } catch (err) {
-      console.error('PDF page error:', err);
-    }
-  }
-
-  document.body.removeChild(container);
-  return pdf.output('blob');
-};
-
-// --- SEND PDF GENERATOR ---
-const buildSendPDFPageHTML = (order, pageItems, pageIndex, totalPages, startNo) => {
-  const isLastPage = pageIndex === totalPages - 1;
-  const totalItems = order.items.length;
-  const totalKg = order.items.reduce((sum, r) => sum + (parseFloat(r.kg) || 0), 0);
-
-  let rowsHTML = pageItems.map((row, idx) => {
-    const itemNo = startNo + idx;
-    const bgColor = idx % 2 === 0 ? '#ffffff' : '#f9f9f9';
-    return `<tr style="background:${bgColor}">
-      <td style="border:1px solid #333;padding:6px 10px;text-align:center;font-family:${GJ_FONT};font-size:13px;color:#666">${itemNo}</td>
-      <td style="border:1px solid #333;padding:6px 10px;font-weight:700;font-size:14px;font-family:${GJ_FONT}">${row.itemName}</td>
-      <td style="border:1px solid #333;padding:6px 10px;text-align:center;font-weight:900;font-size:15px;color:#ea580c;font-family:${GJ_FONT}">${row.kg || '-'}</td>
-    </tr>`;
-  }).join('');
-
-  const formattedDate = order.date ? order.date.split('-').reverse().join('-') : '';
-
-  const footerHTML = isLastPage ? `
-    <div style="margin-top:auto;padding-top:15px">
-      <div style="border:3px solid #222;border-radius:12px;padding:14px 20px;display:flex;justify-content:space-around;font-weight:900;text-transform:uppercase;font-size:14px;font-family:${GJ_FONT};background:#f8f8f8">
-        <span style="color:#333">📦 ITEMS: <span style="color:#2563eb">${totalItems}</span></span>
-        <span style="color:#333">⚖️ KG: <span style="color:#ea580c">${totalKg}</span></span>
-      </div>
-      <div style="display:flex;justify-content:space-between;margin-top:40px;padding:0 40px">
-        <div style="text-align:center">
-          <div style="border-top:2px solid #333;width:150px;padding-top:8px;font-weight:700;font-size:11px;text-transform:uppercase;font-family:${GJ_FONT};color:#555">Sender Sign</div>
-        </div>
-        <div style="text-align:center">
-          <div style="border-top:2px solid #333;width:150px;padding-top:8px;font-weight:700;font-size:11px;text-transform:uppercase;font-family:${GJ_FONT};color:#555">Receiver Sign</div>
-        </div>
-      </div>
-    </div>
-  ` : '';
-
-  return `
-    <div style="width:794px;height:1123px;padding:40px 45px;box-sizing:border-box;background:#ffffff;color:#000;font-family:${GJ_FONT};display:flex;flex-direction:column">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;padding-bottom:12px;border-bottom:4px solid #2563eb;margin-bottom:15px;flex-shrink:0">
-        <div>
-          <h1 style="color:#2563eb;font-size:26px;font-weight:900;margin:0;text-transform:uppercase;letter-spacing:-0.5px;font-family:${GJ_FONT}">SMVS MATERIAL DISPATCH</h1>
-          <p style="font-size:9px;color:#999;margin:3px 0 0 0;font-weight:700;text-transform:uppercase;letter-spacing:2px;font-family:${GJ_FONT}">Samp Swarup Mandal Video Seva</p>
-        </div>
-        <div style="text-align:right">
-          <h2 style="font-size:16px;font-weight:800;margin:0;text-transform:uppercase;color:#333;font-family:${GJ_FONT}">FROM: ${order.fromCenter}</h2>
-          <p style="font-size:13px;font-weight:700;margin:2px 0 0 0;color:#666;font-family:${GJ_FONT}">TO: Swaminarayan Dham</p>
-          <p style="font-weight:700;margin:3px 0 0 0;font-size:12px;font-family:${GJ_FONT};color:#666">#${order.chalanNo} &nbsp;|&nbsp; ${formattedDate}</p>
-          ${order.senderName ? `<p style="font-size:10px;color:#888;margin:2px 0 0 0;font-family:${GJ_FONT}">Sender: <strong style="color:#333">${order.senderName}</strong>${order.post ? ` (${order.post})` : ''}${order.mobileNumber ? ` | ${order.mobileNumber}` : ''}</p>` : ''}
-          ${order.globalId ? `<p style="font-size:10px;color:#888;margin:2px 0 0 0;font-family:${GJ_FONT}">Global ID: <strong style="color:#333">${order.globalId}</strong></p>` : ''}
-        </div>
-      </div>
-      ${totalPages > 1 ? `<div style="text-align:right;font-size:9px;color:#aaa;margin-bottom:5px;font-family:${GJ_FONT};font-weight:600;flex-shrink:0">Page ${pageIndex + 1} of ${totalPages}</div>` : ''}
-      <table style="width:100%;border-collapse:collapse;border:2px solid #333;font-size:14px;flex-shrink:0">
-        <thead>
-          <tr style="background:linear-gradient(135deg,#2563eb,#1d4ed8)">
-            <th style="border:1px solid #333;padding:10px 8px;color:#fff;font-weight:800;font-size:12px;width:45px;font-family:${GJ_FONT}">No</th>
-            <th style="border:1px solid #333;padding:10px 8px;color:#fff;font-weight:800;font-size:12px;text-align:left;font-family:${GJ_FONT}">Item Name</th>
-            <th style="border:1px solid #333;padding:10px 8px;color:#fff;font-weight:800;font-size:12px;width:70px;font-family:${GJ_FONT}">KG</th>
-          </tr>
-        </thead>
-        <tbody>${rowsHTML}</tbody>
-      </table>
-      ${footerHTML}
-    </div>
-  `;
+  return createStructuredPdfBlob({
+    title: 'SMVS STOCK REQUEST',
+    subtitle: `Center: ${order.center || '-'}  |  Date: ${formatDisplayDate(order.date)}`,
+    accent: [234, 88, 12],
+    surface: [255, 247, 237],
+    footerText: `Request Chalan #${order.chalanNo || '-'}${order.center ? ` | ${order.center}` : ''}`,
+    metaEntries: [
+      { label: 'Center', value: order.center || '-' },
+      { label: 'Chalan No', value: `#${order.chalanNo || '-'}` },
+      { label: 'Date', value: formatDisplayDate(order.date) },
+      { label: 'Sender Name', value: order.senderName || '-' },
+      { label: 'Mobile Number', value: order.mobileNumber || '-' },
+      { label: 'Global ID', value: order.globalId || '-' },
+      { label: 'Post', value: order.post || '-' },
+      { label: 'Email', value: order.email || '-' },
+    ],
+    statEntries: [
+      { label: 'Items', value: items.length },
+      { label: 'Total Qty', value: formatMetric(totals.totalKg) },
+    ],
+    head: ['No', 'Item Name', 'Qty', 'Unit'],
+    body: items.map((item, index) => [
+      String(index + 1),
+      item.name || '-',
+      formatMetric(item.qty),
+      item.unit || '-',
+    ]),
+    columnStyles: {
+      0: { cellWidth: 14, halign: 'center' },
+      2: { cellWidth: 22, halign: 'center' },
+      3: { cellWidth: 22, halign: 'center' },
+    },
+  });
 };
 
 const generateSendPDFBlobReliable = async (order) => {
-  const filledItems = (order.items || []).filter(r => r.itemName && r.itemName.trim());
-  const pages = getPages(filledItems);
-  const totalPages = pages.length;
+  const items = (order.items || []).filter((item) => item?.itemName?.trim());
+  const totals = calculateKgTotals(items);
 
-  // Load Gujarati font data URLs
-  const [regularDataUrl, boldDataUrl] = await getGujaratiFontDataUrls();
-  const fontFaceCSS = buildFontFaceCSS(regularDataUrl, boldDataUrl);
+  return createStructuredPdfBlob({
+    title: 'SMVS MATERIAL DISPATCH',
+    subtitle: `From: ${order.fromCenter || '-'}  |  Date: ${formatDisplayDate(order.date)}`,
+    accent: [37, 99, 235],
+    surface: [239, 246, 255],
+    footerText: `Dispatch Chalan #${order.chalanNo || '-'}${order.fromCenter ? ` | ${order.fromCenter}` : ''}`,
+    metaEntries: [
+      { label: 'From Center', value: order.fromCenter || '-' },
+      { label: 'To Center', value: order.toCenter || 'Swaminarayan Dham Center' },
+      { label: 'Chalan No', value: `#${order.chalanNo || '-'}` },
+      { label: 'Date', value: formatDisplayDate(order.date) },
+      { label: 'Sender Name', value: order.senderName || '-' },
+      { label: 'Mobile Number', value: order.mobileNumber || '-' },
+      { label: 'Global ID', value: order.globalId || '-' },
+      { label: 'Email', value: order.email || '-' },
+    ],
+    statEntries: [
+      { label: 'Items', value: items.length },
+      { label: 'Total KG', value: formatMetric(totals.totalKg) },
+    ],
+    head: ['No', 'Item Name', 'KG'],
+    body: items.map((item, index) => [
+      String(index + 1),
+      item.itemName || '-',
+      formatMetric(item.kg),
+    ]),
+    columnStyles: {
+      0: { cellWidth: 14, halign: 'center' },
+      2: { cellWidth: 24, halign: 'center' },
+    },
+  });
+};
 
-  const container = document.createElement('div');
-  container.style.cssText = 'position:fixed;left:-9999px;top:0;z-index:-1;';
-  document.body.appendChild(container);
+const generatePurchasePDFBlob = async (purchase) => {
+  const items = (purchase.items || []).filter((item) => item?.itemName?.trim());
+  const totals = calculateKgTotals(items);
 
-  // Inject font-face style
-  const styleEl = document.createElement('style');
-  styleEl.textContent = fontFaceCSS;
-  container.appendChild(styleEl);
-
-  let startNo = 1;
-  const pagesHTML = pages.map((pageItems, i) => {
-    const html = buildSendPDFPageHTML(order, pageItems, i, totalPages, startNo);
-    startNo += pageItems.length;
-    return html;
-  }).join('');
-  container.insertAdjacentHTML('beforeend', pagesHTML);
-
-  // Wait for font to load and DOM to paint
-  await document.fonts.ready;
-  await new Promise(r => setTimeout(r, 600));
-
-  const pageElements = container.querySelectorAll(':scope > div');
-  const pdf = new jsPDF('p', 'mm', 'a4');
-
-  for (let i = 0; i < pageElements.length; i++) {
-    try {
-      const canvas = await html2canvas(pageElements[i], {
-        scale: 3, useCORS: true, backgroundColor: '#ffffff',
-        logging: false, allowTaint: true, width: 794, height: 1123
-      });
-      const imgData = canvas.toDataURL('image/jpeg', 0.95);
-      if (i > 0) pdf.addPage();
-      pdf.addImage(imgData, 'JPEG', 0, 0, 210, 297);
-    } catch (err) { console.error('Send PDF page error:', err); }
-  }
-
-  document.body.removeChild(container);
-  return pdf.output('blob');
+  return createStructuredPdfBlob({
+    title: 'SMVS PURCHASE REPORT',
+    subtitle: `Center: ${purchase.center || '-'}  |  Bill Date: ${formatDisplayDate(purchase.billDate || purchase.date)}`,
+    accent: [139, 92, 246],
+    surface: [245, 243, 255],
+    footerText: `Purchase Bill #${purchase.billNo || '-'}${purchase.shopName ? ` | ${purchase.shopName}` : ''}`,
+    metaEntries: [
+      { label: 'Center', value: purchase.center || '-' },
+      { label: 'Shop Name', value: purchase.shopName || '-' },
+      { label: 'Bill Number', value: purchase.billNo || '-' },
+      { label: 'Bill Date', value: formatDisplayDate(purchase.billDate || purchase.date) },
+      { label: 'Submitted By', value: purchase.submittedBy || '-' },
+      { label: 'Saved Email', value: purchase.email || '-' },
+    ],
+    statEntries: [
+      { label: 'Items', value: items.length },
+      { label: 'Total KG', value: formatMetric(totals.totalKg) },
+    ],
+    head: ['No', 'Item Name', 'KG'],
+    body: items.map((item, index) => [
+      String(index + 1),
+      item.itemName || '-',
+      formatMetric(item.kg),
+    ]),
+    columnStyles: {
+      0: { cellWidth: 14, halign: 'center' },
+      2: { cellWidth: 24, halign: 'center' },
+    },
+  });
 };
 
 const getReportUiTheme = () => ({
@@ -658,6 +743,9 @@ const createDefaultReportForm = () => {
   return {
     month,
     selectedDate: getDateWithinMonth(month, new Date().toISOString().split('T')[0]),
+    scope: 'all',
+    center: '',
+    centerOther: '',
   };
 };
 
@@ -673,11 +761,18 @@ function ReportPreviewContent({ report }) {
             <p className={`text-[11px] font-black uppercase tracking-[0.25em] ${uiTheme.text}`}>Monthly Report</p>
             <h2 className="mt-2 text-2xl sm:text-3xl font-black text-slate-900">{REPORT_TITLE}</h2>
             <p className="mt-2 text-sm text-slate-600">Simple monthly stock table with fixed format.</p>
+            <div className="mt-3 inline-flex items-center rounded-full border border-emerald-200 bg-white px-3 py-1 text-xs font-bold text-emerald-700">
+              {preparedReport.centerLabel}
+            </div>
           </div>
           <div className="grid grid-cols-2 gap-3 text-sm text-slate-600 sm:text-right">
             <div>
               <p className="font-bold text-slate-900">Month</p>
               <p>{preparedReport.monthLabel}</p>
+            </div>
+            <div>
+              <p className="font-bold text-slate-900">Scope</p>
+              <p>{preparedReport.scope === 'center' ? 'Centewise' : 'All Centers'}</p>
             </div>
             <div>
               <p className="font-bold text-slate-900">Range</p>
@@ -687,7 +782,7 @@ function ReportPreviewContent({ report }) {
               <p className="font-bold text-slate-900">Rows</p>
               <p>{formatMetric(preparedReport.summary.totalRows)}</p>
             </div>
-            <div>
+            <div className="col-span-2">
               <p className="font-bold text-slate-900">Generated</p>
               <p>{formatDisplayDate(preparedReport.generatedAtIso)}</p>
             </div>
@@ -922,7 +1017,7 @@ function AdminDashboard({ user }) {
           receiver: order.senderName || '',
           sender: order.senderName || '',
           global_id: order.globalId || '',
-          pdf_link: `${window.location.origin}?orderId=${order.id}`,
+          pdf_link: buildPublicRecordLink('orderId', order.id),
         });
       } else if (type === 'send') {
         await sendEmailWithConfig(SEND_MAIL_CONFIG, {
@@ -936,7 +1031,7 @@ function AdminDashboard({ user }) {
           receiver: order.senderName || '',
           global_id: order.globalId || '',
           order_id: order.chalanNo,
-          pdf_link: `${window.location.origin}?sendOrderId=${order.id}`,
+          pdf_link: buildPublicRecordLink('sendOrderId', order.id),
         });
       } else {
         const report = hydrateReport(order);
@@ -954,7 +1049,7 @@ function AdminDashboard({ user }) {
           generated_on: formatDisplayDate(report.generatedAtIso),
           total_rows: formatMetric(report.summary.totalRows),
           total_stock: formatMetric(report.summary.totalStock),
-          pdf_link: `${window.location.origin}?reportId=${report.id}`,
+          pdf_link: buildPublicRecordLink('reportId', report.id),
         });
         if (report.id) {
           await updateDoc(doc(db, "reports", report.id), { email: emailToUse });
@@ -988,7 +1083,7 @@ function AdminDashboard({ user }) {
       const blob = await generateSendPDFBlobReliable(order);
       const link = document.createElement('a');
       link.href = URL.createObjectURL(blob);
-      link.download = `Send_${order.fromCenter}_${order.chalanNo}.pdf`;
+      link.download = getSendFileName(order);
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
@@ -1001,13 +1096,13 @@ function AdminDashboard({ user }) {
     setSendPdfLoading(order.id);
     try {
       const blob = await generateSendPDFBlobReliable(order);
-      const file = new File([blob], `Send_${order.fromCenter}_${order.chalanNo}.pdf`, { type: 'application/pdf' });
+      const file = new File([blob], getSendFileName(order), { type: 'application/pdf' });
       if (navigator.canShare && navigator.canShare({ files: [file] })) {
         await navigator.share({ files: [file], title: 'SMVS Material Dispatch', text: `Dispatch - ${order.fromCenter} #${order.chalanNo}` });
       } else {
         const link = document.createElement('a');
         link.href = URL.createObjectURL(blob);
-        link.download = `Send_${order.fromCenter}_${order.chalanNo}.pdf`;
+        link.download = getSendFileName(order);
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
@@ -1031,9 +1126,18 @@ function AdminDashboard({ user }) {
       alert('Selected date must be inside the selected month.');
       return;
     }
+    if (reportForm.scope === 'center' && !reportForm.center) {
+      alert('Select center for centewise report.');
+      return;
+    }
+    if (reportForm.scope === 'center' && reportForm.center === 'Other' && !reportForm.centerOther.trim()) {
+      alert('Enter center name for centewise report.');
+      return;
+    }
 
     setReportGenerating(true);
     try {
+      const effectiveCenter = getResolvedCenterValue(reportForm.center, reportForm.centerOther);
       const purchaseSnapshot = await getDocs(query(collection(db, 'purchases'), orderBy('timestamp', 'desc')));
       const purchases = purchaseSnapshot.docs
         .map((docSnap) => ({ id: docSnap.id, ...docSnap.data() }))
@@ -1046,10 +1150,12 @@ function AdminDashboard({ user }) {
         month: reportForm.month,
         selectedDate: reportForm.selectedDate,
         createdBy: user?.username || 'Admin',
+        scope: reportForm.scope,
+        center: effectiveCenter,
       });
 
       if (draft.rows.length === 0) {
-        alert('No entries found for the selected filters.');
+        alert(`No entries found for ${draft.centerLabel}.`);
         setReportGenerating(false);
         return;
       }
@@ -1465,7 +1571,47 @@ function AdminDashboard({ user }) {
               </div>
             </div>
 
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 mt-6">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4 mt-6">
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Report Scope</label>
+                <select
+                  className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-emerald-500/50 transition-all text-sm"
+                  value={reportForm.scope}
+                  onChange={e => setReportForm(prev => ({ ...prev, scope: e.target.value, center: '', centerOther: '' }))}
+                >
+                  <option value="all">All Centers / Full Report</option>
+                  <option value="center">Centewise</option>
+                </select>
+              </div>
+
+              {reportForm.scope === 'center' && (
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Center</label>
+                  <select
+                    className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-emerald-500/50 transition-all text-sm"
+                    value={reportForm.center}
+                    onChange={e => setReportForm(prev => ({ ...prev, center: e.target.value, centerOther: e.target.value === 'Other' ? prev.centerOther : '' }))}
+                  >
+                    <option value="">- Center Select Karo -</option>
+                    {centerData.map((center) => (
+                      <option key={center.center} value={center.center}>{center.center}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {reportForm.scope === 'center' && reportForm.center === 'Other' && (
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Center Name</label>
+                  <input
+                    className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-emerald-500/50 transition-all text-sm"
+                    placeholder="Center name..."
+                    value={reportForm.centerOther}
+                    onChange={e => setReportForm(prev => ({ ...prev, centerOther: e.target.value }))}
+                  />
+                </div>
+              )}
+
               <div>
                 <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Month</label>
                 <input
@@ -1494,17 +1640,18 @@ function AdminDashboard({ user }) {
                   onChange={e => setReportForm(prev => ({ ...prev, selectedDate: e.target.value }))}
                 />
               </div>
+            </div>
 
-              <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/10 p-4">
-                <p className="text-[11px] font-bold uppercase tracking-widest text-emerald-300">Dynamic Range</p>
-                <p className="mt-2 text-lg font-black text-white">તા. 1 થી {formatDisplayDate(reportForm.selectedDate)}</p>
-                <p className="mt-2 text-xs text-emerald-100/70">The monthly table columns will update using this range in preview, PDF, share, and mail.</p>
-              </div>
+            <div className="mt-4 rounded-2xl border border-emerald-500/20 bg-emerald-500/10 p-4">
+              <p className="text-[11px] font-bold uppercase tracking-widest text-emerald-300">Dynamic Range</p>
+              <p className="mt-2 text-lg font-black text-white">તા. 1 થી {formatDisplayDate(reportForm.selectedDate)}</p>
+              <p className="mt-2 text-sm font-bold text-emerald-100">{getCenterScopeLabel(reportForm.scope, getResolvedCenterValue(reportForm.center, reportForm.centerOther))}</p>
+              <p className="mt-2 text-xs text-emerald-100/70">The monthly table columns will update using this range in preview, PDF, share, and mail.</p>
             </div>
 
             <div className="mt-5 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
               <p className="text-xs text-gray-500">
-                Report format is fixed to: વસ્તુનું નામ, મહિનો, આવક, જાવક, કુલ સ્ટોક.
+                Report format is fixed to: વસ્તુનું નામ, મહિનો, આવક, જાવક, કુલ સ્ટોક. Centewise mode filters request, send, and purchase entries for the selected center only.
               </p>
               <motion.button
                 whileHover={{ scale: 1.02 }}
@@ -1545,6 +1692,7 @@ function AdminDashboard({ user }) {
                             <p className={`text-[10px] font-black uppercase tracking-[0.2em] ${uiTheme.muted}`}>{pdfTheme.title}</p>
                             <h3 className="font-black text-white text-sm sm:text-base mt-1">{preparedReport.monthLabel}</h3>
                             <p className="text-xs text-gray-300 mt-1">{preparedReport.rangeLabel}</p>
+                            <p className={`text-[11px] font-bold mt-2 ${uiTheme.muted}`}>{preparedReport.centerLabel}</p>
                           </div>
                           <div className="text-right flex flex-col items-end gap-2">
                             <div className="text-xs text-gray-300 font-medium bg-white/5 px-2 py-1 rounded-lg">{formatDisplayDate(preparedReport.generatedAtIso)}</div>
@@ -1577,6 +1725,7 @@ function AdminDashboard({ user }) {
                           </div>
                         </div>
                         <div className="mb-4 space-y-1 text-xs text-gray-400">
+                          <p><span className="font-bold text-gray-200">Scope:</span> {preparedReport.scope === 'center' ? 'Centewise' : 'All Centers'}</p>
                           <p><span className="font-bold text-gray-200">Total Stock:</span> {formatMetric(preparedReport.summary.totalStock)}</p>
                           <p><span className="font-bold text-gray-200">Saved Email:</span> {preparedReport.email || '-'}</p>
                         </div>
@@ -1889,6 +2038,8 @@ function AdminDashboard({ user }) {
 }
 
 const createDefaultPurchaseForm = () => ({
+  center: '',
+  centerOther: '',
   shopName: '',
   billNo: '',
   billDate: new Date().toISOString().split('T')[0],
@@ -1905,7 +2056,15 @@ function PurchaseAdminPanel({ user }) {
   const [purchaseLoading, setPurchaseLoading] = useState(true);
   const [purchaseSubmitting, setPurchaseSubmitting] = useState(false);
   const [purchaseDeleting, setPurchaseDeleting] = useState(null);
-  const [purchaseFilters, setPurchaseFilters] = useState({ date: '', shop: '' });
+  const [purchaseFilters, setPurchaseFilters] = useState({ date: '', center: '', shop: '' });
+  const [previewPurchase, setPreviewPurchase] = useState(null);
+  const [purchasePdfLoading, setPurchasePdfLoading] = useState(null);
+  const [purchaseMailLoading, setPurchaseMailLoading] = useState(null);
+  const [purchaseMailModal, setPurchaseMailModal] = useState(null);
+  const [purchaseSelectedEmail, setPurchaseSelectedEmail] = useState(REPORT_DEFAULT_EMAILS[0]);
+  const [purchaseCustomEmail, setPurchaseCustomEmail] = useState('');
+  const [purchaseCustomEmailError, setPurchaseCustomEmailError] = useState('');
+  const [purchaseMailSending, setPurchaseMailSending] = useState(false);
 
   const fetchPurchases = async () => {
     setPurchaseLoading(true);
@@ -1953,7 +2112,39 @@ function PurchaseAdminPanel({ user }) {
 
   const filledRows = purchaseForm.rows.filter((row) => row.itemName.trim());
 
+  const clearPurchaseFilters = () => setPurchaseFilters({ date: '', center: '', shop: '' });
+
+  const openPurchaseMailModal = (purchase) => {
+    setPurchaseMailModal(purchase);
+    const savedEmail = isValidEmail(purchase?.email) ? purchase.email.trim() : '';
+
+    if (REPORT_DEFAULT_EMAILS.includes(savedEmail)) {
+      setPurchaseSelectedEmail(savedEmail);
+      setPurchaseCustomEmail('');
+    } else if (savedEmail) {
+      setPurchaseSelectedEmail('custom');
+      setPurchaseCustomEmail(savedEmail);
+    } else {
+      setPurchaseSelectedEmail(REPORT_DEFAULT_EMAILS[0]);
+      setPurchaseCustomEmail('');
+    }
+
+    setPurchaseCustomEmailError('');
+  };
+
+  const closePurchaseMailModal = () => {
+    setPurchaseMailModal(null);
+    setPurchaseSelectedEmail(REPORT_DEFAULT_EMAILS[0]);
+    setPurchaseCustomEmail('');
+    setPurchaseCustomEmailError('');
+    setPurchaseMailSending(false);
+    setPurchaseMailLoading(null);
+  };
+
   const handlePurchaseSubmit = async () => {
+    const effectiveCenter = getResolvedCenterValue(purchaseForm.center, purchaseForm.centerOther);
+    if (!purchaseForm.center) return alert('Center is required.');
+    if (purchaseForm.center === 'Other' && !purchaseForm.centerOther.trim()) return alert('Center name is required.');
     if (!purchaseForm.shopName.trim()) return alert('Shop name is required.');
     if (!purchaseForm.billNo.trim()) return alert('Bill number is required.');
     if (!purchaseForm.billDate) return alert('Bill date is required.');
@@ -1963,6 +2154,7 @@ function PurchaseAdminPanel({ user }) {
     try {
       const payload = {
         type: 'purchase',
+        center: effectiveCenter,
         shopName: purchaseForm.shopName.trim(),
         billNo: purchaseForm.billNo.trim(),
         billDate: purchaseForm.billDate,
@@ -1998,12 +2190,104 @@ function PurchaseAdminPanel({ user }) {
     setPurchaseDeleting(null);
   };
 
+  const handleDownloadPurchase = async (purchase) => {
+    setPurchasePdfLoading(purchase.id);
+    try {
+      const blob = await generatePurchasePDFBlob(purchase);
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = getPurchaseFileName(purchase);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(link.href);
+    } catch (error) {
+      alert(`Download Error: ${error.message}`);
+    }
+    setPurchasePdfLoading(null);
+  };
+
+  const handleSharePurchase = async (purchase) => {
+    setPurchasePdfLoading(purchase.id);
+    try {
+      const blob = await generatePurchasePDFBlob(purchase);
+      const file = new File([blob], getPurchaseFileName(purchase), { type: 'application/pdf' });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({
+          files: [file],
+          title: 'SMVS Purchase Report',
+          text: `${purchase.shopName} - Bill ${purchase.billNo}`,
+        });
+      } else {
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = getPurchaseFileName(purchase);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(link.href);
+        alert('Share not supported on this device. File downloaded instead.');
+      }
+    } catch (error) {
+      alert(`Share Error: ${error.message}`);
+    }
+    setPurchasePdfLoading(null);
+  };
+
+  const handlePurchaseMailSend = async () => {
+    if (!purchaseMailModal) return;
+
+    const emailToUse = purchaseSelectedEmail === 'custom'
+      ? purchaseCustomEmail.trim()
+      : purchaseSelectedEmail;
+
+    if (!isValidEmail(emailToUse)) {
+      setPurchaseCustomEmailError('Please enter a valid email address.');
+      return;
+    }
+
+    setPurchaseMailSending(true);
+    setPurchaseMailLoading(purchaseMailModal.id);
+    try {
+      await sendEmailWithConfig(REPORT_MAIL_CONFIG, {
+        email: emailToUse,
+        cc_email: DEFAULT_CC_EMAIL,
+        bcc_email: DEFAULT_BCC_EMAIL,
+        from_name: 'Purchased Material',
+        report_title: 'SMVS Purchase Report',
+        month: purchaseMailModal.center || '-',
+        chalan_no: purchaseMailModal.billNo || '-',
+        date: formatDisplayDate(purchaseMailModal.billDate || purchaseMailModal.date),
+        range: formatDisplayDate(purchaseMailModal.billDate || purchaseMailModal.date),
+        receiver: purchaseMailModal.shopName || '-',
+        generated_on: formatDisplayDate(purchaseMailModal.billDate || purchaseMailModal.date),
+        total_rows: formatMetric((purchaseMailModal.items || []).length),
+        total_stock: formatMetric(purchaseMailModal.totalKg),
+        pdf_link: buildPublicRecordLink('purchaseId', purchaseMailModal.id),
+      });
+
+      await updateDoc(doc(db, 'purchases', purchaseMailModal.id), { email: emailToUse });
+      setPurchases((prev) => prev.map((item) => (
+        item.id === purchaseMailModal.id ? { ...item, email: emailToUse } : item
+      )));
+      closePurchaseMailModal();
+      alert('Email Sent! ✅');
+    } catch (error) {
+      alert(`Mail Error: ${error.message}`);
+      setPurchaseMailSending(false);
+      setPurchaseMailLoading(null);
+    }
+  };
+
   const filteredPurchases = purchases.filter((purchase) => {
     const dateMatch = purchaseFilters.date ? purchase.billDate === purchaseFilters.date : true;
+    const centerMatch = purchaseFilters.center
+      ? (purchase.center || '').toLowerCase().includes(purchaseFilters.center.toLowerCase())
+      : true;
     const shopMatch = purchaseFilters.shop
       ? (purchase.shopName || '').toLowerCase().includes(purchaseFilters.shop.toLowerCase())
       : true;
-    return dateMatch && shopMatch;
+    return dateMatch && centerMatch && shopMatch;
   });
 
   return (
@@ -2029,7 +2313,31 @@ function PurchaseAdminPanel({ user }) {
           </motion.button>
         </div>
 
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 mt-6">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4 mt-6">
+          <div>
+            <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Center *</label>
+            <select
+              className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-violet-500/50 transition-all text-sm"
+              value={purchaseForm.center}
+              onChange={(e) => setPurchaseForm((prev) => ({ ...prev, center: e.target.value, centerOther: e.target.value === 'Other' ? prev.centerOther : '' }))}
+            >
+              <option value="">- Center Select Karo -</option>
+              {centerData.map((center) => (
+                <option key={center.center} value={center.center}>{center.center}</option>
+              ))}
+            </select>
+          </div>
+          {purchaseForm.center === 'Other' && (
+            <div>
+              <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Center Name *</label>
+              <input
+                className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-violet-500/50 transition-all text-sm"
+                value={purchaseForm.centerOther}
+                onChange={(e) => setPurchaseForm((prev) => ({ ...prev, centerOther: e.target.value }))}
+                placeholder="Center name..."
+              />
+            </div>
+          )}
           <div>
             <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Shop Name *</label>
             <input
@@ -2136,15 +2444,25 @@ function PurchaseAdminPanel({ user }) {
               className="text-gray-400 hover:text-violet-400 flex items-center justify-center gap-1.5 text-xs font-bold uppercase transition-all bg-white/5 hover:bg-violet-500/10 px-3 py-2 rounded-xl border border-white/10">
               <RefreshCw size={14} /> Refresh
             </motion.button>
+            <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }} onClick={clearPurchaseFilters}
+              className="text-gray-400 hover:text-white flex items-center justify-center gap-1.5 text-xs font-bold uppercase transition-all bg-white/5 hover:bg-white/10 px-3 py-2 rounded-xl border border-white/10">
+              <Eraser size={14} /> Clear
+            </motion.button>
           </div>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-5">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-5">
           <input
             type="date"
             className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-violet-500/50 transition-all text-sm"
             value={purchaseFilters.date}
             onChange={(e) => setPurchaseFilters((prev) => ({ ...prev, date: e.target.value }))}
+          />
+          <input
+            placeholder="Center name..."
+            className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-violet-500/50 transition-all text-sm placeholder-gray-500"
+            value={purchaseFilters.center}
+            onChange={(e) => setPurchaseFilters((prev) => ({ ...prev, center: e.target.value }))}
           />
           <input
             placeholder="Shop name..."
@@ -2167,6 +2485,7 @@ function PurchaseAdminPanel({ user }) {
                 <div className="p-4 border-b border-white/5 bg-gradient-to-r from-violet-500/10 to-fuchsia-500/5">
                   <div className="flex items-start justify-between gap-3">
                     <div>
+                      <p className="text-[11px] font-black uppercase tracking-[0.2em] text-violet-300">{purchase.center || 'No Center'}</p>
                       <p className="font-black text-white text-sm">{purchase.shopName}</p>
                       <p className="text-xs text-violet-300 mt-1">Bill #{purchase.billNo}</p>
                     </div>
@@ -2194,11 +2513,29 @@ function PurchaseAdminPanel({ user }) {
                       <p className="text-violet-300 font-bold">+ {(purchase.items || []).length - 3} more items</p>
                     )}
                   </div>
-                  <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={() => handleDeletePurchase(purchase)}
-                    disabled={purchaseDeleting === purchase.id}
-                    className="w-full bg-red-500/10 hover:bg-red-500/20 text-red-400 p-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-all border border-red-500/20 disabled:opacity-50">
-                    {purchaseDeleting === purchase.id ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />} Delete
-                  </motion.button>
+                  <div className="grid grid-cols-2 gap-2">
+                    <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={() => setPreviewPurchase(purchase)}
+                      className="bg-[#252525] hover:bg-[#2d2d2d] text-white p-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all border border-white/5">
+                      <Eye size={14} /> Preview
+                    </motion.button>
+                    <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} disabled={purchasePdfLoading === purchase.id} onClick={() => handleSharePurchase(purchase)}
+                      className="bg-[#252525] hover:bg-[#2d2d2d] text-white p-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all border border-white/5 disabled:opacity-50">
+                      {purchasePdfLoading === purchase.id ? <Loader2 size={14} className="animate-spin" /> : <Share2 size={14} />} Share
+                    </motion.button>
+                    <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} disabled={purchaseMailLoading === purchase.id} onClick={() => openPurchaseMailModal(purchase)}
+                      className="bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 p-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all border border-blue-500/20 disabled:opacity-50">
+                      {purchaseMailLoading === purchase.id ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />} Mail
+                    </motion.button>
+                    <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} disabled={purchasePdfLoading === purchase.id} onClick={() => handleDownloadPurchase(purchase)}
+                      className="bg-gradient-to-r from-violet-500 to-fuchsia-600 text-white p-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-all shadow-lg shadow-violet-500/20 disabled:opacity-50">
+                      {purchasePdfLoading === purchase.id ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />} Download
+                    </motion.button>
+                    <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={() => handleDeletePurchase(purchase)}
+                      disabled={purchaseDeleting === purchase.id}
+                      className="col-span-2 bg-red-500/10 hover:bg-red-500/20 text-red-400 p-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-all border border-red-500/20 disabled:opacity-50">
+                      {purchaseDeleting === purchase.id ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />} Delete
+                    </motion.button>
+                  </div>
                 </div>
               </div>
             ))}
@@ -2211,6 +2548,156 @@ function PurchaseAdminPanel({ user }) {
           </motion.div>
         )}
       </motion.div>
+
+      <AnimatePresence>
+        {previewPurchase && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/90 backdrop-blur-sm z-[200] flex items-center justify-center p-2 sm:p-4"
+            onClick={() => setPreviewPurchase(null)}
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              onClick={(e) => e.stopPropagation()}
+              className="bg-white text-black w-full max-w-3xl max-h-[95vh] overflow-y-auto rounded-xl sm:rounded-2xl p-6 sm:p-8 relative shadow-2xl"
+            >
+              <motion.button whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.9 }} onClick={() => setPreviewPurchase(null)}
+                className="absolute top-3 right-3 sm:top-4 sm:right-4 bg-gray-100 p-2 rounded-full text-black hover:bg-gray-200 transition-colors z-10">
+                <X size={20} />
+              </motion.button>
+
+              <div className="border-b-4 border-violet-600 pb-4 mb-6">
+                <h1 className="text-2xl sm:text-3xl font-black text-violet-700 uppercase">SMVS Purchase Report</h1>
+                <p className="text-gray-500 text-xs mt-1 font-bold uppercase tracking-[0.2em]">દુકાન માંથી ખરીદેલ માલ</p>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 sm:gap-4 text-sm mb-6 bg-gray-50 p-4 sm:p-5 rounded-2xl border border-gray-100">
+                <div><p className="text-gray-400 text-[10px] font-bold uppercase mb-1">Center</p><p className="font-bold">{previewPurchase.center || '-'}</p></div>
+                <div className="text-right"><p className="text-gray-400 text-[10px] font-bold uppercase mb-1">Shop Name</p><p className="font-bold">{previewPurchase.shopName}</p></div>
+                <div><p className="text-gray-400 text-[10px] font-bold uppercase mb-1">Bill Number</p><p className="font-bold">#{previewPurchase.billNo}</p></div>
+                <div className="text-right"><p className="text-gray-400 text-[10px] font-bold uppercase mb-1">Bill Date</p><p className="font-bold">{formatDisplayDate(previewPurchase.billDate || previewPurchase.date)}</p></div>
+                <div><p className="text-gray-400 text-[10px] font-bold uppercase mb-1">Submitted By</p><p className="font-bold">{previewPurchase.submittedBy || '-'}</p></div>
+                <div className="text-right"><p className="text-gray-400 text-[10px] font-bold uppercase mb-1">Saved Email</p><p className="font-bold break-all">{previewPurchase.email || '-'}</p></div>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs sm:text-[13px] border-collapse border border-black">
+                  <thead className="bg-black text-white">
+                    <tr>
+                      <th className="border p-2 w-12 text-center">No</th>
+                      <th className="border p-2 text-left">Item Name</th>
+                      <th className="border p-2 w-20 text-center">KG</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(previewPurchase.items || []).map((item, index) => (
+                      <tr key={`${previewPurchase.id}-${index}`} className="even:bg-gray-50">
+                        <td className="border p-2 text-center text-gray-500">{index + 1}</td>
+                        <td className="border p-2 font-bold">{item.itemName}</td>
+                        <td className="border p-2 text-center font-bold text-violet-700">{formatMetric(item.kg)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {purchaseMailModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[300] flex items-center justify-center p-4"
+            onClick={closePurchaseMailModal}
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              onClick={(e) => e.stopPropagation()}
+              className="bg-gradient-to-b from-[#1e1e1e] to-[#181818] border border-white/10 rounded-2xl sm:rounded-3xl w-full max-w-sm shadow-2xl overflow-hidden"
+            >
+              <div className="p-5 border-b border-white/5 flex items-center justify-between bg-gradient-to-r from-[#252525] to-[#1e1e1e]">
+                <div className="flex items-center gap-2 text-blue-400 font-bold text-sm uppercase tracking-widest">
+                  <Send size={16} /> Send Mail
+                </div>
+                <motion.button whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.9 }} onClick={closePurchaseMailModal}
+                  className="bg-white/5 hover:bg-white/10 p-1.5 rounded-lg text-gray-400 hover:text-white transition-colors">
+                  <X size={16} />
+                </motion.button>
+              </div>
+
+              <div className="p-5 space-y-4">
+                <p className="text-gray-300 text-sm">
+                  Send purchase PDF link for <span className="font-bold text-white">{purchaseMailModal.shopName}</span>
+                  <span className="text-blue-400 font-bold"> — Bill #{purchaseMailModal.billNo}</span>
+                </p>
+
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Default Email</label>
+                  <select
+                    className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-blue-500/70 transition-all text-sm"
+                    value={purchaseSelectedEmail}
+                    onChange={(e) => {
+                      setPurchaseSelectedEmail(e.target.value);
+                      setPurchaseCustomEmailError('');
+                    }}
+                  >
+                    {REPORT_DEFAULT_EMAILS.map((email) => (
+                      <option key={email} value={email}>{email}</option>
+                    ))}
+                    <option value="custom">Custom Email</option>
+                  </select>
+                </div>
+
+                {purchaseSelectedEmail === 'custom' && (
+                  <div>
+                    <div className="relative">
+                      <Mail className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" size={16} />
+                      <input
+                        type="email"
+                        placeholder="example@email.com"
+                        className={`w-full p-3 pl-9 bg-[#252525] border rounded-xl text-white outline-none focus:border-blue-500/70 transition-all text-sm placeholder-gray-500 ${purchaseCustomEmailError ? 'border-red-500/60' : 'border-white/10'}`}
+                        value={purchaseCustomEmail}
+                        onChange={(e) => { setPurchaseCustomEmail(e.target.value); setPurchaseCustomEmailError(''); }}
+                        autoFocus
+                      />
+                    </div>
+                    {purchaseCustomEmailError && <p className="text-red-400 text-xs mt-1.5 pl-1">{purchaseCustomEmailError}</p>}
+                  </div>
+                )}
+
+                <div className="rounded-xl border border-white/10 bg-white/5 p-3 text-xs text-gray-400">
+                  CC: {DEFAULT_CC_EMAIL}<br />
+                  BCC: {DEFAULT_BCC_EMAIL}
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
+                    onClick={closePurchaseMailModal}
+                    className="bg-white/5 hover:bg-white/10 text-gray-300 py-3 rounded-xl text-sm font-bold flex items-center justify-center gap-2 border border-white/10">
+                    <X size={16} /> Cancel
+                  </motion.button>
+                  <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
+                    disabled={purchaseMailSending}
+                    onClick={handlePurchaseMailSend}
+                    className="bg-gradient-to-r from-blue-500 to-blue-600 text-white py-3 rounded-xl text-sm font-bold flex items-center justify-center gap-2 shadow-lg shadow-blue-500/20 disabled:opacity-50">
+                    {purchaseMailSending ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />} Send Mail
+                  </motion.button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </>
   );
 }
@@ -2720,7 +3207,7 @@ function SendDashboard({ user, onBack }) {
         receiver: formData.senderName.trim(),
         global_id: formData.globalId.trim(),
         order_id: formData.chalanNo,
-        pdf_link: `${window.location.origin}?sendOrderId=${docRef.id}`,
+        pdf_link: buildPublicRecordLink('sendOrderId', docRef.id),
       }).catch(err => console.warn('Email send failed:', err));
     } catch (e) { alert('Error: ' + e.message); }
     setLoading(false);
@@ -3036,7 +3523,7 @@ function UserDashboard({ user, onBack = null }) {
         receiver: formData.senderName.trim(),
         sender: formData.senderName.trim(),
         global_id: formData.globalId.trim(),
-        pdf_link: `${window.location.origin}?orderId=${docRef.id}`,
+        pdf_link: buildPublicRecordLink('orderId', docRef.id),
       }).catch(err => console.warn('Email send failed:', err));
     } catch (error) { alert(`❌ Error: ${error.message}`); setLoading(false); }
     setLoading(false);
@@ -3587,7 +4074,7 @@ function SingleSendOrderView({ orderId, onBack }) {
       const blob = await generateSendPDFBlobReliable(order);
       const link = document.createElement('a');
       link.href = URL.createObjectURL(blob);
-      link.download = `Send_${order.fromCenter}_${order.chalanNo}.pdf`;
+      link.download = getSendFileName(order);
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
@@ -3670,6 +4157,129 @@ function SingleSendOrderView({ orderId, onBack }) {
           >
             {pdfLoading ? <Loader2 size={28} className="animate-spin" /> : <Download size={28} />}
             {pdfLoading ? 'Generating PDF...' : 'Download Delivery Chalan'}
+          </motion.button>
+        </div>
+      </motion.div>
+    </motion.div>
+  );
+}
+
+function SinglePurchaseView({ purchaseId, onBack }) {
+  const [purchase, setPurchase] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [pdfLoading, setPdfLoading] = useState(false);
+
+  useEffect(() => {
+    const fetchPurchase = async () => {
+      try {
+        const docRef = doc(db, 'purchases', purchaseId);
+        const docSnap = await getDoc(docRef);
+        if (docSnap.exists()) {
+          setPurchase({ id: docSnap.id, ...docSnap.data() });
+        } else {
+          setError('Purchase report not found.');
+        }
+      } catch {
+        setError('Load Error.');
+      }
+      setLoading(false);
+    };
+    fetchPurchase();
+  }, [purchaseId]);
+
+  const handleDownload = async () => {
+    if (!purchase) return;
+    setPdfLoading(true);
+    try {
+      const blob = await generatePurchasePDFBlob(purchase);
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = getPurchaseFileName(purchase);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(link.href);
+    } catch (err) {
+      alert(`Download Error: ${err.message}`);
+    }
+    setPdfLoading(false);
+  };
+
+  if (loading) {
+    return (
+      <div className="h-screen flex justify-center items-center bg-gradient-to-br from-[#0a0a0a] via-[#121212] to-[#0f0f0f]">
+        <motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: "linear" }}>
+          <Loader2 className="text-violet-500" size={48} />
+        </motion.div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="h-screen flex justify-center items-center flex-col text-white bg-gradient-to-br from-[#0a0a0a] via-[#121212] to-[#0f0f0f]">
+        <p className="font-bold mb-4">{error}</p>
+        <button onClick={onBack} className="bg-[#2d2d2d] px-4 py-2 rounded">Home</button>
+      </div>
+    );
+  }
+
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      className="min-h-screen bg-gradient-to-br from-[#0a0a0a] via-[#121212] to-[#0f0f0f] p-4 flex items-center justify-center"
+    >
+      <motion.div
+        initial={{ scale: 0.9, opacity: 0 }}
+        animate={{ scale: 1, opacity: 1 }}
+        className="max-w-xl w-full bg-gradient-to-b from-[#1e1e1e] to-[#181818] rounded-2xl sm:rounded-[2.5rem] shadow-2xl border border-white/5 overflow-hidden"
+      >
+        <div className="bg-gradient-to-r from-violet-500 to-fuchsia-600 p-5 sm:p-6 text-white flex justify-between items-center">
+          <div>
+            <h2 className="text-lg sm:text-xl font-extrabold uppercase tracking-tight">Purchase Report</h2>
+            <p className="text-violet-100 text-xs mt-0.5">દુકાન માંથી ખરીદેલ માલ</p>
+          </div>
+          <motion.button
+            whileHover={{ scale: 1.1 }}
+            whileTap={{ scale: 0.9 }}
+            onClick={onBack}
+            className="bg-black/20 p-2 rounded-xl hover:bg-black/40"
+          >
+            <ArrowLeft />
+          </motion.button>
+        </div>
+        <div className="p-6 sm:p-10">
+          <div className="grid grid-cols-2 gap-4 sm:gap-6 mb-4">
+            <div className="bg-[#252525] p-4 sm:p-5 rounded-2xl sm:rounded-3xl border border-white/5">
+              <p className="text-[10px] text-gray-500 font-bold uppercase mb-1">Center</p>
+              <p className="font-black text-white uppercase text-base sm:text-lg">{purchase.center || '-'}</p>
+            </div>
+            <div className="bg-[#252525] p-4 sm:p-5 rounded-2xl sm:rounded-3xl border border-white/5">
+              <p className="text-[10px] text-gray-500 font-bold uppercase mb-1">Bill Number</p>
+              <p className="font-black text-violet-300 text-base sm:text-lg">#{purchase.billNo}</p>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-4 sm:gap-6 mb-8">
+            <div className="bg-[#252525] p-4 sm:p-5 rounded-2xl sm:rounded-3xl border border-white/5">
+              <p className="text-[10px] text-gray-500 font-bold uppercase mb-1">Shop Name</p>
+              <p className="font-bold text-white text-sm">{purchase.shopName || '-'}</p>
+            </div>
+            <div className="bg-[#252525] p-4 sm:p-5 rounded-2xl sm:rounded-3xl border border-white/5">
+              <p className="text-[10px] text-gray-500 font-bold uppercase mb-1">Bill Date</p>
+              <p className="font-bold text-white text-sm">{formatDisplayDate(purchase.billDate || purchase.date)}</p>
+            </div>
+          </div>
+          <motion.button
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.98 }}
+            disabled={pdfLoading}
+            onClick={handleDownload}
+            className="w-full bg-gradient-to-r from-violet-500 to-fuchsia-600 text-white py-4 sm:py-5 rounded-xl sm:rounded-2xl font-black text-base sm:text-lg shadow-xl flex justify-center items-center gap-3 uppercase disabled:opacity-50"
+          >
+            {pdfLoading ? <Loader2 size={28} className="animate-spin" /> : <Download size={28} />}
+            {pdfLoading ? 'Generating PDF...' : 'Download Purchase PDF'}
           </motion.button>
         </div>
       </motion.div>
@@ -3785,6 +4395,7 @@ function SingleReportView({ reportId, onBack }) {
             <div>
               <h2 className="text-lg sm:text-xl font-extrabold uppercase tracking-tight">{reportTheme.title}</h2>
               <p className="text-white/80 text-xs mt-0.5">{report.title}</p>
+              <p className="text-white/90 text-sm font-bold mt-2">{report.centerLabel}</p>
             </div>
             <div className="flex gap-2 sm:gap-3">
               <motion.button
