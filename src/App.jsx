@@ -705,21 +705,19 @@ const generateSendPDFBlobReliable = async (order) => {
 
   return createStructuredPdfBlob({
     title: 'SMVS MATERIAL DISPATCH',
-    subtitle: `From: ${order.fromCenter || '-'}  |  Date: ${formatDisplayDate(order.date)}`,
+    subtitle: '',
     accent: [37, 99, 235],
     surface: [239, 246, 255],
     footerText: `Dispatch Chalan #${order.chalanNo || '-'}${order.fromCenter ? ` | ${order.fromCenter}` : ''}`,
-    metaEntries: [
-      { label: 'From Center', value: order.fromCenter || '-' },
-      { label: 'To Center', value: order.toCenter || 'Swaminarayan Dham Center' },
-      { label: 'Chalan No', value: `#${order.chalanNo || '-'}` },
-      { label: 'Date', value: formatDisplayDate(order.date) },
-      { label: 'Sender Name', value: order.senderName || '-' },
-      { label: 'Mobile Number', value: order.mobileNumber || '-' },
-      { label: 'Global ID', value: order.globalId || '-' },
-      { label: 'Email', value: order.email || '-' },
+    metaEntries: [],
+    compactMetaRows: [
+      { leftLabel: 'Center', leftValue: order.fromCenter || '-', rightLabel: 'Chalan No', rightValue: `#${order.chalanNo || '-'}` },
+      { leftLabel: 'Date', leftValue: formatDisplayDate(order.date), rightLabel: 'To Center', rightValue: order.toCenter || 'Swaminarayan Dham Center' },
+      { leftLabel: 'Sender', leftValue: order.senderName || '-', rightLabel: 'Mobile', rightValue: order.mobileNumber || '-' },
+      { leftLabel: 'Global ID', leftValue: order.globalId || '-', rightLabel: 'Email', rightValue: order.email || '-' },
     ],
-    statEntries: [
+    statEntries: [],
+    bottomStatEntries: [
       { label: 'Items', value: items.length },
       { label: 'Total KG', value: formatMetric(totals.totalKg) },
     ],
