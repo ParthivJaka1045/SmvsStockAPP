@@ -370,42 +370,46 @@ export const getReportTheme = () => ({
   dark: [20, 83, 45],
 });
 
-const drawFirstPageHeader = (pdf, report, fontFamily) => {
+const drawFirstPageHeader = (pdf, report) => {
   const pageWidth = pdf.internal.pageSize.getWidth();
   const centeredX = pageWidth / 2;
 
-  pdf.setFont(fontFamily, 'bold');
+  pdf.setFillColor(236, 253, 245);
+  pdf.roundedRect(14, 10, pageWidth - 28, 34, 4, 4, 'F');
+
+  pdf.setFont(DEFAULT_PDF_FONT_FAMILY, 'bold');
   pdf.setFontSize(16);
-  pdf.setTextColor(17, 24, 39);
-  pdf.text(REPORT_TITLE, centeredX, 18, { align: 'center' });
+  pdf.setTextColor(6, 95, 70);
+  pdf.text(REPORT_TITLE, centeredX, 20, { align: 'center' });
 
-  pdf.setFont(fontFamily, 'normal');
-  pdf.setFontSize(10);
-  pdf.text(`Month: ${report.monthLabel}`, centeredX, 26, { align: 'center' });
-  pdf.text(`Range: ${report.rangeLabel}`, centeredX, 32, { align: 'center' });
+  pdf.setFont(DEFAULT_PDF_FONT_FAMILY, 'bold');
+  pdf.setFontSize(8.5);
+  pdf.setTextColor(100, 116, 139);
+  pdf.text(`Month: ${report.monthLabel}`, centeredX, 27, { align: 'center' });
+  pdf.text(`Range: ${report.rangeLabel}`, centeredX, 32.5, { align: 'center' });
   pdf.text(`Center: ${report.centerLabel}`, centeredX, 38, { align: 'center' });
-  pdf.text(`Generated: ${formatDisplayDate(report.generatedAtIso)}`, centeredX, 44, { align: 'center' });
 
-  pdf.setDrawColor(156, 163, 175);
-  pdf.line(14, 48, pageWidth - 14, 48);
+  pdf.setDrawColor(16, 185, 129);
+  pdf.setLineWidth(0.7);
+  pdf.line(20, 47, pageWidth - 20, 47);
 };
 
-const drawContinuationHeader = (pdf, report, fontFamily) => {
+const drawContinuationHeader = (pdf, report) => {
   const pageWidth = pdf.internal.pageSize.getWidth();
 
-  pdf.setFont(fontFamily, 'bold');
+  pdf.setFont(DEFAULT_PDF_FONT_FAMILY, 'bold');
   pdf.setFontSize(9.5);
-  pdf.setTextColor(17, 24, 39);
+  pdf.setTextColor(6, 95, 70);
   pdf.text(REPORT_TITLE, 14, 15);
 
-  pdf.setFont(fontFamily, 'normal');
+  pdf.setFont(DEFAULT_PDF_FONT_FAMILY, 'normal');
   pdf.text(`${report.monthLabel} | ${report.centerLabel}`, pageWidth - 14, 15, { align: 'right' });
 
-  pdf.setDrawColor(209, 213, 219);
+  pdf.setDrawColor(16, 185, 129);
   pdf.line(14, 18, pageWidth - 14, 18);
 };
 
-const drawPageFooter = (pdf, report, fontFamily) => {
+const drawPageFooter = (pdf, report) => {
   const pageWidth = pdf.internal.pageSize.getWidth();
   const pageHeight = pdf.internal.pageSize.getHeight();
   const currentPage = pdf.getCurrentPageInfo().pageNumber;
@@ -414,14 +418,14 @@ const drawPageFooter = (pdf, report, fontFamily) => {
   pdf.setDrawColor(209, 213, 219);
   pdf.line(14, pageHeight - 12, pageWidth - 14, pageHeight - 12);
 
-  pdf.setFont(fontFamily, 'normal');
+  pdf.setFont(DEFAULT_PDF_FONT_FAMILY, 'normal');
   pdf.setFontSize(8);
   pdf.setTextColor(107, 114, 128);
   pdf.text(`Range: ${report.rangeLabel}`, 14, pageHeight - 7);
   pdf.text(`Page ${currentPage} / ${totalPages}`, pageWidth - 14, pageHeight - 7, { align: 'right' });
 };
 
-const drawSummaryMetricRow = (pdf, y, report, fontFamily) => {
+const drawSummaryMetricRow = (pdf, y, report) => {
   const metrics = [
     { label: 'Rows', value: formatMetric(report.summary.totalRows) },
     { label: 'Aavak', value: formatMetric(report.summary.totalIncome) },
@@ -432,24 +436,23 @@ const drawSummaryMetricRow = (pdf, y, report, fontFamily) => {
   const usableWidth = pageWidth - 28;
   const columnWidth = usableWidth / metrics.length;
 
-  pdf.setFont(fontFamily, 'bold');
-  pdf.setFontSize(8.8);
-  pdf.setTextColor(55, 65, 81);
+  pdf.setFont(DEFAULT_PDF_FONT_FAMILY, 'bold');
+  pdf.setFontSize(6.8);
+  pdf.setTextColor(6, 95, 70);
   metrics.forEach((metric, index) => {
     const x = 14 + (columnWidth * index) + (columnWidth / 2);
+    pdf.setFillColor(236, 253, 245);
+    pdf.roundedRect(14 + (columnWidth * index), y - 2, columnWidth - 1.5, 15, 2, 2, 'F');
     pdf.text(metric.label, x, y, { align: 'center' });
   });
 
-  pdf.setFont(fontFamily, 'normal');
+  pdf.setFont(DEFAULT_PDF_FONT_FAMILY, 'bold');
   pdf.setFontSize(13);
   pdf.setTextColor(17, 24, 39);
   metrics.forEach((metric, index) => {
     const x = 14 + (columnWidth * index) + (columnWidth / 2);
-    pdf.text(String(metric.value), x, y + 8, { align: 'center' });
+    pdf.text(String(metric.value), x, y + 7.5, { align: 'center' });
   });
-
-  pdf.setDrawColor(156, 163, 175);
-  pdf.line(14, y + 12, pageWidth - 14, y + 12);
 
   return y + 18;
 };
@@ -476,11 +479,11 @@ export const generateSummaryReportPDFBlob = async (reportInput) => {
   const pdf = new jsPDF('p', 'mm', 'a4');
   const fontFamily = await ensureReportFont(pdf);
 
-  drawFirstPageHeader(pdf, report, fontFamily);
-  drawSummaryMetricRow(pdf, 58, report, fontFamily);
+  drawFirstPageHeader(pdf, report);
+  drawSummaryMetricRow(pdf, 54, report);
 
   autoTable(pdf, {
-    startY: 80,
+    startY: 76,
     ...getTableConfig(report),
     margin: { top: 26, right: 14, bottom: 16, left: 14 },
     styles: {
@@ -507,14 +510,14 @@ export const generateSummaryReportPDFBlob = async (reportInput) => {
     },
     didDrawPage: () => {
       if (pdf.getCurrentPageInfo().pageNumber > 1) {
-        drawContinuationHeader(pdf, report, fontFamily);
+        drawContinuationHeader(pdf, report);
       }
-      drawPageFooter(pdf, report, fontFamily);
+      drawPageFooter(pdf, report);
     },
   });
 
   if (!pdf.lastAutoTable) {
-    drawPageFooter(pdf, report, fontFamily);
+    drawPageFooter(pdf, report);
   }
 
   return pdf.output('blob');

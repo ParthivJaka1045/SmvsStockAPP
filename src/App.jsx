@@ -440,7 +440,7 @@ const compactPdfValue = (value) => {
   return text.length > 46 ? `${text.slice(0, 43)}...` : text;
 };
 
-const drawPdfFooter = (pdf, fontFamily, footerText = '') => {
+const drawPdfFooter = (pdf, footerText = '') => {
   const pageWidth = pdf.internal.pageSize.getWidth();
   const pageHeight = pdf.internal.pageSize.getHeight();
   const currentPage = pdf.getCurrentPageInfo().pageNumber;
@@ -449,7 +449,7 @@ const drawPdfFooter = (pdf, fontFamily, footerText = '') => {
   pdf.setDrawColor(226, 232, 240);
   pdf.line(14, pageHeight - 12, pageWidth - 14, pageHeight - 12);
 
-  pdf.setFont(fontFamily, 'normal');
+  pdf.setFont(PDF_FALLBACK_FONT, 'normal');
   pdf.setFontSize(8);
   pdf.setTextColor(100, 116, 139);
   if (footerText) {
@@ -458,16 +458,16 @@ const drawPdfFooter = (pdf, fontFamily, footerText = '') => {
   pdf.text(`Page ${currentPage} / ${totalPages}`, pageWidth - 14, pageHeight - 7, { align: 'right' });
 };
 
-const drawPdfContinuationHeader = (pdf, fontFamily, title, subtitle, accent) => {
+const drawPdfContinuationHeader = (pdf, title, subtitle, accent) => {
   const pageWidth = pdf.internal.pageSize.getWidth();
 
-  pdf.setFont(fontFamily, 'bold');
+  pdf.setFont(PDF_FALLBACK_FONT, 'bold');
   pdf.setFontSize(10);
   pdf.setTextColor(...accent);
   pdf.text(title, 14, 14);
 
   if (subtitle) {
-    pdf.setFont(fontFamily, 'normal');
+    pdf.setFont(PDF_FALLBACK_FONT, 'normal');
     pdf.setFontSize(8.5);
     pdf.setTextColor(100, 116, 139);
     pdf.text(subtitle, pageWidth - 14, 14, { align: 'right' });
@@ -477,7 +477,7 @@ const drawPdfContinuationHeader = (pdf, fontFamily, title, subtitle, accent) => 
   pdf.line(14, 17, pageWidth - 14, 17);
 };
 
-const drawPdfMetaGrid = (pdf, startY, fontFamily, metaEntries, accent, surface) => {
+const drawPdfMetaGrid = (pdf, startY, metaEntries, accent, surface) => {
   if (!metaEntries.length) return startY;
 
   const pageWidth = pdf.internal.pageSize.getWidth();
@@ -497,12 +497,12 @@ const drawPdfMetaGrid = (pdf, startY, fontFamily, metaEntries, accent, surface) 
     pdf.setFillColor(...surface);
     pdf.roundedRect(x, y, cardWidth, cardHeight, 2, 2, 'F');
 
-    pdf.setFont(fontFamily, 'bold');
+    pdf.setFont(PDF_FALLBACK_FONT, 'bold');
     pdf.setFontSize(6.5);
     pdf.setTextColor(...accent);
     pdf.text(entry.label, x + 3, y + 4.5);
 
-    pdf.setFont(fontFamily, 'normal');
+    pdf.setFont(PDF_FALLBACK_FONT, 'normal');
     pdf.setFontSize(8.3);
     pdf.setTextColor(15, 23, 42);
     pdf.text(compactPdfValue(entry.value), x + 3, y + 10);
@@ -511,7 +511,7 @@ const drawPdfMetaGrid = (pdf, startY, fontFamily, metaEntries, accent, surface) 
   return startY + (rows * (cardHeight + 3));
 };
 
-const drawPdfStatCards = (pdf, startY, fontFamily, statEntries, accent, surface) => {
+const drawPdfStatCards = (pdf, startY, statEntries, accent, surface) => {
   if (!statEntries.length) return startY;
 
   const pageWidth = pdf.internal.pageSize.getWidth();
@@ -525,12 +525,12 @@ const drawPdfStatCards = (pdf, startY, fontFamily, statEntries, accent, surface)
     pdf.setFillColor(...surface);
     pdf.roundedRect(x, startY, cardWidth, 16, 2, 2, 'F');
 
-    pdf.setFont(fontFamily, 'bold');
+    pdf.setFont(PDF_FALLBACK_FONT, 'bold');
     pdf.setFontSize(6.8);
     pdf.setTextColor(...accent);
     pdf.text(entry.label, x + 3, startY + 5);
 
-    pdf.setFont(fontFamily, 'bold');
+    pdf.setFont(PDF_FALLBACK_FONT, 'bold');
     pdf.setFontSize(12);
     pdf.setTextColor(15, 23, 42);
     pdf.text(String(entry.value), x + 3, startY + 11.5);
@@ -552,35 +552,35 @@ const createStructuredPdfBlob = async ({
   columnStyles = {},
 }) => {
   const pdf = new jsPDF('p', 'mm', 'a4');
-  const fontFamily = await ensurePdfFont(pdf);
+  const bodyFont = await ensurePdfFont(pdf);
   const pageWidth = pdf.internal.pageSize.getWidth();
 
-  pdf.setFont(fontFamily, 'bold');
-  pdf.setFontSize(17);
+  pdf.setFont(PDF_FALLBACK_FONT, 'bold');
+  pdf.setFontSize(18);
   pdf.setTextColor(...accent);
-  pdf.text(title, 14, 18);
+  pdf.text(title, pageWidth / 2, 16, { align: 'center' });
 
   if (subtitle) {
-    pdf.setFont(fontFamily, 'normal');
-    pdf.setFontSize(9);
+    pdf.setFont(PDF_FALLBACK_FONT, 'bold');
+    pdf.setFontSize(8.5);
     pdf.setTextColor(100, 116, 139);
-    pdf.text(subtitle, 14, 24);
+    pdf.text(subtitle, pageWidth / 2, 21.5, { align: 'center' });
   }
 
   pdf.setDrawColor(...accent);
-  pdf.setLineWidth(0.6);
-  pdf.line(14, 28, pageWidth - 14, 28);
+  pdf.setLineWidth(0.8);
+  pdf.line(20, 27, pageWidth - 20, 27);
 
-  let startY = drawPdfMetaGrid(pdf, 33, fontFamily, metaEntries, accent, surface);
-  startY = drawPdfStatCards(pdf, startY + 1, fontFamily, statEntries, accent, surface);
+  let startY = drawPdfMetaGrid(pdf, 33, metaEntries, accent, [248, 250, 252]);
+  startY = drawPdfStatCards(pdf, startY + 2, statEntries, accent, surface);
 
   autoTable(pdf, {
-    startY: startY + 2,
+    startY: startY + 4,
     head: [head],
     body,
     margin: { top: 22, right: 14, bottom: 16, left: 14 },
     styles: {
-      font: fontFamily,
+      font: bodyFont,
       fontSize: 8.5,
       cellPadding: 2.4,
       overflow: 'linebreak',
@@ -590,10 +590,10 @@ const createStructuredPdfBlob = async ({
       valign: 'middle',
     },
     headStyles: {
-      fillColor: accent,
+      fillColor: [15, 23, 42],
       textColor: [255, 255, 255],
       fontStyle: 'bold',
-      lineColor: accent,
+      lineColor: [15, 23, 42],
       lineWidth: 0.2,
     },
     alternateRowStyles: {
@@ -603,16 +603,23 @@ const createStructuredPdfBlob = async ({
       minCellHeight: 8.5,
     },
     columnStyles,
+    didParseCell: (data) => {
+      if (data.section === 'head') {
+        data.cell.styles.font = PDF_FALLBACK_FONT;
+      } else {
+        data.cell.styles.font = bodyFont;
+      }
+    },
     didDrawPage: () => {
       if (pdf.getCurrentPageInfo().pageNumber > 1) {
-        drawPdfContinuationHeader(pdf, fontFamily, title, subtitle, accent);
+        drawPdfContinuationHeader(pdf, title, subtitle, accent);
       }
-      drawPdfFooter(pdf, fontFamily, footerText);
+      drawPdfFooter(pdf, footerText);
     },
   });
 
   if (!pdf.lastAutoTable) {
-    drawPdfFooter(pdf, fontFamily, footerText);
+    drawPdfFooter(pdf, footerText);
   }
 
   return pdf.output('blob');
@@ -748,6 +755,15 @@ const createDefaultReportForm = () => {
     centerOther: '',
   };
 };
+
+function PreviewInfoCard({ label, value, accentClass = 'text-slate-900', className = '' }) {
+  return (
+    <div className={`rounded-2xl border border-gray-200 bg-white px-4 py-3 shadow-sm ${className}`}>
+      <p className="text-gray-400 text-[10px] font-sans font-bold uppercase tracking-[0.14em] mb-1">{label}</p>
+      <p className={`font-black text-sm sm:text-base break-words ${accentClass}`}>{value || '-'}</p>
+    </div>
+  );
+}
 
 function ReportPreviewContent({ report }) {
   const preparedReport = hydrateReport(report);
@@ -1777,23 +1793,27 @@ function AdminDashboard({ user }) {
             onClick={() => setPreviewOrder(null)}>
             <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.9, opacity: 0 }}
               onClick={e => e.stopPropagation()}
-              className="bg-white text-black w-full max-w-2xl max-h-[95vh] overflow-y-auto rounded-xl sm:rounded-2xl p-6 sm:p-10 relative shadow-2xl font-serif custom-scroll">
+              className="bg-white text-black w-full max-w-4xl max-h-[95vh] overflow-y-auto rounded-xl sm:rounded-2xl p-6 sm:p-10 relative shadow-2xl font-serif custom-scroll">
               <motion.button whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.9 }} onClick={() => setPreviewOrder(null)}
                 className="absolute top-3 right-3 sm:top-4 sm:right-4 bg-gray-100 p-2 rounded-full text-black hover:bg-gray-200 transition-colors">
                 <X size={20} />
               </motion.button>
-              <div className="text-center mb-6 sm:mb-8 border-b-4 border-orange-600 pb-4">
-                <h1 className="text-2xl sm:text-4xl font-black text-orange-600 uppercase mb-0 tracking-tighter">SMVS STOCK REQUEST</h1>
+              <div className="text-center mb-6 sm:mb-8 pb-4">
+                <h1 className="text-3xl sm:text-4xl font-black text-orange-600 uppercase mb-1 tracking-tighter">SMVS STOCK REQUEST</h1>
                 <p className="text-gray-400 text-[10px] font-sans font-bold uppercase tracking-[0.2em] mt-1">Video Post Production Data Report</p>
+                <div className="mt-3 h-1 w-full rounded-full bg-orange-600" />
               </div>
-              <div className="grid grid-cols-2 gap-3 sm:gap-4 text-sm mb-6 sm:mb-8 bg-gray-50 p-4 sm:p-6 rounded-2xl border border-gray-100">
-                <div><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Center Name</p><p className="font-bold text-base sm:text-lg">{previewOrder.center}</p></div>
-                <div className="text-right"><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Chalan No</p><p className="font-bold text-base sm:text-lg">#{previewOrder.chalanNo}</p></div>
-                <div><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Order Date</p><p className="font-bold text-sm">{formatDisplayDate(previewOrder.date)}</p></div>
-                <div className="text-right"><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Sender</p><p className="font-bold text-sm">{previewOrder.senderName || '-'}</p></div>
-                {previewOrder.post && <div className="text-right"><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Post</p><p className="font-bold text-sm">{previewOrder.post}{previewOrder.mobileNumber ? ` | ${previewOrder.mobileNumber}` : ''}</p></div>}
-                {previewOrder.globalId && <div><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Global ID</p><p className="font-bold text-sm">{previewOrder.globalId}</p></div>}
-                {previewOrder.email && <div className="text-right"><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Email</p><p className="font-bold text-sm break-all">{previewOrder.email}</p></div>}
+              <div className="mb-6 sm:mb-8 rounded-[1.8rem] border border-gray-200 bg-gray-50 p-4 sm:p-6">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                  <PreviewInfoCard label="Center Name" value={previewOrder.center} />
+                  <PreviewInfoCard label="Chalan No" value={`#${previewOrder.chalanNo}`} />
+                  <PreviewInfoCard label="Order Date" value={formatDisplayDate(previewOrder.date)} />
+                  <PreviewInfoCard label="Sender" value={previewOrder.senderName || '-'} />
+                  <PreviewInfoCard label="Post" value={previewOrder.post || '-'} />
+                  <PreviewInfoCard label="Mobile Number" value={previewOrder.mobileNumber || '-'} />
+                  <PreviewInfoCard label="Global ID" value={previewOrder.globalId || '-'} />
+                  <PreviewInfoCard label="Email" value={previewOrder.email || '-'} className="sm:col-span-2 lg:col-span-2" />
+                </div>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-xs sm:text-[13px] border-collapse border border-black">
