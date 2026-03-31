@@ -1,20 +1,17 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import html2canvas from 'html2canvas';
 import { db } from './firebase'; 
 import { collection, addDoc, getDocs, getDoc, query, orderBy, doc, where, updateDoc, deleteDoc } from 'firebase/firestore'; 
 import { categories, centerData } from './data';
 import jsPDF from 'jspdf';
-import autoTable from 'jspdf-autotable';
 import emailjs from 'emailjs-com'; 
-import gujaratiFontBoldUrl from './assets/fonts/NotoSansGujarati-Bold.ttf?url';
-import gujaratiFontRegularUrl from './assets/fonts/NotoSansGujarati-Regular.ttf?url';
-import { getPdfTextFont } from './pdfText';
+import { createRoot } from 'react-dom/client';
 import {
   REPORT_TITLE,
   buildSummaryReport,
   formatDisplayDate,
   formatMetric,
-  generateSummaryReportPDFBlob,
   getReportFileName,
   getReportTheme,
   hydrateReport,
@@ -326,9 +323,10 @@ function App() {
 }
 
 // --- SHARED HELPERS ---
-const PDF_FONT_FAMILY = 'NotoSansGujaratiApp';
-const PDF_FALLBACK_FONT = 'helvetica';
-let pdfFontAssetsPromise = null;
+const PDF_EXPORT_PAGE_WIDTH_PX = 794;
+const PDF_EXPORT_PAGE_HEIGHT_PX = 1123;
+const PDF_EXPORT_PAGE_WIDTH_MM = 210;
+const PDF_EXPORT_PAGE_HEIGHT_MM = 297;
 
 const sanitizeFilePart = (value) =>
   (value || '')
@@ -347,53 +345,20 @@ const getResolvedCenterValue = (selectedCenter, otherCenter = '') =>
 const getCenterScopeLabel = (scope, center) =>
   scope === 'center' && center ? center : 'All Centers / Full Report';
 
-const arrayBufferToBase64 = (buffer) => {
-  let binary = '';
-  const bytes = new Uint8Array(buffer);
-  const chunkSize = 0x8000;
-
-  for (let index = 0; index < bytes.length; index += chunkSize) {
-    const chunk = bytes.subarray(index, index + chunkSize);
-    binary += String.fromCharCode(...chunk);
+const waitForPdfRender = async () => {
+  if (document.fonts?.ready) {
+    try {
+      await document.fonts.ready;
+    } catch (error) {
+      console.warn('Document fonts were not fully ready before PDF capture.', error);
+    }
   }
 
-  return btoa(binary);
-};
-
-const loadPdfFontAssets = async () => {
-  if (!pdfFontAssetsPromise) {
-    pdfFontAssetsPromise = Promise.all([
-      { fileName: 'NotoSansGujarati-Regular.ttf', fontUrl: gujaratiFontRegularUrl, style: 'normal' },
-      { fileName: 'NotoSansGujarati-Bold.ttf', fontUrl: gujaratiFontBoldUrl, style: 'bold' },
-    ].map(async ({ fileName, fontUrl, style }) => {
-      const response = await fetch(fontUrl);
-      if (!response.ok) throw new Error(`Font download failed for ${fileName}`);
-      const buffer = await response.arrayBuffer();
-      return {
-        fileName,
-        style,
-        base64: arrayBufferToBase64(buffer),
-      };
-    }));
-  }
-
-  return pdfFontAssetsPromise;
-};
-
-const ensurePdfFont = async (pdf) => {
-  try {
-    const assets = await loadPdfFontAssets();
-    assets.forEach(({ fileName, style, base64 }) => {
-      if (!pdf.existsFileInVFS(fileName)) {
-        pdf.addFileToVFS(fileName, base64);
-      }
-      pdf.addFont(fileName, PDF_FONT_FAMILY, style);
+  await new Promise((resolve) => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(resolve);
     });
-    return PDF_FONT_FAMILY;
-  } catch (error) {
-    console.warn('PDF Gujarati font load failed. Falling back to Helvetica.', error);
-    return PDF_FALLBACK_FONT;
-  }
+  });
 };
 
 const calculateTotals = (items) => {
@@ -423,6 +388,97 @@ const getSendFileName = (order) =>
 const getPurchaseFileName = (purchase) =>
   `purchase-${sanitizeFilePart(purchase?.center || purchase?.shopName)}-${sanitizeFilePart(purchase?.billNo)}.pdf`;
 
+const paginateRowsWithSummary = (rows, rowsPerPage, lastPageRows = rowsPerPage) => {
+  if (!rows.length) return [[]];
+  if (rows.length <= lastPageRows) return [rows];
+
+  const pages = [];
+  let startIndex = 0;
+
+  while (rows.length - startIndex > lastPageRows) {
+    pages.push(rows.slice(startIndex, startIndex + rowsPerPage));
+    startIndex += rowsPerPage;
+  }
+
+  pages.push(rows.slice(startIndex));
+  return pages;
+};
+
+const renderPdfDocumentToBlob = async (content) => {
+  const host = document.createElement('div');
+  host.style.position = 'fixed';
+  host.style.left = '-20000px';
+  host.style.top = '0';
+  host.style.width = `${PDF_EXPORT_PAGE_WIDTH_PX}px`;
+  host.style.background = '#ffffff';
+  host.style.pointerEvents = 'none';
+  host.style.zIndex = '-1';
+  document.body.appendChild(host);
+
+  const root = createRoot(host);
+
+  try {
+    root.render(content);
+    await waitForPdfRender();
+
+    const pageNodes = Array.from(host.querySelectorAll('[data-pdf-page="true"]'));
+    if (!pageNodes.length) {
+      throw new Error('Printable PDF content was not rendered.');
+    }
+
+    const pdf = new jsPDF('p', 'mm', 'a4');
+
+    for (const [index, pageNode] of pageNodes.entries()) {
+      const canvas = await html2canvas(pageNode, {
+        backgroundColor: '#ffffff',
+        scale: 2,
+        useCORS: true,
+        logging: false,
+        width: pageNode.scrollWidth,
+        height: pageNode.scrollHeight,
+        windowWidth: pageNode.scrollWidth,
+        windowHeight: pageNode.scrollHeight,
+      });
+
+      if (index > 0) pdf.addPage();
+
+      const imageData = canvas.toDataURL('image/jpeg', 0.98);
+      pdf.addImage(
+        imageData,
+        'JPEG',
+        0,
+        0,
+        PDF_EXPORT_PAGE_WIDTH_MM,
+        PDF_EXPORT_PAGE_HEIGHT_MM,
+        undefined,
+        'FAST',
+      );
+    }
+
+    return pdf.output('blob');
+  } finally {
+    root.unmount();
+    document.body.removeChild(host);
+  }
+};
+
+async function generatePDFBlobReliable(order) {
+  return renderPdfDocumentToBlob(<RequestPdfDocument order={order} />);
+}
+
+async function generateSendPDFBlobReliable(order) {
+  return renderPdfDocumentToBlob(<SendPdfDocument order={order} />);
+}
+
+async function generatePurchasePDFBlob(purchase) {
+  return renderPdfDocumentToBlob(<PurchasePdfDocument purchase={purchase} />);
+}
+
+async function generateSummaryReportPDFBlob(reportInput) {
+  const report = hydrateReport(reportInput);
+  return renderPdfDocumentToBlob(<ReportPdfDocument report={report} />);
+}
+
 // Category icons for visual appeal
 const categoryIcons = {
   "અનાજ": "🌾",
@@ -434,348 +490,6 @@ const categoryIcons = {
   "કલર": "🎨",
   "મસાલા": "🌶️",
   "અન્ય": "📦"
-};
-
-const compactPdfValue = (value) => {
-  const text = (value || '-').toString();
-  return text.length > 46 ? `${text.slice(0, 43)}...` : text;
-};
-
-const drawPdfFooter = (pdf, footerText = '') => {
-  const pageWidth = pdf.internal.pageSize.getWidth();
-  const pageHeight = pdf.internal.pageSize.getHeight();
-  const currentPage = pdf.getCurrentPageInfo().pageNumber;
-  const totalPages = pdf.getNumberOfPages();
-
-  pdf.setDrawColor(226, 232, 240);
-  pdf.line(14, pageHeight - 12, pageWidth - 14, pageHeight - 12);
-
-  pdf.setFontSize(8);
-  pdf.setTextColor(100, 116, 139);
-  if (footerText) {
-    pdf.setFont(getPdfTextFont(footerText, PDF_FONT_FAMILY, PDF_FALLBACK_FONT), 'normal');
-    pdf.text(footerText, 14, pageHeight - 7);
-  }
-  pdf.setFont(PDF_FALLBACK_FONT, 'normal');
-  pdf.text(`Page ${currentPage} / ${totalPages}`, pageWidth - 14, pageHeight - 7, { align: 'right' });
-};
-
-const drawPdfContinuationHeader = (pdf, title, subtitle, accent) => {
-  const pageWidth = pdf.internal.pageSize.getWidth();
-
-  pdf.setFont(PDF_FALLBACK_FONT, 'bold');
-  pdf.setFontSize(10);
-  pdf.setTextColor(...accent);
-  pdf.text(title, 14, 14);
-
-  if (subtitle) {
-    pdf.setFont(getPdfTextFont(subtitle, PDF_FONT_FAMILY, PDF_FALLBACK_FONT), 'normal');
-    pdf.setFontSize(8.5);
-    pdf.setTextColor(100, 116, 139);
-    pdf.text(subtitle, pageWidth - 14, 14, { align: 'right' });
-  }
-
-  pdf.setDrawColor(...accent);
-  pdf.line(14, 17, pageWidth - 14, 17);
-};
-
-const drawPdfMetaGrid = (pdf, startY, metaEntries, accent, surface) => {
-  if (!metaEntries.length) return startY;
-
-  const pageWidth = pdf.internal.pageSize.getWidth();
-  const usableWidth = pageWidth - 28;
-  const columnGap = 4;
-  const columns = 2;
-  const cardWidth = (usableWidth - columnGap) / columns;
-  const cardHeight = 14;
-  const rows = Math.ceil(metaEntries.length / columns);
-
-  metaEntries.forEach((entry, index) => {
-    const rowIndex = Math.floor(index / columns);
-    const columnIndex = index % columns;
-    const x = 14 + (columnIndex * (cardWidth + columnGap));
-    const y = startY + (rowIndex * (cardHeight + 3));
-
-    pdf.setFillColor(...surface);
-    pdf.roundedRect(x, y, cardWidth, cardHeight, 2, 2, 'F');
-
-    pdf.setFont(PDF_FALLBACK_FONT, 'bold');
-    pdf.setFontSize(6.5);
-    pdf.setTextColor(...accent);
-    pdf.text(entry.label, x + 3, y + 4.5);
-
-    pdf.setFont(PDF_FALLBACK_FONT, 'normal');
-    pdf.setFontSize(8.3);
-    pdf.setTextColor(15, 23, 42);
-    const compactValue = compactPdfValue(entry.value);
-    pdf.setFont(getPdfTextFont(compactValue, PDF_FONT_FAMILY, PDF_FALLBACK_FONT), 'normal');
-    pdf.text(compactValue, x + 3, y + 10);
-  });
-
-  return startY + (rows * (cardHeight + 3));
-};
-
-const drawPdfCompactMetaRows = (pdf, startY, metaRows, accent) => {
-  if (!metaRows.length) return startY;
-
-  const pageWidth = pdf.internal.pageSize.getWidth();
-  const rowWidth = pageWidth - 28;
-  const leftValueX = 36;
-  const rightLabelX = (pageWidth / 2) + 2;
-  const rightValueX = rightLabelX + 22;
-
-  metaRows.forEach((row, index) => {
-    const y = startY + (index * 9.5);
-
-    pdf.setFillColor(248, 250, 252);
-    pdf.roundedRect(14, y - 1.5, rowWidth, 7.5, 2, 2, 'F');
-
-    pdf.setFont(PDF_FALLBACK_FONT, 'bold');
-    pdf.setFontSize(7.5);
-    pdf.setTextColor(...accent);
-    pdf.text(`${row.leftLabel}:`, 18, y + 3);
-    pdf.text(`${row.rightLabel}:`, rightLabelX, y + 3);
-
-    const leftValue = compactPdfValue(row.leftValue);
-    const rightValue = compactPdfValue(row.rightValue);
-    pdf.setTextColor(15, 23, 42);
-    pdf.setFont(getPdfTextFont(leftValue, PDF_FONT_FAMILY, PDF_FALLBACK_FONT), 'bold');
-    pdf.text(leftValue, leftValueX, y + 3);
-    pdf.setFont(getPdfTextFont(rightValue, PDF_FONT_FAMILY, PDF_FALLBACK_FONT), 'bold');
-    pdf.text(rightValue, rightValueX, y + 3);
-  });
-
-  return startY + (metaRows.length * 9.5);
-};
-
-const drawPdfStatCards = (pdf, startY, statEntries, accent, surface) => {
-  if (!statEntries.length) return startY;
-
-  const pageWidth = pdf.internal.pageSize.getWidth();
-  const gap = 4;
-  const columns = Math.max(1, Math.min(statEntries.length, 3));
-  const cardWidth = (pageWidth - 28 - (gap * (columns - 1))) / columns;
-
-  statEntries.forEach((entry, index) => {
-    const x = 14 + (index * (cardWidth + gap));
-
-    pdf.setFillColor(...surface);
-    pdf.roundedRect(x, startY, cardWidth, 16, 2, 2, 'F');
-
-    pdf.setFont(PDF_FALLBACK_FONT, 'bold');
-    pdf.setFontSize(6.8);
-    pdf.setTextColor(...accent);
-    pdf.text(entry.label, x + 3, startY + 5);
-
-    pdf.setFont(PDF_FALLBACK_FONT, 'bold');
-    pdf.setFontSize(12);
-    pdf.setTextColor(15, 23, 42);
-    pdf.text(String(entry.value), x + 3, startY + 11.5);
-  });
-
-  return startY + 21;
-};
-
-const createStructuredPdfBlob = async ({
-  title,
-  subtitle,
-  accent,
-  surface,
-  footerText,
-  metaEntries,
-  compactMetaRows = [],
-  statEntries,
-  bottomStatEntries = [],
-  head,
-  body,
-  columnStyles = {},
-}) => {
-  const pdf = new jsPDF('p', 'mm', 'a4');
-  const bodyFont = await ensurePdfFont(pdf);
-  const pageWidth = pdf.internal.pageSize.getWidth();
-
-  pdf.setFont(PDF_FALLBACK_FONT, 'bold');
-  pdf.setFontSize(18);
-  pdf.setTextColor(...accent);
-  pdf.text(title, pageWidth / 2, 16, { align: 'center' });
-
-  if (subtitle) {
-    pdf.setFont(PDF_FALLBACK_FONT, 'bold');
-    pdf.setFontSize(8.5);
-    pdf.setTextColor(100, 116, 139);
-    pdf.text(subtitle, pageWidth / 2, 21.5, { align: 'center' });
-  }
-
-  pdf.setDrawColor(...accent);
-  pdf.setLineWidth(0.8);
-  pdf.line(20, 27, pageWidth - 20, 27);
-
-  let startY = compactMetaRows.length
-    ? drawPdfCompactMetaRows(pdf, 33, compactMetaRows, accent)
-    : drawPdfMetaGrid(pdf, 33, metaEntries, accent, [248, 250, 252]);
-  startY = drawPdfStatCards(pdf, startY + 2, statEntries, accent, surface);
-
-  autoTable(pdf, {
-    startY: startY + 4,
-    head: [head],
-    body,
-    margin: { top: 22, right: 14, bottom: bottomStatEntries.length ? 40 : 16, left: 14 },
-    styles: {
-      font: bodyFont,
-      fontSize: 8.5,
-      cellPadding: 2.4,
-      overflow: 'linebreak',
-      textColor: [31, 41, 55],
-      lineColor: [226, 232, 240],
-      lineWidth: 0.18,
-      valign: 'middle',
-    },
-    headStyles: {
-      fillColor: [15, 23, 42],
-      textColor: [255, 255, 255],
-      fontStyle: 'bold',
-      lineColor: [15, 23, 42],
-      lineWidth: 0.2,
-    },
-    alternateRowStyles: {
-      fillColor: [248, 250, 252],
-    },
-    bodyStyles: {
-      minCellHeight: 8.5,
-    },
-    columnStyles,
-    didParseCell: (data) => {
-      if (data.section === 'head') {
-        data.cell.styles.font = PDF_FALLBACK_FONT;
-      } else {
-        const rawValue = Array.isArray(data.row?.raw)
-          ? data.row.raw[data.column.index]
-          : data.cell.raw;
-        data.cell.styles.font = getPdfTextFont(rawValue, bodyFont, PDF_FALLBACK_FONT);
-      }
-    },
-    didDrawPage: () => {
-      if (pdf.getCurrentPageInfo().pageNumber > 1) {
-        drawPdfContinuationHeader(pdf, title, subtitle, accent);
-      }
-      drawPdfFooter(pdf, footerText);
-    },
-  });
-
-  if (!pdf.lastAutoTable) {
-    drawPdfFooter(pdf, footerText);
-  }
-
-  if (bottomStatEntries.length && pdf.lastAutoTable) {
-    drawPdfStatCards(pdf, pdf.lastAutoTable.finalY + 5, bottomStatEntries, accent, surface);
-  }
-
-  return pdf.output('blob');
-};
-
-const generatePDFBlobReliable = async (order) => {
-  const items = (order.items || []).filter((item) => item?.name?.trim());
-  const totals = calculateTotals(items);
-
-  return createStructuredPdfBlob({
-    title: 'SMVS STOCK REQUEST',
-    subtitle: '',
-    accent: [234, 88, 12],
-    surface: [255, 247, 237],
-    footerText: `Request Chalan #${order.chalanNo || '-'}${order.center ? ` | ${order.center}` : ''}`,
-    metaEntries: [],
-    compactMetaRows: [
-      { leftLabel: 'Center', leftValue: order.center || '-', rightLabel: 'Chalan No', rightValue: `#${order.chalanNo || '-'}` },
-      { leftLabel: 'Order Date', leftValue: formatDisplayDate(order.date), rightLabel: 'Sender', rightValue: order.senderName || '-' },
-      { leftLabel: 'Post', leftValue: order.post || '-', rightLabel: 'Mobile', rightValue: order.mobileNumber || '-' },
-      { leftLabel: 'Global ID', leftValue: order.globalId || '-', rightLabel: 'Email', rightValue: order.email || '-' },
-    ],
-    statEntries: [],
-    bottomStatEntries: [
-      { label: 'Items', value: items.length },
-      { label: 'Total KG', value: formatMetric(totals.totalKg) },
-    ],
-    head: ['No', 'Item Name', 'Qty', 'Unit'],
-    body: items.map((item, index) => [
-      String(index + 1),
-      item.name || '-',
-      formatMetric(item.qty),
-      item.unit || '-',
-    ]),
-    columnStyles: {
-      0: { cellWidth: 14, halign: 'center' },
-      2: { cellWidth: 22, halign: 'center' },
-      3: { cellWidth: 22, halign: 'center' },
-    },
-  });
-};
-
-const generateSendPDFBlobReliable = async (order) => {
-  const items = (order.items || []).filter((item) => item?.itemName?.trim());
-  const totals = calculateKgTotals(items);
-
-  return createStructuredPdfBlob({
-    title: 'SMVS MATERIAL DISPATCH',
-    subtitle: '',
-    accent: [37, 99, 235],
-    surface: [239, 246, 255],
-    footerText: `Dispatch Chalan #${order.chalanNo || '-'}${order.fromCenter ? ` | ${order.fromCenter}` : ''}`,
-    metaEntries: [],
-    compactMetaRows: [
-      { leftLabel: 'Center', leftValue: order.fromCenter || '-', rightLabel: 'Chalan No', rightValue: `#${order.chalanNo || '-'}` },
-      { leftLabel: 'Date', leftValue: formatDisplayDate(order.date), rightLabel: 'To Center', rightValue: order.toCenter || 'Swaminarayan Dham Center' },
-      { leftLabel: 'Sender', leftValue: order.senderName || '-', rightLabel: 'Mobile', rightValue: order.mobileNumber || '-' },
-      { leftLabel: 'Global ID', leftValue: order.globalId || '-', rightLabel: 'Email', rightValue: order.email || '-' },
-    ],
-    statEntries: [],
-    bottomStatEntries: [
-      { label: 'Items', value: items.length },
-      { label: 'Total KG', value: formatMetric(totals.totalKg) },
-    ],
-    head: ['No', 'Item Name', 'KG'],
-    body: items.map((item, index) => [
-      String(index + 1),
-      item.itemName || '-',
-      formatMetric(item.kg),
-    ]),
-    columnStyles: {
-      0: { cellWidth: 14, halign: 'center' },
-      2: { cellWidth: 24, halign: 'center' },
-    },
-  });
-};
-
-const generatePurchasePDFBlob = async (purchase) => {
-  const items = (purchase.items || []).filter((item) => item?.itemName?.trim());
-  const totals = calculateKgTotals(items);
-
-  return createStructuredPdfBlob({
-    title: 'SMVS PURCHASE REPORT',
-    subtitle: '',
-    accent: [139, 92, 246],
-    surface: [245, 243, 255],
-    footerText: `Purchase Bill #${purchase.billNo || '-'}${purchase.shopName ? ` | ${purchase.shopName}` : ''}`,
-    metaEntries: [],
-    compactMetaRows: [
-      { leftLabel: 'Shop Name', leftValue: purchase.shopName || '-', rightLabel: 'Bill Number', rightValue: `#${purchase.billNo || '-'}` },
-      { leftLabel: 'Bill Date', leftValue: formatDisplayDate(purchase.billDate || purchase.date), rightLabel: 'Entry Date', rightValue: formatDisplayDate(purchase.date || purchase.billDate) },
-    ],
-    statEntries: [],
-    bottomStatEntries: [
-      { label: 'Number of Items', value: items.length },
-      { label: 'Total KG', value: formatMetric(totals.totalKg) },
-    ],
-    head: ['No', 'Item Name', 'KG'],
-    body: items.map((item, index) => [
-      String(index + 1),
-      item.itemName || '-',
-      formatMetric(item.kg),
-    ]),
-    columnStyles: {
-      0: { cellWidth: 14, halign: 'center' },
-      2: { cellWidth: 24, halign: 'center' },
-    },
-  });
 };
 
 const getReportUiTheme = () => ({
@@ -884,6 +598,296 @@ function ReportPreviewContent({ report }) {
         <ReportSummaryCard labelLines={['જાવક', 'KG']} value={formatMetric(preparedReport.summary.totalOutgoing)} />
         <ReportSummaryCard labelLines={['કુલ સ્ટોક', 'KG']} value={formatMetric(preparedReport.summary.totalStock)} />
       </div>
+    </div>
+  );
+}
+
+function PdfExportPage({ children, className = '' }) {
+  return (
+    <div
+      data-pdf-page="true"
+      className={`bg-white text-black overflow-hidden ${className}`}
+      style={{
+        width: `${PDF_EXPORT_PAGE_WIDTH_PX}px`,
+        height: `${PDF_EXPORT_PAGE_HEIGHT_PX}px`,
+        boxSizing: 'border-box',
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function RequestPdfDocument({ order }) {
+  const items = (order?.items || []).filter((item) => item?.name?.trim());
+  const totals = calculateTotals(items);
+  const itemPages = paginateRowsWithSummary(items, 18, 13);
+
+  return (
+    <div>
+      {itemPages.map((pageItems, pageIndex) => {
+        const isLastPage = pageIndex === itemPages.length - 1;
+
+        return (
+          <PdfExportPage key={`request-pdf-${order?.id || order?.chalanNo || pageIndex}`} className="px-10 py-8 font-serif">
+            <div className="text-center mb-6 pb-4">
+              <h1 className="text-4xl font-black text-orange-600 uppercase mb-1 tracking-tighter">SMVS STOCK REQUEST</h1>
+              <p className="text-gray-400 text-[10px] font-sans font-bold uppercase tracking-[0.2em] mt-1">Video Post Production Data Report</p>
+              <div className="mt-3 h-1 w-full rounded-full bg-orange-600" />
+            </div>
+
+            <div className="mb-6 rounded-[1.8rem] border border-gray-200 bg-gray-50 p-5">
+              <div className="grid grid-cols-4 gap-3">
+                <PreviewInfoCard label="Center Name" value={order?.center} />
+                <PreviewInfoCard label="Chalan No" value={`#${order?.chalanNo || '-'}`} />
+                <PreviewInfoCard label="Order Date" value={formatDisplayDate(order?.date)} />
+                <PreviewInfoCard label="Sender" value={order?.senderName || '-'} />
+                <PreviewInfoCard label="Post" value={order?.post || '-'} />
+                <PreviewInfoCard label="Mobile Number" value={order?.mobileNumber || '-'} />
+                <PreviewInfoCard label="Global ID" value={order?.globalId || '-'} />
+                <PreviewInfoCard label="Email" value={order?.email || '-'} className="col-span-2" />
+              </div>
+            </div>
+
+            <div className="overflow-hidden rounded-2xl border border-black">
+              <table className="w-full text-[13px] border-collapse">
+                <thead className="bg-black text-white">
+                  <tr>
+                    <th className="border p-2 w-12 text-center">No</th>
+                    <th className="border p-2 text-left">Item Name</th>
+                    <th className="border p-2 w-20 text-center">Qty</th>
+                    <th className="border p-2 w-20 text-center">Unit</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pageItems.map((item, index) => (
+                    <tr key={`request-row-${pageIndex}-${index}`} className="border border-gray-300">
+                      <td className="border p-2 text-center text-gray-500 font-sans">{(pageIndex * 18) + index + 1}</td>
+                      <td className="border p-2 font-bold">{item.name}</td>
+                      <td className="border p-2 text-center font-bold">{item.qty}</td>
+                      <td className="border p-2 text-center text-gray-400 text-[10px] uppercase font-sans font-bold">{item.unit}</td>
+                    </tr>
+                  ))}
+                  {pageItems.length === 0 && (
+                    <tr>
+                      <td colSpan={4} className="border p-6 text-center font-bold text-gray-400">No items</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            {isLastPage && (
+              <div className="mt-8 grid grid-cols-2 border-4 border-black p-5 font-black text-center uppercase text-sm tracking-tighter">
+                <div className="border-r border-gray-200">ITEMS: {items.length}</div>
+                <div>TOTAL KG: {formatMetric(totals.totalKg)}</div>
+              </div>
+            )}
+          </PdfExportPage>
+        );
+      })}
+    </div>
+  );
+}
+
+function SendPdfDocument({ order }) {
+  const items = (order?.items || []).filter((item) => item?.itemName?.trim());
+  const totals = calculateKgTotals(items);
+  const itemPages = paginateRowsWithSummary(items, 20, 15);
+
+  return (
+    <div>
+      {itemPages.map((pageItems, pageIndex) => {
+        const isLastPage = pageIndex === itemPages.length - 1;
+
+        return (
+          <PdfExportPage key={`send-pdf-${order?.id || order?.chalanNo || pageIndex}`} className="px-10 py-8 font-serif">
+            <div className="text-center mb-6 border-b-4 border-blue-600 pb-4">
+              <h1 className="text-4xl font-black text-blue-600 uppercase mb-0 tracking-tighter">SMVS MATERIAL DISPATCH</h1>
+              <p className="text-gray-400 text-[10px] font-sans font-bold uppercase tracking-[0.2em] mt-1">Samp Swarup Mandal Video Seva</p>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4 text-sm mb-6 bg-gray-50 p-6 rounded-2xl border border-gray-100">
+              <div><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">From Center</p><p className="font-bold text-lg">{order?.fromCenter}</p></div>
+              <div className="text-right"><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Chalan No</p><p className="font-bold text-lg">#{order?.chalanNo || '-'}</p></div>
+              <div><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Date</p><p className="font-bold text-sm">{formatDisplayDate(order?.date)}</p></div>
+              <div className="text-right"><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">To</p><p className="font-bold text-sm text-blue-600">{order?.toCenter || 'Swaminarayan Dham'}</p></div>
+              <div><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Sender</p><p className="font-bold text-sm">{order?.senderName || '-'}</p></div>
+              <div className="text-right"><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Mobile</p><p className="font-bold text-sm">{order?.mobileNumber || '-'}</p></div>
+              <div><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Global ID</p><p className="font-bold text-sm">{order?.globalId || '-'}</p></div>
+              <div className="text-right"><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Email</p><p className="font-bold text-sm break-all">{order?.email || '-'}</p></div>
+            </div>
+
+            <div className="overflow-hidden rounded-2xl border border-black">
+              <table className="w-full text-[13px] border-collapse">
+                <thead className="bg-black text-white">
+                  <tr>
+                    <th className="border p-2 w-12 text-center">No</th>
+                    <th className="border p-2 text-left">Item Name</th>
+                    <th className="border p-2 w-20 text-center">KG</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pageItems.map((item, index) => (
+                    <tr key={`send-row-${pageIndex}-${index}`} className="border border-gray-300">
+                      <td className="border p-2 text-center text-gray-500 font-sans">{(pageIndex * 20) + index + 1}</td>
+                      <td className="border p-2 font-bold">{item.itemName}</td>
+                      <td className="border p-2 text-center font-bold text-orange-600">{formatMetric(item.kg)}</td>
+                    </tr>
+                  ))}
+                  {pageItems.length === 0 && (
+                    <tr>
+                      <td colSpan={3} className="border p-6 text-center font-bold text-gray-400">No items</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            {isLastPage && (
+              <div className="mt-8 grid grid-cols-2 border-4 border-black p-5 font-black text-center uppercase text-sm tracking-tighter">
+                <div className="border-r border-gray-200">ITEMS: {items.length}</div>
+                <div>TOTAL KG: {formatMetric(totals.totalKg)}</div>
+              </div>
+            )}
+          </PdfExportPage>
+        );
+      })}
+    </div>
+  );
+}
+
+function PurchasePdfDocument({ purchase }) {
+  const items = (purchase?.items || []).filter((item) => item?.itemName?.trim());
+  const totals = calculateKgTotals(items);
+  const itemPages = paginateRowsWithSummary(items, 20, 15);
+
+  return (
+    <div>
+      {itemPages.map((pageItems, pageIndex) => {
+        const isLastPage = pageIndex === itemPages.length - 1;
+
+        return (
+          <PdfExportPage key={`purchase-pdf-${purchase?.id || purchase?.billNo || pageIndex}`} className="px-10 py-8">
+            <div className="border-b-4 border-violet-600 pb-4 mb-6">
+              <h1 className="text-3xl font-black text-violet-700 uppercase">SMVS Purchase Report</h1>
+              <p className="text-gray-500 text-xs mt-1 font-bold uppercase tracking-[0.2em]">દુકાન માંથી ખરીદેલ માલ</p>
+            </div>
+
+            <div className="grid grid-cols-3 gap-3 text-sm mb-6 bg-gray-50 p-5 rounded-2xl border border-gray-100">
+              <div><p className="text-gray-400 text-[10px] font-bold uppercase mb-1">Shop Name</p><p className="font-bold">{purchase?.shopName || '-'}</p></div>
+              <div><p className="text-gray-400 text-[10px] font-bold uppercase mb-1">Bill Number</p><p className="font-bold">#{purchase?.billNo || '-'}</p></div>
+              <div><p className="text-gray-400 text-[10px] font-bold uppercase mb-1">Bill Date</p><p className="font-bold">{formatDisplayDate(purchase?.billDate || purchase?.date)}</p></div>
+            </div>
+
+            <div className="overflow-hidden rounded-2xl border border-black">
+              <table className="w-full text-[13px] border-collapse">
+                <thead className="bg-black text-white">
+                  <tr>
+                    <th className="border p-2 w-12 text-center">No</th>
+                    <th className="border p-2 text-left">Item Name</th>
+                    <th className="border p-2 w-20 text-center">KG</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pageItems.map((item, index) => (
+                    <tr key={`purchase-row-${pageIndex}-${index}`} className="even:bg-gray-50">
+                      <td className="border p-2 text-center text-gray-500">{(pageIndex * 20) + index + 1}</td>
+                      <td className="border p-2 font-bold">{item.itemName}</td>
+                      <td className="border p-2 text-center font-bold text-violet-700">{formatMetric(item.kg)}</td>
+                    </tr>
+                  ))}
+                  {pageItems.length === 0 && (
+                    <tr>
+                      <td colSpan={3} className="border p-6 text-center font-bold text-gray-400">No items</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            {isLastPage && (
+              <div className="mt-8 grid grid-cols-2 border-4 border-black p-5 font-black text-center uppercase text-sm tracking-tighter">
+                <div className="border-r border-gray-200">NUMBER OF ITEMS: {items.length}</div>
+                <div>TOTAL KG: {formatMetric(totals.totalKg)}</div>
+              </div>
+            )}
+          </PdfExportPage>
+        );
+      })}
+    </div>
+  );
+}
+
+function ReportPdfDocument({ report }) {
+  const preparedReport = hydrateReport(report);
+  const uiTheme = getReportUiTheme();
+  const rowPages = paginateRowsWithSummary(preparedReport.rows, 16, 9);
+
+  return (
+    <div className="font-report-gujarati">
+      {rowPages.map((pageRows, pageIndex) => {
+        const isLastPage = pageIndex === rowPages.length - 1;
+
+        return (
+          <PdfExportPage key={`report-pdf-${preparedReport.id || preparedReport.monthLabel || pageIndex}`} className="px-8 py-8">
+            <div className={`rounded-3xl border ${uiTheme.border} bg-gradient-to-r ${uiTheme.soft} p-6`}>
+              <div className="flex flex-col gap-4">
+                <div>
+                  <p className={`text-xs font-black uppercase tracking-[0.25em] ${uiTheme.text}`}>Monthly Report</p>
+                  <h2 className="mt-2 text-4xl font-black text-slate-900">{REPORT_TITLE}</h2>
+                  <p className="mt-2 text-sm text-slate-600">Simple monthly stock table with fixed format.</p>
+                </div>
+                <div className="grid grid-cols-3 gap-3">
+                  <PreviewInfoCard label="Month" value={preparedReport.monthLabel} />
+                  <PreviewInfoCard label="Center" value={preparedReport.centerLabel} />
+                  <PreviewInfoCard label="Range" value={preparedReport.rangeLabel} />
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-6 overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
+              <div className={`border-b ${uiTheme.border} bg-gradient-to-r ${uiTheme.soft} px-4 py-3`}>
+                <h3 className={`text-sm font-black uppercase tracking-widest ${uiTheme.text}`}>Monthly Table</h3>
+              </div>
+              <table className="w-full text-sm">
+                <thead className="bg-slate-900 text-white">
+                  <tr>
+                    <th className="px-4 py-3 text-left">Item Name</th>
+                    <th className="px-4 py-3 text-center">Income (KG)</th>
+                    <th className="px-4 py-3 text-center">Outgoing (KG)</th>
+                    <th className="px-4 py-3 text-center">Total Stock (KG)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pageRows.map((row, index) => (
+                    <tr key={`${row.itemName}-${pageIndex}-${index}`} className="border-t border-slate-200">
+                      <td className="px-4 py-3 font-bold text-slate-900">{row.itemName}</td>
+                      <td className={`px-4 py-3 text-center font-bold ${uiTheme.text}`}>{formatMetric(row.income)}</td>
+                      <td className="px-4 py-3 text-center font-bold text-slate-900">{formatMetric(row.outgoing)}</td>
+                      <td className="px-4 py-3 text-center font-black text-slate-900">{formatMetric(row.totalStock)}</td>
+                    </tr>
+                  ))}
+                  {pageRows.length === 0 && (
+                    <tr>
+                      <td colSpan={4} className="px-4 py-10 text-center text-sm font-bold text-slate-400">No items found for the selected month.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            {isLastPage && (
+              <div className="mt-6 grid grid-cols-4 gap-3">
+                <ReportSummaryCard labelLines={['વસ્તુઓની', 'સંખ્યા']} value={formatMetric(preparedReport.summary.totalRows)} />
+                <ReportSummaryCard labelLines={['આવક', 'KG']} value={formatMetric(preparedReport.summary.totalIncome)} accentClass={uiTheme.text} />
+                <ReportSummaryCard labelLines={['જાવક', 'KG']} value={formatMetric(preparedReport.summary.totalOutgoing)} />
+                <ReportSummaryCard labelLines={['કુલ સ્ટોક', 'KG']} value={formatMetric(preparedReport.summary.totalStock)} />
+              </div>
+            )}
+          </PdfExportPage>
+        );
+      })}
     </div>
   );
 }
