@@ -8,6 +8,7 @@ import autoTable from 'jspdf-autotable';
 import emailjs from 'emailjs-com'; 
 import gujaratiFontBoldUrl from './assets/fonts/NotoSansGujarati-Bold.ttf?url';
 import gujaratiFontRegularUrl from './assets/fonts/NotoSansGujarati-Regular.ttf?url';
+import { getPdfTextFont } from './pdfText';
 import {
   REPORT_TITLE,
   buildSummaryReport,
@@ -449,12 +450,13 @@ const drawPdfFooter = (pdf, footerText = '') => {
   pdf.setDrawColor(226, 232, 240);
   pdf.line(14, pageHeight - 12, pageWidth - 14, pageHeight - 12);
 
-  pdf.setFont(PDF_FALLBACK_FONT, 'normal');
   pdf.setFontSize(8);
   pdf.setTextColor(100, 116, 139);
   if (footerText) {
+    pdf.setFont(getPdfTextFont(footerText, PDF_FONT_FAMILY, PDF_FALLBACK_FONT), 'normal');
     pdf.text(footerText, 14, pageHeight - 7);
   }
+  pdf.setFont(PDF_FALLBACK_FONT, 'normal');
   pdf.text(`Page ${currentPage} / ${totalPages}`, pageWidth - 14, pageHeight - 7, { align: 'right' });
 };
 
@@ -467,7 +469,7 @@ const drawPdfContinuationHeader = (pdf, title, subtitle, accent) => {
   pdf.text(title, 14, 14);
 
   if (subtitle) {
-    pdf.setFont(PDF_FALLBACK_FONT, 'normal');
+    pdf.setFont(getPdfTextFont(subtitle, PDF_FONT_FAMILY, PDF_FALLBACK_FONT), 'normal');
     pdf.setFontSize(8.5);
     pdf.setTextColor(100, 116, 139);
     pdf.text(subtitle, pageWidth - 14, 14, { align: 'right' });
@@ -505,7 +507,9 @@ const drawPdfMetaGrid = (pdf, startY, metaEntries, accent, surface) => {
     pdf.setFont(PDF_FALLBACK_FONT, 'normal');
     pdf.setFontSize(8.3);
     pdf.setTextColor(15, 23, 42);
-    pdf.text(compactPdfValue(entry.value), x + 3, y + 10);
+    const compactValue = compactPdfValue(entry.value);
+    pdf.setFont(getPdfTextFont(compactValue, PDF_FONT_FAMILY, PDF_FALLBACK_FONT), 'normal');
+    pdf.text(compactValue, x + 3, y + 10);
   });
 
   return startY + (rows * (cardHeight + 3));
@@ -532,9 +536,13 @@ const drawPdfCompactMetaRows = (pdf, startY, metaRows, accent) => {
     pdf.text(`${row.leftLabel}:`, 18, y + 3);
     pdf.text(`${row.rightLabel}:`, rightLabelX, y + 3);
 
+    const leftValue = compactPdfValue(row.leftValue);
+    const rightValue = compactPdfValue(row.rightValue);
     pdf.setTextColor(15, 23, 42);
-    pdf.text(compactPdfValue(row.leftValue), leftValueX, y + 3);
-    pdf.text(compactPdfValue(row.rightValue), rightValueX, y + 3);
+    pdf.setFont(getPdfTextFont(leftValue, PDF_FONT_FAMILY, PDF_FALLBACK_FONT), 'bold');
+    pdf.text(leftValue, leftValueX, y + 3);
+    pdf.setFont(getPdfTextFont(rightValue, PDF_FONT_FAMILY, PDF_FALLBACK_FONT), 'bold');
+    pdf.text(rightValue, rightValueX, y + 3);
   });
 
   return startY + (metaRows.length * 9.5);
@@ -640,7 +648,10 @@ const createStructuredPdfBlob = async ({
       if (data.section === 'head') {
         data.cell.styles.font = PDF_FALLBACK_FONT;
       } else {
-        data.cell.styles.font = bodyFont;
+        const rawValue = Array.isArray(data.row?.raw)
+          ? data.row.raw[data.column.index]
+          : data.cell.raw;
+        data.cell.styles.font = getPdfTextFont(rawValue, bodyFont, PDF_FALLBACK_FONT);
       }
     },
     didDrawPage: () => {

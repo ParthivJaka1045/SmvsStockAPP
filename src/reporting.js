@@ -3,6 +3,7 @@ import autoTable from 'jspdf-autotable';
 import gujaratiFontBoldUrl from './assets/fonts/NotoSansGujarati-Bold.ttf?url';
 import gujaratiFontRegularUrl from './assets/fonts/NotoSansGujarati-Regular.ttf?url';
 import { categories } from './data';
+import { getPdfTextFont } from './pdfText';
 
 export const REPORT_TITLE = 'SMVS MONTHLY STOCK REPORT';
 
@@ -376,9 +377,9 @@ const drawHeaderInfoCards = (pdf, startY, report, fontFamily) => {
   const gap = 4;
   const cardWidth = (pageWidth - 28 - (gap * 2)) / 3;
   const cards = [
-    { label: 'Month', value: report.monthLabel, valueFont: DEFAULT_PDF_FONT_FAMILY },
-    { label: 'Center', value: report.centerLabel, valueFont: DEFAULT_PDF_FONT_FAMILY },
-    { label: 'Range', value: report.rangeLabel, valueFont: fontFamily },
+    { label: 'Month', value: report.monthLabel },
+    { label: 'Center', value: report.centerLabel },
+    { label: 'Range', value: report.rangeLabel },
   ];
 
   cards.forEach((card, index) => {
@@ -393,7 +394,7 @@ const drawHeaderInfoCards = (pdf, startY, report, fontFamily) => {
     pdf.setTextColor(148, 163, 184);
     pdf.text(card.label.toUpperCase(), x + 3, startY + 4.5);
 
-    pdf.setFont(card.valueFont, 'bold');
+    pdf.setFont(getPdfTextFont(card.value, fontFamily, DEFAULT_PDF_FONT_FAMILY), 'bold');
     pdf.setFontSize(8.6);
     const valueLines = pdf.splitTextToSize(String(card.value || '-'), cardWidth - 6).slice(0, 2);
     pdf.setTextColor(15, 23, 42);
@@ -444,14 +445,27 @@ const drawFirstPageHeader = (pdf, report, fontFamily) => {
 
 const drawContinuationHeader = (pdf, report) => {
   const pageWidth = pdf.internal.pageSize.getWidth();
+  const centerText = String(report.centerLabel || '').trim();
+  const monthText = String(report.monthLabel || '').trim();
 
   pdf.setFont(DEFAULT_PDF_FONT_FAMILY, 'bold');
   pdf.setFontSize(9.5);
   pdf.setTextColor(6, 95, 70);
   pdf.text(REPORT_TITLE, 14, 15);
 
-  pdf.setFont(DEFAULT_PDF_FONT_FAMILY, 'normal');
-  pdf.text(`${report.monthLabel} | ${report.centerLabel}`, pageWidth - 14, 15, { align: 'right' });
+  if (centerText) {
+    pdf.setFont(getPdfTextFont(centerText, REPORT_FONT_FAMILY, DEFAULT_PDF_FONT_FAMILY), 'normal');
+    pdf.text(centerText, pageWidth - 14, 15, { align: 'right' });
+
+    if (monthText) {
+      const centerWidth = pdf.getTextWidth(centerText);
+      pdf.setFont(DEFAULT_PDF_FONT_FAMILY, 'normal');
+      pdf.text(`${monthText} |`, pageWidth - 15 - centerWidth, 15, { align: 'right' });
+    }
+  } else {
+    pdf.setFont(DEFAULT_PDF_FONT_FAMILY, 'normal');
+    pdf.text(monthText || '-', pageWidth - 14, 15, { align: 'right' });
+  }
 
   pdf.setDrawColor(16, 185, 129);
   pdf.line(14, 18, pageWidth - 14, 18);
@@ -466,10 +480,13 @@ const drawPageFooter = (pdf, report, fontFamily) => {
   pdf.setDrawColor(209, 213, 219);
   pdf.line(14, pageHeight - 12, pageWidth - 14, pageHeight - 12);
 
-  pdf.setFont(fontFamily, 'normal');
   pdf.setFontSize(8);
   pdf.setTextColor(107, 114, 128);
-  pdf.text(`Range: ${report.rangeLabel}`, 14, pageHeight - 7);
+  pdf.setFont(DEFAULT_PDF_FONT_FAMILY, 'normal');
+  pdf.text('Range:', 14, pageHeight - 7);
+  pdf.setFont(getPdfTextFont(report.rangeLabel, fontFamily, DEFAULT_PDF_FONT_FAMILY), 'normal');
+  pdf.text(String(report.rangeLabel || '-'), 23, pageHeight - 7);
+  pdf.setFont(DEFAULT_PDF_FONT_FAMILY, 'normal');
   pdf.text(`Page ${currentPage} / ${totalPages}`, pageWidth - 14, pageHeight - 7, { align: 'right' });
 };
 
@@ -561,7 +578,10 @@ export const generateSummaryReportPDFBlob = async (reportInput) => {
       if (data.section === 'head') {
         data.cell.styles.font = DEFAULT_PDF_FONT_FAMILY;
       } else {
-        data.cell.styles.font = fontFamily;
+        const rawValue = Array.isArray(data.row?.raw)
+          ? data.row.raw[data.column.index]
+          : data.cell.raw;
+        data.cell.styles.font = getPdfTextFont(rawValue, fontFamily, DEFAULT_PDF_FONT_FAMILY);
       }
     },
     didDrawPage: () => {
