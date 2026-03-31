@@ -606,14 +606,66 @@ function PdfExportPage({ children, className = '' }) {
   return (
     <div
       data-pdf-page="true"
-      className={`bg-white text-black overflow-hidden ${className}`}
+      className={`overflow-hidden ${className}`}
       style={{
         width: `${PDF_EXPORT_PAGE_WIDTH_PX}px`,
         height: `${PDF_EXPORT_PAGE_HEIGHT_PX}px`,
         boxSizing: 'border-box',
+        backgroundColor: '#ffffff',
+        color: '#0f172a',
       }}
     >
       {children}
+    </div>
+  );
+}
+
+function PdfInfoCard({ label, value, className = '', valueColor = '#0f172a' }) {
+  return (
+    <div
+      className={`rounded-2xl border px-4 py-4 min-h-[96px] flex flex-col justify-between ${className}`}
+      style={{
+        backgroundColor: '#ffffff',
+        borderColor: '#e5e7eb',
+      }}
+    >
+      <p
+        className="text-[11px] font-sans font-bold uppercase tracking-[0.14em]"
+        style={{ color: '#94a3b8' }}
+      >
+        {label}
+      </p>
+      <p
+        className="font-black text-base sm:text-lg leading-snug break-words"
+        style={{ color: valueColor }}
+      >
+        {value || '-'}
+      </p>
+    </div>
+  );
+}
+
+function PdfSummaryCard({ labelLines, value, valueColor = '#0f172a' }) {
+  return (
+    <div
+      className="rounded-2xl border p-4 min-h-[112px] flex flex-col justify-between"
+      style={{
+        backgroundColor: '#ffffff',
+        borderColor: '#e2e8f0',
+      }}
+    >
+      <div className="min-h-[2.75rem] space-y-0.5">
+        {labelLines.map((label, index) => (
+          <p
+            key={`${label}-${index}`}
+            className="text-[12px] sm:text-[13px] font-bold uppercase tracking-wide leading-tight"
+            style={{ color: '#94a3b8' }}
+          >
+            {label}
+          </p>
+        ))}
+      </div>
+      <p className="mt-2 text-sm sm:text-base font-black" style={{ color: valueColor }}>{value}</p>
     </div>
   );
 }
@@ -631,46 +683,46 @@ function RequestPdfDocument({ order }) {
         return (
           <PdfExportPage key={`request-pdf-${order?.id || order?.chalanNo || pageIndex}`} className="px-10 py-8 font-serif">
             <div className="text-center mb-6 pb-4">
-              <h1 className="text-4xl font-black text-orange-600 uppercase mb-1 tracking-tighter">SMVS STOCK REQUEST</h1>
-              <p className="text-gray-400 text-[10px] font-sans font-bold uppercase tracking-[0.2em] mt-1">Video Post Production Data Report</p>
-              <div className="mt-3 h-1 w-full rounded-full bg-orange-600" />
+              <h1 className="text-4xl font-black uppercase mb-1 tracking-tighter" style={{ color: '#ea580c' }}>SMVS STOCK REQUEST</h1>
+              <p className="text-[10px] font-sans font-bold uppercase tracking-[0.2em] mt-1" style={{ color: '#9ca3af' }}>Video Post Production Data Report</p>
+              <div className="mt-3 h-1 w-full rounded-full" style={{ backgroundColor: '#ea580c' }} />
             </div>
 
-            <div className="mb-6 rounded-[1.8rem] border border-gray-200 bg-gray-50 p-5">
+            <div className="mb-6 rounded-[1.8rem] border p-5" style={{ borderColor: '#e5e7eb', backgroundColor: '#f9fafb' }}>
               <div className="grid grid-cols-4 gap-3">
-                <PreviewInfoCard label="Center Name" value={order?.center} />
-                <PreviewInfoCard label="Chalan No" value={`#${order?.chalanNo || '-'}`} />
-                <PreviewInfoCard label="Order Date" value={formatDisplayDate(order?.date)} />
-                <PreviewInfoCard label="Sender" value={order?.senderName || '-'} />
-                <PreviewInfoCard label="Post" value={order?.post || '-'} />
-                <PreviewInfoCard label="Mobile Number" value={order?.mobileNumber || '-'} />
-                <PreviewInfoCard label="Global ID" value={order?.globalId || '-'} />
-                <PreviewInfoCard label="Email" value={order?.email || '-'} className="col-span-2" />
+                <PdfInfoCard label="Center Name" value={order?.center} />
+                <PdfInfoCard label="Chalan No" value={`#${order?.chalanNo || '-'}`} />
+                <PdfInfoCard label="Order Date" value={formatDisplayDate(order?.date)} />
+                <PdfInfoCard label="Sender" value={order?.senderName || '-'} />
+                <PdfInfoCard label="Post" value={order?.post || '-'} />
+                <PdfInfoCard label="Mobile Number" value={order?.mobileNumber || '-'} />
+                <PdfInfoCard label="Global ID" value={order?.globalId || '-'} />
+                <PdfInfoCard label="Email" value={order?.email || '-'} className="col-span-2" />
               </div>
             </div>
 
-            <div className="overflow-hidden rounded-2xl border border-black">
+            <div className="overflow-hidden rounded-2xl border" style={{ borderColor: '#111827' }}>
               <table className="w-full text-[13px] border-collapse">
-                <thead className="bg-black text-white">
+                <thead style={{ backgroundColor: '#111827', color: '#ffffff' }}>
                   <tr>
-                    <th className="border p-2 w-12 text-center">No</th>
-                    <th className="border p-2 text-left">Item Name</th>
-                    <th className="border p-2 w-20 text-center">Qty</th>
-                    <th className="border p-2 w-20 text-center">Unit</th>
+                    <th className="border p-2 w-12 text-center" style={{ borderColor: '#111827' }}>No</th>
+                    <th className="border p-2 text-left" style={{ borderColor: '#111827' }}>Item Name</th>
+                    <th className="border p-2 w-20 text-center" style={{ borderColor: '#111827' }}>Qty</th>
+                    <th className="border p-2 w-20 text-center" style={{ borderColor: '#111827' }}>Unit</th>
                   </tr>
                 </thead>
                 <tbody>
                   {pageItems.map((item, index) => (
-                    <tr key={`request-row-${pageIndex}-${index}`} className="border border-gray-300">
-                      <td className="border p-2 text-center text-gray-500 font-sans">{(pageIndex * 18) + index + 1}</td>
-                      <td className="border p-2 font-bold">{item.name}</td>
-                      <td className="border p-2 text-center font-bold">{item.qty}</td>
-                      <td className="border p-2 text-center text-gray-400 text-[10px] uppercase font-sans font-bold">{item.unit}</td>
+                    <tr key={`request-row-${pageIndex}-${index}`} className="border" style={{ borderColor: '#d1d5db' }}>
+                      <td className="border p-2 text-center font-sans" style={{ borderColor: '#d1d5db', color: '#6b7280' }}>{(pageIndex * 18) + index + 1}</td>
+                      <td className="border p-2 font-bold" style={{ borderColor: '#d1d5db', color: '#111827' }}>{item.name}</td>
+                      <td className="border p-2 text-center font-bold" style={{ borderColor: '#d1d5db', color: '#111827' }}>{item.qty}</td>
+                      <td className="border p-2 text-center text-[10px] uppercase font-sans font-bold" style={{ borderColor: '#d1d5db', color: '#9ca3af' }}>{item.unit}</td>
                     </tr>
                   ))}
                   {pageItems.length === 0 && (
                     <tr>
-                      <td colSpan={4} className="border p-6 text-center font-bold text-gray-400">No items</td>
+                      <td colSpan={4} className="border p-6 text-center font-bold" style={{ borderColor: '#d1d5db', color: '#9ca3af' }}>No items</td>
                     </tr>
                   )}
                 </tbody>
@@ -678,8 +730,8 @@ function RequestPdfDocument({ order }) {
             </div>
 
             {isLastPage && (
-              <div className="mt-8 grid grid-cols-2 border-4 border-black p-5 font-black text-center uppercase text-sm tracking-tighter">
-                <div className="border-r border-gray-200">ITEMS: {items.length}</div>
+              <div className="mt-8 grid grid-cols-2 border-4 p-5 font-black text-center uppercase text-sm tracking-tighter" style={{ borderColor: '#111827' }}>
+                <div className="border-r" style={{ borderColor: '#e5e7eb' }}>ITEMS: {items.length}</div>
                 <div>TOTAL KG: {formatMetric(totals.totalKg)}</div>
               </div>
             )}
@@ -702,42 +754,42 @@ function SendPdfDocument({ order }) {
 
         return (
           <PdfExportPage key={`send-pdf-${order?.id || order?.chalanNo || pageIndex}`} className="px-10 py-8 font-serif">
-            <div className="text-center mb-6 border-b-4 border-blue-600 pb-4">
-              <h1 className="text-4xl font-black text-blue-600 uppercase mb-0 tracking-tighter">SMVS MATERIAL DISPATCH</h1>
-              <p className="text-gray-400 text-[10px] font-sans font-bold uppercase tracking-[0.2em] mt-1">Samp Swarup Mandal Video Seva</p>
+            <div className="text-center mb-6 border-b-4 pb-4" style={{ borderColor: '#2563eb' }}>
+              <h1 className="text-4xl font-black uppercase mb-0 tracking-tighter" style={{ color: '#2563eb' }}>SMVS MATERIAL DISPATCH</h1>
+              <p className="text-[10px] font-sans font-bold uppercase tracking-[0.2em] mt-1" style={{ color: '#9ca3af' }}>Samp Swarup Mandal Video Seva</p>
             </div>
 
-            <div className="grid grid-cols-2 gap-4 text-sm mb-6 bg-gray-50 p-6 rounded-2xl border border-gray-100">
-              <div><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">From Center</p><p className="font-bold text-lg">{order?.fromCenter}</p></div>
-              <div className="text-right"><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Chalan No</p><p className="font-bold text-lg">#{order?.chalanNo || '-'}</p></div>
-              <div><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Date</p><p className="font-bold text-sm">{formatDisplayDate(order?.date)}</p></div>
-              <div className="text-right"><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">To</p><p className="font-bold text-sm text-blue-600">{order?.toCenter || 'Swaminarayan Dham'}</p></div>
-              <div><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Sender</p><p className="font-bold text-sm">{order?.senderName || '-'}</p></div>
-              <div className="text-right"><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Mobile</p><p className="font-bold text-sm">{order?.mobileNumber || '-'}</p></div>
-              <div><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Global ID</p><p className="font-bold text-sm">{order?.globalId || '-'}</p></div>
-              <div className="text-right"><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Email</p><p className="font-bold text-sm break-all">{order?.email || '-'}</p></div>
+            <div className="grid grid-cols-2 gap-4 text-sm mb-6 p-6 rounded-2xl border" style={{ backgroundColor: '#f9fafb', borderColor: '#f3f4f6' }}>
+              <div><p className="text-[10px] font-sans font-bold uppercase mb-0.5" style={{ color: '#9ca3af' }}>From Center</p><p className="font-bold text-lg" style={{ color: '#111827' }}>{order?.fromCenter}</p></div>
+              <div className="text-right"><p className="text-[10px] font-sans font-bold uppercase mb-0.5" style={{ color: '#9ca3af' }}>Chalan No</p><p className="font-bold text-lg" style={{ color: '#111827' }}>#{order?.chalanNo || '-'}</p></div>
+              <div><p className="text-[10px] font-sans font-bold uppercase mb-0.5" style={{ color: '#9ca3af' }}>Date</p><p className="font-bold text-sm" style={{ color: '#111827' }}>{formatDisplayDate(order?.date)}</p></div>
+              <div className="text-right"><p className="text-[10px] font-sans font-bold uppercase mb-0.5" style={{ color: '#9ca3af' }}>To</p><p className="font-bold text-sm" style={{ color: '#2563eb' }}>{order?.toCenter || 'Swaminarayan Dham'}</p></div>
+              <div><p className="text-[10px] font-sans font-bold uppercase mb-0.5" style={{ color: '#9ca3af' }}>Sender</p><p className="font-bold text-sm" style={{ color: '#111827' }}>{order?.senderName || '-'}</p></div>
+              <div className="text-right"><p className="text-[10px] font-sans font-bold uppercase mb-0.5" style={{ color: '#9ca3af' }}>Mobile</p><p className="font-bold text-sm" style={{ color: '#111827' }}>{order?.mobileNumber || '-'}</p></div>
+              <div><p className="text-[10px] font-sans font-bold uppercase mb-0.5" style={{ color: '#9ca3af' }}>Global ID</p><p className="font-bold text-sm" style={{ color: '#111827' }}>{order?.globalId || '-'}</p></div>
+              <div className="text-right"><p className="text-[10px] font-sans font-bold uppercase mb-0.5" style={{ color: '#9ca3af' }}>Email</p><p className="font-bold text-sm break-all" style={{ color: '#111827' }}>{order?.email || '-'}</p></div>
             </div>
 
-            <div className="overflow-hidden rounded-2xl border border-black">
+            <div className="overflow-hidden rounded-2xl border" style={{ borderColor: '#111827' }}>
               <table className="w-full text-[13px] border-collapse">
-                <thead className="bg-black text-white">
+                <thead style={{ backgroundColor: '#111827', color: '#ffffff' }}>
                   <tr>
-                    <th className="border p-2 w-12 text-center">No</th>
-                    <th className="border p-2 text-left">Item Name</th>
-                    <th className="border p-2 w-20 text-center">KG</th>
+                    <th className="border p-2 w-12 text-center" style={{ borderColor: '#111827' }}>No</th>
+                    <th className="border p-2 text-left" style={{ borderColor: '#111827' }}>Item Name</th>
+                    <th className="border p-2 w-20 text-center" style={{ borderColor: '#111827' }}>KG</th>
                   </tr>
                 </thead>
                 <tbody>
                   {pageItems.map((item, index) => (
-                    <tr key={`send-row-${pageIndex}-${index}`} className="border border-gray-300">
-                      <td className="border p-2 text-center text-gray-500 font-sans">{(pageIndex * 20) + index + 1}</td>
-                      <td className="border p-2 font-bold">{item.itemName}</td>
-                      <td className="border p-2 text-center font-bold text-orange-600">{formatMetric(item.kg)}</td>
+                    <tr key={`send-row-${pageIndex}-${index}`} className="border" style={{ borderColor: '#d1d5db' }}>
+                      <td className="border p-2 text-center font-sans" style={{ borderColor: '#d1d5db', color: '#6b7280' }}>{(pageIndex * 20) + index + 1}</td>
+                      <td className="border p-2 font-bold" style={{ borderColor: '#d1d5db', color: '#111827' }}>{item.itemName}</td>
+                      <td className="border p-2 text-center font-bold" style={{ borderColor: '#d1d5db', color: '#ea580c' }}>{formatMetric(item.kg)}</td>
                     </tr>
                   ))}
                   {pageItems.length === 0 && (
                     <tr>
-                      <td colSpan={3} className="border p-6 text-center font-bold text-gray-400">No items</td>
+                      <td colSpan={3} className="border p-6 text-center font-bold" style={{ borderColor: '#d1d5db', color: '#9ca3af' }}>No items</td>
                     </tr>
                   )}
                 </tbody>
@@ -745,8 +797,8 @@ function SendPdfDocument({ order }) {
             </div>
 
             {isLastPage && (
-              <div className="mt-8 grid grid-cols-2 border-4 border-black p-5 font-black text-center uppercase text-sm tracking-tighter">
-                <div className="border-r border-gray-200">ITEMS: {items.length}</div>
+              <div className="mt-8 grid grid-cols-2 border-4 p-5 font-black text-center uppercase text-sm tracking-tighter" style={{ borderColor: '#111827' }}>
+                <div className="border-r" style={{ borderColor: '#e5e7eb' }}>ITEMS: {items.length}</div>
                 <div>TOTAL KG: {formatMetric(totals.totalKg)}</div>
               </div>
             )}
@@ -769,37 +821,37 @@ function PurchasePdfDocument({ purchase }) {
 
         return (
           <PdfExportPage key={`purchase-pdf-${purchase?.id || purchase?.billNo || pageIndex}`} className="px-10 py-8">
-            <div className="border-b-4 border-violet-600 pb-4 mb-6">
-              <h1 className="text-3xl font-black text-violet-700 uppercase">SMVS Purchase Report</h1>
-              <p className="text-gray-500 text-xs mt-1 font-bold uppercase tracking-[0.2em]">દુકાન માંથી ખરીદેલ માલ</p>
+            <div className="border-b-4 pb-4 mb-6" style={{ borderColor: '#7c3aed' }}>
+              <h1 className="text-3xl font-black uppercase" style={{ color: '#6d28d9' }}>SMVS Purchase Report</h1>
+              <p className="text-xs mt-1 font-bold uppercase tracking-[0.2em]" style={{ color: '#6b7280' }}>દુકાન માંથી ખરીદેલ માલ</p>
             </div>
 
-            <div className="grid grid-cols-3 gap-3 text-sm mb-6 bg-gray-50 p-5 rounded-2xl border border-gray-100">
-              <div><p className="text-gray-400 text-[10px] font-bold uppercase mb-1">Shop Name</p><p className="font-bold">{purchase?.shopName || '-'}</p></div>
-              <div><p className="text-gray-400 text-[10px] font-bold uppercase mb-1">Bill Number</p><p className="font-bold">#{purchase?.billNo || '-'}</p></div>
-              <div><p className="text-gray-400 text-[10px] font-bold uppercase mb-1">Bill Date</p><p className="font-bold">{formatDisplayDate(purchase?.billDate || purchase?.date)}</p></div>
+            <div className="grid grid-cols-3 gap-3 text-sm mb-6 p-5 rounded-2xl border" style={{ backgroundColor: '#f9fafb', borderColor: '#f3f4f6' }}>
+              <div><p className="text-[10px] font-bold uppercase mb-1" style={{ color: '#9ca3af' }}>Shop Name</p><p className="font-bold" style={{ color: '#111827' }}>{purchase?.shopName || '-'}</p></div>
+              <div><p className="text-[10px] font-bold uppercase mb-1" style={{ color: '#9ca3af' }}>Bill Number</p><p className="font-bold" style={{ color: '#111827' }}>#{purchase?.billNo || '-'}</p></div>
+              <div><p className="text-[10px] font-bold uppercase mb-1" style={{ color: '#9ca3af' }}>Bill Date</p><p className="font-bold" style={{ color: '#111827' }}>{formatDisplayDate(purchase?.billDate || purchase?.date)}</p></div>
             </div>
 
-            <div className="overflow-hidden rounded-2xl border border-black">
+            <div className="overflow-hidden rounded-2xl border" style={{ borderColor: '#111827' }}>
               <table className="w-full text-[13px] border-collapse">
-                <thead className="bg-black text-white">
+                <thead style={{ backgroundColor: '#111827', color: '#ffffff' }}>
                   <tr>
-                    <th className="border p-2 w-12 text-center">No</th>
-                    <th className="border p-2 text-left">Item Name</th>
-                    <th className="border p-2 w-20 text-center">KG</th>
+                    <th className="border p-2 w-12 text-center" style={{ borderColor: '#111827' }}>No</th>
+                    <th className="border p-2 text-left" style={{ borderColor: '#111827' }}>Item Name</th>
+                    <th className="border p-2 w-20 text-center" style={{ borderColor: '#111827' }}>KG</th>
                   </tr>
                 </thead>
                 <tbody>
                   {pageItems.map((item, index) => (
-                    <tr key={`purchase-row-${pageIndex}-${index}`} className="even:bg-gray-50">
-                      <td className="border p-2 text-center text-gray-500">{(pageIndex * 20) + index + 1}</td>
-                      <td className="border p-2 font-bold">{item.itemName}</td>
-                      <td className="border p-2 text-center font-bold text-violet-700">{formatMetric(item.kg)}</td>
+                    <tr key={`purchase-row-${pageIndex}-${index}`} style={{ backgroundColor: index % 2 === 0 ? '#ffffff' : '#f9fafb' }}>
+                      <td className="border p-2 text-center" style={{ borderColor: '#d1d5db', color: '#6b7280' }}>{(pageIndex * 20) + index + 1}</td>
+                      <td className="border p-2 font-bold" style={{ borderColor: '#d1d5db', color: '#111827' }}>{item.itemName}</td>
+                      <td className="border p-2 text-center font-bold" style={{ borderColor: '#d1d5db', color: '#6d28d9' }}>{formatMetric(item.kg)}</td>
                     </tr>
                   ))}
                   {pageItems.length === 0 && (
                     <tr>
-                      <td colSpan={3} className="border p-6 text-center font-bold text-gray-400">No items</td>
+                      <td colSpan={3} className="border p-6 text-center font-bold" style={{ borderColor: '#d1d5db', color: '#9ca3af' }}>No items</td>
                     </tr>
                   )}
                 </tbody>
@@ -807,8 +859,8 @@ function PurchasePdfDocument({ purchase }) {
             </div>
 
             {isLastPage && (
-              <div className="mt-8 grid grid-cols-2 border-4 border-black p-5 font-black text-center uppercase text-sm tracking-tighter">
-                <div className="border-r border-gray-200">NUMBER OF ITEMS: {items.length}</div>
+              <div className="mt-8 grid grid-cols-2 border-4 p-5 font-black text-center uppercase text-sm tracking-tighter" style={{ borderColor: '#111827' }}>
+                <div className="border-r" style={{ borderColor: '#e5e7eb' }}>NUMBER OF ITEMS: {items.length}</div>
                 <div>TOTAL KG: {formatMetric(totals.totalKg)}</div>
               </div>
             )}
@@ -852,14 +904,14 @@ function ReportPdfDocument({ report }) {
                   <p className="mt-2 text-sm" style={{ color: exportTheme.muted }}>Simple monthly stock table with fixed format.</p>
                 </div>
                 <div className="grid grid-cols-3 gap-3">
-                  <PreviewInfoCard label="Month" value={preparedReport.monthLabel} />
-                  <PreviewInfoCard label="Center" value={preparedReport.centerLabel} />
-                  <PreviewInfoCard label="Range" value={preparedReport.rangeLabel} />
+                  <PdfInfoCard label="Month" value={preparedReport.monthLabel} />
+                  <PdfInfoCard label="Center" value={preparedReport.centerLabel} />
+                  <PdfInfoCard label="Range" value={preparedReport.rangeLabel} />
                 </div>
               </div>
             </div>
 
-            <div className="mt-6 overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
+            <div className="mt-6 overflow-hidden rounded-3xl border" style={{ borderColor: '#e2e8f0', backgroundColor: '#ffffff' }}>
               <div
                 className="border-b px-4 py-3"
                 style={{
@@ -880,16 +932,16 @@ function ReportPdfDocument({ report }) {
                 </thead>
                 <tbody>
                   {pageRows.map((row, index) => (
-                    <tr key={`${row.itemName}-${pageIndex}-${index}`} className="border-t border-slate-200">
-                      <td className="px-4 py-3 font-bold text-slate-900">{row.itemName}</td>
+                    <tr key={`${row.itemName}-${pageIndex}-${index}`} className="border-t" style={{ borderColor: '#e2e8f0' }}>
+                      <td className="px-4 py-3 font-bold" style={{ color: '#0f172a' }}>{row.itemName}</td>
                       <td className="px-4 py-3 text-center font-bold" style={{ color: exportTheme.accent }}>{formatMetric(row.income)}</td>
-                      <td className="px-4 py-3 text-center font-bold text-slate-900">{formatMetric(row.outgoing)}</td>
-                      <td className="px-4 py-3 text-center font-black text-slate-900">{formatMetric(row.totalStock)}</td>
+                      <td className="px-4 py-3 text-center font-bold" style={{ color: '#0f172a' }}>{formatMetric(row.outgoing)}</td>
+                      <td className="px-4 py-3 text-center font-black" style={{ color: '#0f172a' }}>{formatMetric(row.totalStock)}</td>
                     </tr>
                   ))}
                   {pageRows.length === 0 && (
                     <tr>
-                      <td colSpan={4} className="px-4 py-10 text-center text-sm font-bold text-slate-400">No items found for the selected month.</td>
+                      <td colSpan={4} className="px-4 py-10 text-center text-sm font-bold" style={{ color: '#94a3b8' }}>No items found for the selected month.</td>
                     </tr>
                   )}
                 </tbody>
@@ -898,10 +950,10 @@ function ReportPdfDocument({ report }) {
 
             {isLastPage && (
               <div className="mt-6 grid grid-cols-4 gap-3">
-                <ReportSummaryCard labelLines={['વસ્તુઓની', 'સંખ્યા']} value={formatMetric(preparedReport.summary.totalRows)} />
-                <ReportSummaryCard labelLines={['આવક', 'KG']} value={formatMetric(preparedReport.summary.totalIncome)} accentClass="text-emerald-700" />
-                <ReportSummaryCard labelLines={['જાવક', 'KG']} value={formatMetric(preparedReport.summary.totalOutgoing)} />
-                <ReportSummaryCard labelLines={['કુલ સ્ટોક', 'KG']} value={formatMetric(preparedReport.summary.totalStock)} />
+                <PdfSummaryCard labelLines={['વસ્તુઓની', 'સંખ્યા']} value={formatMetric(preparedReport.summary.totalRows)} />
+                <PdfSummaryCard labelLines={['આવક', 'KG']} value={formatMetric(preparedReport.summary.totalIncome)} valueColor={exportTheme.accent} />
+                <PdfSummaryCard labelLines={['જાવક', 'KG']} value={formatMetric(preparedReport.summary.totalOutgoing)} />
+                <PdfSummaryCard labelLines={['કુલ સ્ટોક', 'KG']} value={formatMetric(preparedReport.summary.totalStock)} />
               </div>
             )}
           </PdfExportPage>
