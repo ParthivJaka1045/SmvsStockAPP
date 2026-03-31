@@ -821,8 +821,15 @@ function PurchasePdfDocument({ purchase }) {
 
 function ReportPdfDocument({ report }) {
   const preparedReport = hydrateReport(report);
-  const uiTheme = getReportUiTheme();
   const rowPages = paginateRowsWithSummary(preparedReport.rows, 16, 9);
+  const exportTheme = {
+    surface: '#ecfdf5',
+    border: '#a7f3d0',
+    accent: '#047857',
+    text: '#0f172a',
+    muted: '#475569',
+    tableHead: '#0f172a',
+  };
 
   return (
     <div className="font-report-gujarati">
@@ -831,12 +838,18 @@ function ReportPdfDocument({ report }) {
 
         return (
           <PdfExportPage key={`report-pdf-${preparedReport.id || preparedReport.monthLabel || pageIndex}`} className="px-8 py-8">
-            <div className={`rounded-3xl border ${uiTheme.border} bg-gradient-to-r ${uiTheme.soft} p-6`}>
+            <div
+              className="rounded-3xl border p-6"
+              style={{
+                backgroundColor: exportTheme.surface,
+                borderColor: exportTheme.border,
+              }}
+            >
               <div className="flex flex-col gap-4">
                 <div>
-                  <p className={`text-xs font-black uppercase tracking-[0.25em] ${uiTheme.text}`}>Monthly Report</p>
-                  <h2 className="mt-2 text-4xl font-black text-slate-900">{REPORT_TITLE}</h2>
-                  <p className="mt-2 text-sm text-slate-600">Simple monthly stock table with fixed format.</p>
+                  <p className="text-xs font-black uppercase tracking-[0.25em]" style={{ color: exportTheme.accent }}>Monthly Report</p>
+                  <h2 className="mt-2 text-4xl font-black" style={{ color: exportTheme.text }}>{REPORT_TITLE}</h2>
+                  <p className="mt-2 text-sm" style={{ color: exportTheme.muted }}>Simple monthly stock table with fixed format.</p>
                 </div>
                 <div className="grid grid-cols-3 gap-3">
                   <PreviewInfoCard label="Month" value={preparedReport.monthLabel} />
@@ -847,11 +860,17 @@ function ReportPdfDocument({ report }) {
             </div>
 
             <div className="mt-6 overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
-              <div className={`border-b ${uiTheme.border} bg-gradient-to-r ${uiTheme.soft} px-4 py-3`}>
-                <h3 className={`text-sm font-black uppercase tracking-widest ${uiTheme.text}`}>Monthly Table</h3>
+              <div
+                className="border-b px-4 py-3"
+                style={{
+                  backgroundColor: exportTheme.surface,
+                  borderColor: exportTheme.border,
+                }}
+              >
+                <h3 className="text-sm font-black uppercase tracking-widest" style={{ color: exportTheme.accent }}>Monthly Table</h3>
               </div>
               <table className="w-full text-sm">
-                <thead className="bg-slate-900 text-white">
+                <thead style={{ backgroundColor: exportTheme.tableHead, color: '#ffffff' }}>
                   <tr>
                     <th className="px-4 py-3 text-left">Item Name</th>
                     <th className="px-4 py-3 text-center">Income (KG)</th>
@@ -863,7 +882,7 @@ function ReportPdfDocument({ report }) {
                   {pageRows.map((row, index) => (
                     <tr key={`${row.itemName}-${pageIndex}-${index}`} className="border-t border-slate-200">
                       <td className="px-4 py-3 font-bold text-slate-900">{row.itemName}</td>
-                      <td className={`px-4 py-3 text-center font-bold ${uiTheme.text}`}>{formatMetric(row.income)}</td>
+                      <td className="px-4 py-3 text-center font-bold" style={{ color: exportTheme.accent }}>{formatMetric(row.income)}</td>
                       <td className="px-4 py-3 text-center font-bold text-slate-900">{formatMetric(row.outgoing)}</td>
                       <td className="px-4 py-3 text-center font-black text-slate-900">{formatMetric(row.totalStock)}</td>
                     </tr>
@@ -880,7 +899,7 @@ function ReportPdfDocument({ report }) {
             {isLastPage && (
               <div className="mt-6 grid grid-cols-4 gap-3">
                 <ReportSummaryCard labelLines={['વસ્તુઓની', 'સંખ્યા']} value={formatMetric(preparedReport.summary.totalRows)} />
-                <ReportSummaryCard labelLines={['આવક', 'KG']} value={formatMetric(preparedReport.summary.totalIncome)} accentClass={uiTheme.text} />
+                <ReportSummaryCard labelLines={['આવક', 'KG']} value={formatMetric(preparedReport.summary.totalIncome)} accentClass="text-emerald-700" />
                 <ReportSummaryCard labelLines={['જાવક', 'KG']} value={formatMetric(preparedReport.summary.totalOutgoing)} />
                 <ReportSummaryCard labelLines={['કુલ સ્ટોક', 'KG']} value={formatMetric(preparedReport.summary.totalStock)} />
               </div>
