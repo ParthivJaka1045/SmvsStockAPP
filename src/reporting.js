@@ -1,6 +1,14 @@
 import { categories } from './data';
 
-export const REPORT_TITLE = 'SMVS MONTHLY STOCK REPORT';
+const isLegacyStockReportTitle = (title) => /SMVS/i.test(title) || /MONTHLY STOCK REPORT/i.test(title);
+
+export const deriveStockReportTitle = (report) =>
+  (report?.reportPeriod === 'yearly' ? 'Yearly Report' : 'Monthly Report');
+
+export const formatYearLabel = (monthValue) => {
+  const year = (monthValue || '').toString().slice(0, 4);
+  return /^\d{4}$/.test(year) ? year : '-';
+};
 
 export const createDefaultReportOptions = () => ({});
 
@@ -89,7 +97,42 @@ export const formatMonthLabel = (monthValue) => {
   return `${monthName}_${year}`;
 };
 
-const getRangeLabel = (selectedDate) => `તા. 1 થી ${formatDisplayDate(selectedDate)}`;
+export const getRangeLabel = (selectedDate, monthValue, reportPeriod = 'monthly') => {
+  if (!selectedDate) return '-';
+  if (reportPeriod === 'yearly') {
+    const year = (monthValue || '').slice(0, 4);
+    if (!year || year.length !== 4) return `Through ${formatDisplayDate(selectedDate)}`;
+    return `From 01-01-${year} to ${formatDisplayDate(selectedDate)}`;
+  }
+  const monthStart = getMonthStartDate(monthValue);
+  return `From ${formatDisplayDate(monthStart)} to ${formatDisplayDate(selectedDate)}`;
+};
+
+const ensureDateInCalendarYear = (monthValue, selectedDate) => {
+  const year = (monthValue || '').slice(0, 4);
+  if (!year || year.length !== 4) return selectedDate || getTodayDateValue();
+  if (selectedDate && selectedDate.startsWith(year)) return selectedDate;
+  const today = getTodayDateValue();
+  if (today.startsWith(year)) return today;
+  return `${year}-12-31`;
+};
+
+const isDateWithinSelectedYear = (value, monthValue, selectedDate) => {
+  const year = (monthValue || '').slice(0, 4);
+  if (!year || year.length !== 4) return false;
+  const dateValue =
+    typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)
+      ? value
+      : (() => {
+          const date = toDateObject(value);
+          return date
+            ? `${date.getFullYear()}-${padValue(date.getMonth() + 1)}-${padValue(date.getDate())}`
+            : '';
+        })();
+
+  if (!dateValue || !dateValue.startsWith(year)) return false;
+  return dateValue >= `${year}-01-01` && dateValue <= selectedDate;
+};
 
 const buildBaseRow = (itemName, monthLabel) => ({
   itemName: itemName || '-',
@@ -158,8 +201,14 @@ const summarizeRows = (rows) => ({
 
 export const hydrateReport = (report) => {
   const month = getNormalizedMonthValue(report.month || report.monthValue || report.fromDate || report.toDate);
-  const selectedDate = ensureDateInMonth(month, report.selectedDate || report.toDate || report.generatedAtIso || report.generatedAt);
-  const monthLabel = report.monthLabel || formatMonthLabel(month);
+  const reportPeriod = report.reportPeriod === 'yearly' ? 'yearly' : 'monthly';
+  const selectedDate =
+    reportPeriod === 'yearly'
+      ? ensureDateInCalendarYear(month, report.selectedDate || report.toDate || report.generatedAtIso || report.generatedAt)
+      : ensureDateInMonth(month, report.selectedDate || report.toDate || report.generatedAtIso || report.generatedAt);
+  const computedMonthLabel =
+    reportPeriod === 'yearly' ? formatYearLabel(month) : formatMonthLabel(month);
+  const monthLabel = report.monthLabel || computedMonthLabel;
   const scope = report.scope === 'center' ? 'center' : 'all';
   const center = (report.center || '').toString().trim();
   const centerLabel = report.centerLabel || (scope === 'center' && center ? center : 'All Centers / Full Report');
@@ -179,16 +228,30 @@ export const hydrateReport = (report) => {
   const summarySource = report.summary || {};
   const computedSummary = summarizeRows(rows);
 
+  const rawTitle = (report.title || '').trim();
+  const title =
+    !rawTitle || isLegacyStockReportTitle(rawTitle)
+      ? deriveStockReportTitle({ reportPeriod })
+      : rawTitle;
+
+  const storedRange = report.rangeLabel;
+  const isLegacyRange = storedRange && /[\u0A80-\u0AFF]/.test(storedRange);
+  const rangeLabel =
+    !storedRange || isLegacyRange
+      ? getRangeLabel(selectedDate, month, reportPeriod)
+      : storedRange;
+
   return {
     ...report,
-    title: report.title || REPORT_TITLE,
+    title,
+    reportPeriod,
     month,
     monthLabel,
     selectedDate,
     scope,
     center,
     centerLabel,
-    rangeLabel: report.rangeLabel || getRangeLabel(selectedDate),
+    rangeLabel,
     generatedAtIso:
       report.generatedAtIso || getIsoString(report.generatedAt) || getIsoString(report.generatedOn) || new Date().toISOString(),
     createdBy: report.createdBy || 'Admin',
@@ -206,10 +269,10 @@ export const hydrateReport = (report) => {
 export const getVisibleReportMetrics = (reportInput) => {
   const report = hydrateReport(reportInput);
   return [
-    { key: 'rows', label: 'વસ્તુઓની સંખ્યા', value: formatMetric(report.summary.totalRows) },
-    { key: 'income', label: 'આવક KG', value: formatMetric(report.summary.totalIncome) },
-    { key: 'outgoing', label: 'જાવક KG', value: formatMetric(report.summary.totalOutgoing) },
-    { key: 'stock', label: 'કુલ સ્ટોક KG', value: formatMetric(report.summary.totalStock) },
+    { key: 'rows', label: 'Items', value: formatMetric(report.summary.totalRows) },
+    { key: 'income', label: 'Income (KG)', value: formatMetric(report.summary.totalIncome) },
+    { key: 'outgoing', label: 'Outgoing (KG)', value: formatMetric(report.summary.totalOutgoing) },
+    { key: 'stock', label: 'Total Stock (KG)', value: formatMetric(report.summary.totalStock) },
   ];
 };
 
@@ -222,17 +285,30 @@ export const buildSummaryReport = ({
   createdBy = 'Admin',
   scope = 'all',
   center = '',
+  reportPeriod = 'monthly',
 }) => {
+  const normalizedReportPeriod = reportPeriod === 'yearly' ? 'yearly' : 'monthly';
   const normalizedMonth = getNormalizedMonthValue(month || selectedDate || new Date());
-  const normalizedSelectedDate = ensureDateInMonth(normalizedMonth, selectedDate);
-  const monthLabel = formatMonthLabel(normalizedMonth);
+  const normalizedSelectedDate =
+    normalizedReportPeriod === 'yearly'
+      ? ensureDateInCalendarYear(normalizedMonth, selectedDate)
+      : ensureDateInMonth(normalizedMonth, selectedDate);
+  const monthLabel =
+    normalizedReportPeriod === 'yearly'
+      ? formatYearLabel(normalizedMonth)
+      : formatMonthLabel(normalizedMonth);
   const normalizedScope = scope === 'center' ? 'center' : 'all';
   const normalizedCenter = (center || '').toString().trim();
   const rowMap = new Map();
 
+  const dateInRange = (value) =>
+    normalizedReportPeriod === 'yearly'
+      ? isDateWithinSelectedYear(value, normalizedMonth, normalizedSelectedDate)
+      : isDateWithinSelectedMonth(value, normalizedMonth, normalizedSelectedDate);
+
   orders
     .filter((order) =>
-      isDateWithinSelectedMonth(order.date, normalizedMonth, normalizedSelectedDate)
+      dateInRange(order.date)
       && matchesCenterFilter(order.center, normalizedScope, normalizedCenter),
     )
     .forEach((order) => {
@@ -244,7 +320,7 @@ export const buildSummaryReport = ({
 
   sendOrders
     .filter((order) =>
-      isDateWithinSelectedMonth(order.date, normalizedMonth, normalizedSelectedDate)
+      dateInRange(order.date)
       && matchesCenterFilter(order.fromCenter, normalizedScope, normalizedCenter),
     )
     .forEach((order) => {
@@ -256,7 +332,7 @@ export const buildSummaryReport = ({
 
   purchases
     .filter((purchase) =>
-      isDateWithinSelectedMonth(purchase.billDate || purchase.date, normalizedMonth, normalizedSelectedDate)
+      dateInRange(purchase.billDate || purchase.date)
       && matchesCenterFilter(purchase.center, normalizedScope, normalizedCenter),
     )
     .forEach((purchase) => {
@@ -278,8 +354,9 @@ export const buildSummaryReport = ({
     scope: normalizedScope,
     center: normalizedCenter,
     centerLabel: normalizedScope === 'center' && normalizedCenter ? normalizedCenter : 'All Centers / Full Report',
-    rangeLabel: getRangeLabel(normalizedSelectedDate),
-    title: REPORT_TITLE,
+    rangeLabel: getRangeLabel(normalizedSelectedDate, normalizedMonth, normalizedReportPeriod),
+    reportPeriod: normalizedReportPeriod,
+    title: deriveStockReportTitle({ reportPeriod: normalizedReportPeriod }),
     createdBy,
     generatedAt: new Date(),
     generatedAtIso: new Date().toISOString(),
@@ -299,12 +376,13 @@ const sanitizeFilePart = (value) =>
 export const getReportFileName = (reportInput) => {
   const report = hydrateReport(reportInput);
   const centerPart = report.scope === 'center' ? `-${sanitizeFilePart(report.centerLabel)}` : '';
-  return `smvs-monthly-stock-${sanitizeFilePart(report.month)}-${sanitizeFilePart(report.selectedDate)}${centerPart}.pdf`;
+  const periodPart = report.reportPeriod === 'yearly' ? 'yearly' : 'monthly';
+  return `stock-${periodPart}-${sanitizeFilePart(report.month)}-${sanitizeFilePart(report.selectedDate)}${centerPart}.pdf`;
 };
 
-export const getReportTheme = () => ({
-  key: 'monthly',
-  title: 'Monthly Stock Report',
+export const getReportTheme = (reportPeriod = 'monthly') => ({
+  key: reportPeriod === 'yearly' ? 'yearly' : 'monthly',
+  title: reportPeriod === 'yearly' ? 'Yearly Report' : 'Monthly Report',
   primary: [5, 150, 105],
   accent: [16, 185, 129],
   surface: [236, 253, 245],

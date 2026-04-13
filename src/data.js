@@ -37,6 +37,7 @@ export const centerData = [
   { center: "Foodstal - Naroda",     name: "Mukeshbhai",       phone: "9429439909" },
   { center: "Bhakti nivas",          name: "Lataba",           phone: "9099090614" },
   { center: "Girls Gurukul",         name: "Lataba",           phone: "9099090614" },
+  { center: "Sant-Aasharam",         name: "",                 phone: "" },
   { center: "Other",                 name: "",                 phone: "" },
 ];
 
@@ -51,7 +52,9 @@ export const categories = {
     { name: "ફાડા ઘઉં", unit: "કિલો" },
     { name: "બાજરી", unit: "કિલો" },
     { name: "ખિચડી", unit: "કિલો" },
-    { name: "કણકી", unit: "કિલો" }
+    { name: "કણકી", unit: "કિલો" },
+    { name: "જુવાર", unit: "કિલો" },
+    { name: "મકાઈ", unit: "કિલો" }
   ],
   "કઠોળ": [
     { name: "તુવેરદાળ", unit: "કિલો" },
@@ -68,7 +71,13 @@ export const categories = {
     { name: "રાજમા", unit: "કિલો" },
     { name: "ચોળા", unit: "કિલો" },
     { name: "મસુરદાળ", unit: "કિલો" },
-    { name: "તુવેર", unit: "કિલો" }
+    { name: "તુવેર", unit: "કિલો" },
+    { name: "સફેદ વટાણા", unit: "કિલો" },
+    { name: "લીલા વટાણા", unit: "કિલો" },
+    { name: "સફેદ ચોળા", unit: "કિલો" },
+    { name: "લાલ ચોળા", unit: "કિલો" },
+    { name: "મસુર દાળ", unit: "કિલો" },
+    { name: "મસુર", unit: "કિલો" }
   ],
   "ઘી-તેલ": [
     { name: "પામોલિન તેલ", unit: "કિલો" },
@@ -76,7 +85,10 @@ export const categories = {
     { name: "સોયાબીન તેલ", unit: "કિલો" },
     { name: "ચોખ્ખું ઘી", unit: "કિલો" },
     { name: "ચાલુ ઘી", unit: "કિલો" },
-    { name: "દિવેલ", unit: "કિલો" }
+    { name: "દિવેલ", unit: "કિલો" },
+    { name: "સીંગતેલ", unit: "કિલો" },
+    { name: "કપાસિયા તેલ", unit: "કિલો" },
+    { name: "સરસિયું તેલ", unit: "કિલો" }
   ],
   "લોટ": [
     { name: "ગાય છાપ બેસન", unit: "કિલો" },
@@ -97,7 +109,15 @@ export const categories = {
     { name: "ખારેક / ખજૂર", unit: "કિલો" },
     { name: "અંજીર", unit: "કિલો" },
     { name: "જરદાલુ / ટોપરું", unit: "કિલો" },
-    { name: "શ્રી ફળ / કેસર", unit: "કિલો" }
+    { name: "શ્રી ફળ / કેસર", unit: "કિલો" },
+    { name: "બદામ કતરણ", unit: "કિલો" },
+    { name: "પિસ્તા કતરણ", unit: "કિલો" },
+    { name: "ખારેક", unit: "કિલો" },
+    { name: "ખજૂર", unit: "કિલો" },
+    { name: "જરદાળુ", unit: "કિલો" },
+    { name: "ટોપરું", unit: "કિલો" },
+    { name: "શ્રીફળ", unit: "કિલો" },
+    { name: "કેસર", unit: "કિલો" }
   ],
   "ફરાળી": [
     { name: "બટાકા કાતરી", unit: "કિલો" },
@@ -139,6 +159,16 @@ export const categories = {
     { name: "ઘાણા", unit: "કિલો" },
     { name: "ઘાણાજીરું", unit: "કિલો" },
     { name: "મેથી", unit: "કિલો" },
+    { name: "મેથી કુરીયા", unit: "કિલો" },
+    { name: "ધાણા", unit: "કિલો" },
+    { name: "ધાણા કુરીયા", unit: "કિલો" },
+    { name: "ધાણા જીરુ", unit: "કિલો" },
+    { name: "સફેદ તલ", unit: "કિલો" },
+    { name: "કાળા તલ", unit: "કિલો" },
+    { name: "ટાટા સોડા", unit: "કિલો" },
+    { name: "ટાટા શક્તિ", unit: "કિલો" },
+    { name: "દૂધ પાવડર", unit: "કિલો" },
+    { name: "નાયલોન પૌઆ", unit: "કિલો" },
     { name: "અજમો", unit: "કિલો" },
     { name: "તલ - કાળા / સફેદ", unit: "કિલો" },
     { name: "વળીયારી", unit: "કિલો" },

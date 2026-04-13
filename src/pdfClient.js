@@ -1,4 +1,4 @@
-const PDF_SERVICE_BASE_URL = (import.meta.env.VITE_PDF_SERVICE_URL || '/api/pdfs').replace(/\/+$/, '');
+const PDF_SERVICE_BASE_URL = 'https://pdf-api-qlc3.onrender.com/api/pdfs';
 
 const extractErrorMessage = async (response) => {
   const fallback = `PDF service error (${response.status})`;

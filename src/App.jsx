@@ -5,12 +5,11 @@ import { collection, addDoc, getDocs, getDoc, query, orderBy, doc, where, update
 import { categories, centerData } from './data';
 import emailjs from 'emailjs-com'; 
 import {
-  REPORT_TITLE,
   buildSummaryReport,
   formatDisplayDate,
   formatMetric,
+  getRangeLabel,
   getReportFileName,
-  getReportTheme,
   hydrateReport,
 } from './reporting';
 import {
@@ -19,6 +18,7 @@ import {
   generateRequestPDFBlob as generatePDFBlobReliable,
   generateSummaryReportPDFBlob,
 } from './pdfClient';
+import { saveBlobFromProducer } from './utils/saveBlob';
 import { 
   Trash2, Download, LogOut, Loader2, CheckCircle, RefreshCw, 
   ChevronDown, ChevronUp, ArrowLeft, Send, LayoutDashboard, 
@@ -76,6 +76,21 @@ const getDateWithinMonth = (monthValue, dateValue) => {
   const today = new Date().toISOString().split('T')[0];
   if (today.startsWith(monthValue)) return today;
   return getLastDateForMonth(monthValue);
+};
+
+const getLastDateForCalendarYear = (monthValue) => {
+  const year = (monthValue || '').slice(0, 4);
+  if (!year || year.length !== 4) return new Date().toISOString().split('T')[0];
+  return `${year}-12-31`;
+};
+
+const getDateWithinYear = (monthValue, dateValue) => {
+  const year = (monthValue || '').slice(0, 4);
+  if (!year || year.length !== 4) return dateValue;
+  if (dateValue && dateValue.startsWith(year)) return dateValue;
+  const today = new Date().toISOString().split('T')[0];
+  if (today.startsWith(year)) return today;
+  return getLastDateForCalendarYear(monthValue);
 };
 
 const sendEmailWithConfig = (config, params) => (
@@ -397,6 +412,7 @@ const createDefaultReportForm = () => {
   return {
     month,
     selectedDate: getDateWithinMonth(month, new Date().toISOString().split('T')[0]),
+    reportPeriod: 'monthly',
     scope: 'all',
     center: '',
     centerOther: '',
@@ -430,18 +446,20 @@ function ReportSummaryCard({ labelLines, value, accentClass = 'text-slate-900' }
 function ReportPreviewContent({ report }) {
   const preparedReport = hydrateReport(report);
   const uiTheme = getReportUiTheme();
+  const periodLabel = preparedReport.reportPeriod === 'yearly' ? 'Year' : 'Month';
 
   return (
-    <div className="space-y-6 font-report-gujarati">
+    <div className="space-y-6 font-sans">
       <div className={`rounded-3xl border ${uiTheme.border} bg-gradient-to-r ${uiTheme.soft} p-6 sm:p-8`}>
         <div className="flex flex-col gap-4">
           <div>
-            <p className={`text-xs font-black uppercase tracking-[0.25em] ${uiTheme.text}`}>Monthly Report</p>
-            <h2 className="mt-2 text-3xl sm:text-4xl font-black text-slate-900">{REPORT_TITLE}</h2>
-            <p className="mt-2 text-[13px] sm:text-sm text-slate-600">Simple monthly stock table with fixed format.</p>
+            <h2 className="mt-0 text-3xl sm:text-4xl font-black text-slate-900 tracking-tight">{preparedReport.title}</h2>
+            <p className="mt-2 text-[13px] sm:text-sm text-slate-600">
+              Stock movements for the selected range (income, outgoing, and balance in KG).
+            </p>
           </div>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <PreviewInfoCard label="Month" value={preparedReport.monthLabel} />
+            <PreviewInfoCard label={periodLabel} value={preparedReport.monthLabel} />
             <PreviewInfoCard label="Center" value={preparedReport.centerLabel} />
             <PreviewInfoCard label="Range" value={preparedReport.rangeLabel} />
           </div>
@@ -450,7 +468,7 @@ function ReportPreviewContent({ report }) {
 
       <div className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
         <div className={`border-b ${uiTheme.border} bg-gradient-to-r ${uiTheme.soft} px-4 py-3`}>
-          <h3 className={`text-sm font-black uppercase tracking-widest ${uiTheme.text}`}>Monthly Table</h3>
+          <h3 className={`text-sm font-black uppercase tracking-widest ${uiTheme.text}`}>Stock table</h3>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full min-w-[760px] text-sm">
@@ -484,10 +502,10 @@ function ReportPreviewContent({ report }) {
       </div>
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <ReportSummaryCard labelLines={['વસ્તુઓની', 'સંખ્યા']} value={formatMetric(preparedReport.summary.totalRows)} />
-        <ReportSummaryCard labelLines={['આવક', 'KG']} value={formatMetric(preparedReport.summary.totalIncome)} accentClass={uiTheme.text} />
-        <ReportSummaryCard labelLines={['જાવક', 'KG']} value={formatMetric(preparedReport.summary.totalOutgoing)} />
-        <ReportSummaryCard labelLines={['કુલ સ્ટોક', 'KG']} value={formatMetric(preparedReport.summary.totalStock)} />
+        <ReportSummaryCard labelLines={['Items']} value={formatMetric(preparedReport.summary.totalRows)} />
+        <ReportSummaryCard labelLines={['Income', '(KG)']} value={formatMetric(preparedReport.summary.totalIncome)} accentClass={uiTheme.text} />
+        <ReportSummaryCard labelLines={['Outgoing', '(KG)']} value={formatMetric(preparedReport.summary.totalOutgoing)} />
+        <ReportSummaryCard labelLines={['Total Stock', '(KG)']} value={formatMetric(preparedReport.summary.totalStock)} />
       </div>
     </div>
   );
@@ -574,14 +592,7 @@ function AdminDashboard({ user }) {
   const handleDownload = async (order) => {
     setPdfLoading(order.id);
     try {
-      const blob = await generatePDFBlobReliable(order);
-      const link = document.createElement('a');
-      link.href = URL.createObjectURL(blob);
-      link.download = `${getSmartFileName(order)}.pdf`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(link.href);
+      await saveBlobFromProducer(() => generatePDFBlobReliable(order), `${getSmartFileName(order)}.pdf`);
     } catch (err) { alert("Download Error: " + err.message); }
     setPdfLoading(null);
   };
@@ -592,16 +603,10 @@ function AdminDashboard({ user }) {
       const blob = await generatePDFBlobReliable(order);
       const file = new File([blob], `${getSmartFileName(order)}.pdf`, { type: 'application/pdf' });
       if (navigator.canShare && navigator.canShare({ files: [file] })) {
-        await navigator.share({ files: [file], title: 'SMVS Stock Request', text: `Stock Request - ${order.center} #${order.chalanNo}` });
+        await navigator.share({ files: [file], title: 'Request Stock Report', text: `Stock Request - ${order.center} #${order.chalanNo}` });
       } else {
         // Fallback: download the file instead
-        const link = document.createElement('a');
-        link.href = URL.createObjectURL(blob);
-        link.download = `${getSmartFileName(order)}.pdf`;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        URL.revokeObjectURL(link.href);
+        await saveBlobFromProducer(() => Promise.resolve(blob), `${getSmartFileName(order)}.pdf`);
         alert("Share not supported on this device. File downloaded instead.");
       }
     } catch (err) { alert("Share Error: " + err.message); }
@@ -728,14 +733,7 @@ function AdminDashboard({ user }) {
   const handleDownloadSend = async (order) => {
     setSendPdfLoading(order.id);
     try {
-      const blob = await generateSendPDFBlobReliable(order);
-      const link = document.createElement('a');
-      link.href = URL.createObjectURL(blob);
-      link.download = getSendFileName(order);
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(link.href);
+      await saveBlobFromProducer(() => generateSendPDFBlobReliable(order), getSendFileName(order));
     } catch (err) { alert("Download Error: " + err.message); }
     setSendPdfLoading(null);
   };
@@ -746,15 +744,9 @@ function AdminDashboard({ user }) {
       const blob = await generateSendPDFBlobReliable(order);
       const file = new File([blob], getSendFileName(order), { type: 'application/pdf' });
       if (navigator.canShare && navigator.canShare({ files: [file] })) {
-        await navigator.share({ files: [file], title: 'SMVS Material Dispatch', text: `Dispatch - ${order.fromCenter} #${order.chalanNo}` });
+        await navigator.share({ files: [file], title: 'Send Stock Report', text: `Dispatch - ${order.fromCenter} #${order.chalanNo}` });
       } else {
-        const link = document.createElement('a');
-        link.href = URL.createObjectURL(blob);
-        link.download = getSendFileName(order);
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        URL.revokeObjectURL(link.href);
+        await saveBlobFromProducer(() => Promise.resolve(blob), getSendFileName(order));
         alert("Share not supported on this device. File downloaded instead.");
       }
     } catch (err) { alert("Share Error: " + err.message); }
@@ -770,7 +762,13 @@ function AdminDashboard({ user }) {
       alert('Select month and selected date first.');
       return;
     }
-    if (!reportForm.selectedDate.startsWith(reportForm.month)) {
+    const reportYear = reportForm.month.slice(0, 4);
+    if (reportForm.reportPeriod === 'yearly') {
+      if (!reportForm.selectedDate.startsWith(reportYear)) {
+        alert('Selected date must fall in the chosen calendar year.');
+        return;
+      }
+    } else if (!reportForm.selectedDate.startsWith(reportForm.month)) {
       alert('Selected date must be inside the selected month.');
       return;
     }
@@ -800,6 +798,7 @@ function AdminDashboard({ user }) {
         createdBy: user?.username || 'Admin',
         scope: reportForm.scope,
         center: effectiveCenter,
+        reportPeriod: reportForm.reportPeriod,
       });
 
       if (draft.rows.length === 0) {
@@ -828,14 +827,7 @@ function AdminDashboard({ user }) {
     setReportPdfLoading(report.id);
     try {
       const hydrated = hydrateReport(report);
-      const blob = await generateSummaryReportPDFBlob(hydrated);
-      const link = document.createElement('a');
-      link.href = URL.createObjectURL(blob);
-      link.download = getReportFileName(hydrated);
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(link.href);
+      await saveBlobFromProducer(() => generateSummaryReportPDFBlob(hydrated), getReportFileName(hydrated));
     } catch (err) {
       alert('Download Error: ' + err.message);
     }
@@ -855,13 +847,7 @@ function AdminDashboard({ user }) {
           text: `${hydrated.title} - ${hydrated.monthLabel}`,
         });
       } else {
-        const link = document.createElement('a');
-        link.href = URL.createObjectURL(blob);
-        link.download = getReportFileName(hydrated);
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        URL.revokeObjectURL(link.href);
+        await saveBlobFromProducer(() => Promise.resolve(blob), getReportFileName(hydrated));
         alert("Share not supported on this device. File downloaded instead.");
       }
     } catch (err) {
@@ -1232,6 +1218,28 @@ function AdminDashboard({ user }) {
                 </select>
               </div>
 
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Report period</label>
+                <select
+                  className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-emerald-500/50 transition-all text-sm"
+                  value={reportForm.reportPeriod}
+                  onChange={(e) => {
+                    const next = e.target.value;
+                    setReportForm((prev) => ({
+                      ...prev,
+                      reportPeriod: next,
+                      selectedDate:
+                        next === 'yearly'
+                          ? getDateWithinYear(prev.month, prev.selectedDate)
+                          : getDateWithinMonth(prev.month, prev.selectedDate),
+                    }));
+                  }}
+                >
+                  <option value="monthly">Monthly (within selected month)</option>
+                  <option value="yearly">Yearly (Jan 1 through selected date)</option>
+                </select>
+              </div>
+
               {reportForm.scope === 'center' && (
                 <div>
                   <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Center</label>
@@ -1268,10 +1276,13 @@ function AdminDashboard({ user }) {
                   value={reportForm.month}
                   onChange={e => {
                     const month = e.target.value;
-                    setReportForm(prev => ({
+                    setReportForm((prev) => ({
                       ...prev,
                       month,
-                      selectedDate: getDateWithinMonth(month, prev.selectedDate),
+                      selectedDate:
+                        prev.reportPeriod === 'yearly'
+                          ? getDateWithinYear(month, prev.selectedDate)
+                          : getDateWithinMonth(month, prev.selectedDate),
                     }));
                   }}
                 />
@@ -1281,8 +1292,8 @@ function AdminDashboard({ user }) {
                 <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Selected Date</label>
                 <input
                   type="date"
-                  min={`${reportForm.month}-01`}
-                  max={getLastDateForMonth(reportForm.month)}
+                  min={reportForm.reportPeriod === 'yearly' ? `${reportForm.month.slice(0, 4)}-01-01` : `${reportForm.month}-01`}
+                  max={reportForm.reportPeriod === 'yearly' ? getLastDateForCalendarYear(reportForm.month) : getLastDateForMonth(reportForm.month)}
                   className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-emerald-500/50 transition-all text-sm"
                   value={reportForm.selectedDate}
                   onChange={e => setReportForm(prev => ({ ...prev, selectedDate: e.target.value }))}
@@ -1291,15 +1302,19 @@ function AdminDashboard({ user }) {
             </div>
 
             <div className="mt-4 rounded-2xl border border-emerald-500/20 bg-emerald-500/10 p-4">
-              <p className="text-[11px] font-bold uppercase tracking-widest text-emerald-300">Dynamic Range</p>
-              <p className="mt-2 text-lg font-black text-white">તા. 1 થી {formatDisplayDate(reportForm.selectedDate)}</p>
+              <p className="text-[11px] font-bold uppercase tracking-widest text-emerald-300">Dynamic range</p>
+              <p className="mt-2 text-lg font-black text-white">
+                {getRangeLabel(reportForm.selectedDate, reportForm.month, reportForm.reportPeriod)}
+              </p>
               <p className="mt-2 text-sm font-bold text-emerald-100">{getCenterScopeLabel(reportForm.scope, getResolvedCenterValue(reportForm.center, reportForm.centerOther))}</p>
-              <p className="mt-2 text-xs text-emerald-100/70">The monthly table columns will update using this range in preview, PDF, share, and mail.</p>
+              <p className="mt-2 text-xs text-emerald-100/70">
+                PDF title switches between Monthly Report and Yearly Report automatically from this setting. Preview, PDF, share, and mail all use the same range.
+              </p>
             </div>
 
             <div className="mt-5 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
               <p className="text-xs text-gray-500">
-                Report format is fixed to: વસ્તુનું નામ, મહિનો, આવક, જાવક, કુલ સ્ટોક. Centewise mode filters request, send, and purchase entries for the selected center only.
+                Columns: item name, income (KG), outgoing (KG), total stock (KG). Centewise mode filters request, send, and purchase entries for the selected center only.
               </p>
               <motion.button
                 whileHover={{ scale: 1.02 }}
@@ -1329,7 +1344,6 @@ function AdminDashboard({ user }) {
                 {reports.map((report, index) => {
                   const preparedReport = hydrateReport(report);
                   const uiTheme = getReportUiTheme();
-                  const pdfTheme = getReportTheme();
                   return (
                     <motion.div key={preparedReport.id} variants={fadeInUp} initial="initial" animate="animate" exit="exit"
                       transition={{ delay: index * 0.05 }} whileHover={{ y: -5, transition: { duration: 0.2 } }}
@@ -1337,7 +1351,7 @@ function AdminDashboard({ user }) {
                       <div className={`p-4 sm:p-5 border-b border-white/5 bg-gradient-to-r ${uiTheme.soft}`}>
                         <div className="flex justify-between items-start gap-3">
                           <div>
-                            <p className={`text-[10px] font-black uppercase tracking-[0.2em] ${uiTheme.muted}`}>{pdfTheme.title}</p>
+                            <p className={`text-[10px] font-black uppercase tracking-[0.2em] ${uiTheme.muted}`}>{preparedReport.title}</p>
                             <h3 className="font-black text-white text-sm sm:text-base mt-1">{preparedReport.monthLabel}</h3>
                             <p className="text-xs text-gray-300 mt-1">{preparedReport.rangeLabel}</p>
                             <p className={`text-[11px] font-bold mt-2 ${uiTheme.muted}`}>{preparedReport.centerLabel}</p>
@@ -1360,21 +1374,21 @@ function AdminDashboard({ user }) {
                       <div className="p-4 sm:p-5">
                         <div className="grid grid-cols-3 gap-2 mb-4">
                           <div className="bg-[#252525] p-3 rounded-xl border border-white/5 text-center">
-                            <p className="text-[10px] text-gray-500 uppercase font-bold">Number of Item</p>
+                            <p className="text-[10px] text-gray-500 uppercase font-bold">Items</p>
                             <p className="font-black text-white text-base">{formatMetric(preparedReport.summary.totalRows)}</p>
                           </div>
                           <div className={`bg-gradient-to-br ${uiTheme.soft} p-3 rounded-xl border ${uiTheme.border} text-center`}>
-                            <p className={`text-[10px] uppercase font-bold ${uiTheme.muted}`}>આવક (KG)</p>
+                            <p className={`text-[10px] uppercase font-bold ${uiTheme.muted}`}>Income (KG)</p>
                             <p className={`font-black text-base ${uiTheme.text}`}>{formatMetric(preparedReport.summary.totalIncome)}</p>
                           </div>
                           <div className="bg-[#252525] p-3 rounded-xl border border-white/5 text-center">
-                            <p className="text-[10px] text-gray-500 uppercase font-bold">જાવક (KG)</p>
+                            <p className="text-[10px] text-gray-500 uppercase font-bold">Outgoing (KG)</p>
                             <p className="font-black text-white text-base">{formatMetric(preparedReport.summary.totalOutgoing)}</p>
                           </div>
                         </div>
                         <div className="mb-4 space-y-1 text-xs text-gray-400">
                           <p><span className="font-bold text-gray-200">Scope:</span> {preparedReport.scope === 'center' ? 'Centewise' : 'All Centers'}</p>
-                          <p><span className="font-bold text-gray-200">કુલ સ્ટોક (KG):</span> {formatMetric(preparedReport.summary.totalStock)}</p>
+                          <p><span className="font-bold text-gray-200">Total stock (KG):</span> {formatMetric(preparedReport.summary.totalStock)}</p>
                           <p><span className="font-bold text-gray-200">Saved Email:</span> {preparedReport.email || '-'}</p>
                         </div>
                         <div className="grid grid-cols-2 gap-2">
@@ -1431,14 +1445,13 @@ function AdminDashboard({ user }) {
                 <X size={20} />
               </motion.button>
               <div className="text-center mb-6 sm:mb-8 pb-4">
-                <h1 className="text-3xl sm:text-4xl font-black text-orange-600 uppercase mb-1 tracking-tighter">SMVS STOCK REQUEST</h1>
-                <p className="text-gray-400 text-[10px] font-sans font-bold uppercase tracking-[0.2em] mt-1">Video Post Production Data Report</p>
+                <h1 className="text-3xl sm:text-4xl font-black text-orange-600 uppercase mb-1 tracking-tighter">Request Stock Report</h1>
                 <div className="mt-3 h-1 w-full rounded-full bg-orange-600" />
               </div>
               <div className="mb-6 sm:mb-8 rounded-[1.8rem] border border-gray-200 bg-gray-50 p-4 sm:p-6">
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
                   <PreviewInfoCard label="Center Name" value={previewOrder.center} />
-                  <PreviewInfoCard label="Chalan No" value={`#${previewOrder.chalanNo}`} />
+                  <PreviewInfoCard label="Challan No." value={`#${previewOrder.chalanNo}`} />
                   <PreviewInfoCard label="Order Date" value={formatDisplayDate(previewOrder.date)} />
                   <PreviewInfoCard label="Sender" value={previewOrder.senderName || '-'} />
                   <PreviewInfoCard label="Post" value={previewOrder.post || '-'} />
@@ -1492,12 +1505,11 @@ function AdminDashboard({ user }) {
                 <X size={20} />
               </motion.button>
               <div className="text-center mb-6 sm:mb-8 border-b-4 border-blue-600 pb-4">
-                <h1 className="text-2xl sm:text-4xl font-black text-blue-600 uppercase mb-0 tracking-tighter">SMVS MATERIAL DISPATCH</h1>
-                <p className="text-gray-400 text-[10px] font-sans font-bold uppercase tracking-[0.2em] mt-1">Samp Swarup Mandal Video Seva</p>
+                <h1 className="text-2xl sm:text-4xl font-black text-blue-600 uppercase mb-0 tracking-tighter">Send Stock Report</h1>
               </div>
               <div className="grid grid-cols-2 gap-3 sm:gap-4 text-sm mb-6 sm:mb-8 bg-gray-50 p-4 sm:p-6 rounded-2xl border border-gray-100">
                 <div><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">From Center</p><p className="font-bold text-base sm:text-lg">{previewSendOrder.fromCenter}</p></div>
-                <div className="text-right"><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Chalan No</p><p className="font-bold text-base sm:text-lg">#{previewSendOrder.chalanNo}</p></div>
+                <div className="text-right"><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Challan No.</p><p className="font-bold text-base sm:text-lg">#{previewSendOrder.chalanNo}</p></div>
                 <div><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Date</p><p className="font-bold text-sm">{formatDisplayDate(previewSendOrder.date)}</p></div>
                 <div className="text-right"><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">To</p><p className="font-bold text-sm text-blue-600">Swaminarayan Dham</p></div>
                 {previewSendOrder.senderName && <div><p className="text-gray-400 text-[10px] font-sans font-bold uppercase mb-0.5">Sender</p><p className="font-bold text-sm">{previewSendOrder.senderName}</p></div>}
@@ -1845,14 +1857,7 @@ function PurchaseAdminPanel({ user }) {
   const handleDownloadPurchase = async (purchase) => {
     setPurchasePdfLoading(purchase.id);
     try {
-      const blob = await generatePurchasePDFBlob(purchase);
-      const link = document.createElement('a');
-      link.href = URL.createObjectURL(blob);
-      link.download = getPurchaseFileName(purchase);
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(link.href);
+      await saveBlobFromProducer(() => generatePurchasePDFBlob(purchase), getPurchaseFileName(purchase));
     } catch (error) {
       alert(`Download Error: ${error.message}`);
     }
@@ -1867,17 +1872,11 @@ function PurchaseAdminPanel({ user }) {
       if (navigator.canShare && navigator.canShare({ files: [file] })) {
         await navigator.share({
           files: [file],
-          title: 'SMVS Purchase Report',
+          title: 'Purchase Report',
           text: `${purchase.shopName} - Bill ${purchase.billNo}`,
         });
       } else {
-        const link = document.createElement('a');
-        link.href = URL.createObjectURL(blob);
-        link.download = getPurchaseFileName(purchase);
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        URL.revokeObjectURL(link.href);
+        await saveBlobFromProducer(() => Promise.resolve(blob), getPurchaseFileName(purchase));
         alert('Share not supported on this device. File downloaded instead.');
       }
     } catch (error) {
@@ -1906,7 +1905,7 @@ function PurchaseAdminPanel({ user }) {
         cc_email: DEFAULT_CC_EMAIL,
         bcc_email: DEFAULT_BCC_EMAIL,
         from_name: 'Purchased Material',
-        report_title: 'SMVS Purchase Report',
+        report_title: 'Purchase Report',
         month: purchaseMailModal.center || '-',
         chalan_no: purchaseMailModal.billNo || '-',
         date: formatDisplayDate(purchaseMailModal.billDate || purchaseMailModal.date),
@@ -2223,8 +2222,7 @@ function PurchaseAdminPanel({ user }) {
               </motion.button>
 
               <div className="border-b-4 border-violet-600 pb-4 mb-6">
-                <h1 className="text-2xl sm:text-3xl font-black text-violet-700 uppercase">SMVS Purchase Report</h1>
-                <p className="text-gray-500 text-xs mt-1 font-bold uppercase tracking-[0.2em]">દુકાન માંથી ખરીદેલ માલ</p>
+                <h1 className="text-2xl sm:text-3xl font-black text-violet-700 uppercase">Purchase Report</h1>
               </div>
 
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 text-sm mb-6 bg-gray-50 p-4 sm:p-5 rounded-2xl border border-gray-100">
@@ -3620,14 +3618,7 @@ function SingleOrderView({ orderId, onBack }) {
   const handleDownload = async () => {
     setPdfLoading(true);
     try {
-      const blob = await generatePDFBlobReliable(order);
-      const link = document.createElement('a');
-      link.href = URL.createObjectURL(blob);
-      link.download = `${getSmartFileName(order)}.pdf`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(link.href);
+      await saveBlobFromProducer(() => generatePDFBlobReliable(order), `${getSmartFileName(order)}.pdf`);
     } catch (err) { alert("Download Error: " + err.message); }
     setPdfLoading(false);
   };
@@ -3683,7 +3674,7 @@ function SingleOrderView({ orderId, onBack }) {
               <p className="font-black text-white uppercase text-base sm:text-lg">{order.center}</p>
             </div>
             <div className="bg-[#252525] p-4 sm:p-5 rounded-2xl sm:rounded-3xl border border-white/5">
-              <p className="text-[10px] text-gray-500 font-bold uppercase mb-1">Chalan</p>
+              <p className="text-[10px] text-gray-500 font-bold uppercase mb-1">Challan No.</p>
               <p className="font-black text-orange-500 text-base sm:text-lg">#{order.chalanNo}</p>
             </div>
           </div>
@@ -3724,14 +3715,7 @@ function SingleSendOrderView({ orderId, onBack }) {
   const handleDownload = async () => {
     setPdfLoading(true);
     try {
-      const blob = await generateSendPDFBlobReliable(order);
-      const link = document.createElement('a');
-      link.href = URL.createObjectURL(blob);
-      link.download = getSendFileName(order);
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(link.href);
+      await saveBlobFromProducer(() => generateSendPDFBlobReliable(order), getSendFileName(order));
     } catch (err) { alert("Download Error: " + err.message); }
     setPdfLoading(false);
   };
@@ -3769,7 +3753,7 @@ function SingleSendOrderView({ orderId, onBack }) {
         <div className="bg-gradient-to-r from-blue-500 to-blue-600 p-5 sm:p-6 text-white flex justify-between items-center">
           <div>
             <h2 className="text-lg sm:text-xl font-extrabold uppercase tracking-tight">Material Dispatch</h2>
-            <p className="text-blue-100 text-xs mt-0.5">SMVS Material Dispatch Chalan</p>
+            <p className="text-blue-100 text-xs mt-0.5">Material dispatch record</p>
           </div>
           <motion.button
             whileHover={{ scale: 1.1 }}
@@ -3787,7 +3771,7 @@ function SingleSendOrderView({ orderId, onBack }) {
               <p className="font-black text-white uppercase text-base sm:text-lg">{order.fromCenter}</p>
             </div>
             <div className="bg-[#252525] p-4 sm:p-5 rounded-2xl sm:rounded-3xl border border-white/5">
-              <p className="text-[10px] text-gray-500 font-bold uppercase mb-1">Chalan</p>
+              <p className="text-[10px] text-gray-500 font-bold uppercase mb-1">Challan No.</p>
               <p className="font-black text-blue-400 text-base sm:text-lg">#{order.chalanNo}</p>
             </div>
           </div>
@@ -3845,14 +3829,7 @@ function SinglePurchaseView({ purchaseId, onBack }) {
     if (!purchase) return;
     setPdfLoading(true);
     try {
-      const blob = await generatePurchasePDFBlob(purchase);
-      const link = document.createElement('a');
-      link.href = URL.createObjectURL(blob);
-      link.download = getPurchaseFileName(purchase);
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(link.href);
+      await saveBlobFromProducer(() => generatePurchasePDFBlob(purchase), getPurchaseFileName(purchase));
     } catch (err) {
       alert(`Download Error: ${err.message}`);
     }
@@ -3969,14 +3946,7 @@ function SingleReportView({ reportId, onBack }) {
     if (!report) return;
     setPdfLoading(true);
     try {
-      const blob = await generateSummaryReportPDFBlob(report);
-      const link = document.createElement('a');
-      link.href = URL.createObjectURL(blob);
-      link.download = getReportFileName(report);
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(link.href);
+      await saveBlobFromProducer(() => generateSummaryReportPDFBlob(report), getReportFileName(report));
     } catch (err) {
       alert("Download Error: " + err.message);
     }
@@ -3996,13 +3966,7 @@ function SingleReportView({ reportId, onBack }) {
           text: `${report.title} - ${report.monthLabel}`,
         });
       } else {
-        const link = document.createElement('a');
-        link.href = URL.createObjectURL(blob);
-        link.download = getReportFileName(report);
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        URL.revokeObjectURL(link.href);
+        await saveBlobFromProducer(() => Promise.resolve(blob), getReportFileName(report));
         alert("Share not supported on this device. File downloaded instead.");
       }
     } catch (err) {
@@ -4030,8 +3994,6 @@ function SingleReportView({ reportId, onBack }) {
     );
   }
 
-  const reportTheme = getReportTheme();
-
   return (
     <motion.div
       initial={{ opacity: 0 }}
@@ -4046,8 +4008,7 @@ function SingleReportView({ reportId, onBack }) {
         >
           <div className="bg-gradient-to-r from-emerald-500 to-emerald-600 p-5 sm:p-6 text-white flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <h2 className="text-lg sm:text-xl font-extrabold uppercase tracking-tight">{reportTheme.title}</h2>
-              <p className="text-white/80 text-xs mt-0.5">{report.title}</p>
+              <h2 className="text-lg sm:text-xl font-extrabold tracking-tight">{report.title}</h2>
               <p className="text-white/90 text-sm font-bold mt-2">{report.centerLabel}</p>
             </div>
             <div className="flex gap-2 sm:gap-3">
