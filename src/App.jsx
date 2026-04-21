@@ -967,7 +967,7 @@ function AdminDashboard({ user }) {
               </div>
               <div className="relative group">
                 <User className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 group-focus-within:text-orange-500 transition-colors" size={18} />
-                <input placeholder="Sender Name..." className="w-full p-3 pl-10 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-orange-500/50 transition-all text-sm placeholder-gray-500"
+                <input placeholder="Requester Name..." className="w-full p-3 pl-10 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-orange-500/50 transition-all text-sm placeholder-gray-500"
                   value={filters.name} onChange={e => setFilters({...filters, name: e.target.value})} />
               </div>
             </div>
@@ -1453,7 +1453,7 @@ function AdminDashboard({ user }) {
                   <PreviewInfoCard label="Center Name" value={previewOrder.center} />
                   <PreviewInfoCard label="Challan No." value={`#${previewOrder.chalanNo}`} />
                   <PreviewInfoCard label="Order Date" value={formatDisplayDate(previewOrder.date)} />
-                  <PreviewInfoCard label="Sender" value={previewOrder.senderName || '-'} />
+                  <PreviewInfoCard label="Requester" value={previewOrder.senderName || '-'} />
                   <PreviewInfoCard label="Post" value={previewOrder.post || '-'} />
                   <PreviewInfoCard label="Mobile Number" value={previewOrder.mobileNumber || '-'} />
                   <PreviewInfoCard label="Global ID" value={previewOrder.globalId || '-'} />
@@ -2708,7 +2708,7 @@ function UserHub({ user }) {
         className="text-center mb-10 sm:mb-14"
       >
         <h2 className="text-2xl sm:text-3xl md:text-4xl font-black text-white uppercase tracking-tight mb-3">
-          Jai Swaminarayan,{' '}
+          Jay Swaminarayan,{' '}
           <span className="text-transparent bg-clip-text bg-gradient-to-r from-orange-400 to-orange-600">{user.username}</span>
         </h2>
         <p className="text-gray-500 text-sm sm:text-base">Shu karavu chhe? Niche thi option select karo.</p>
@@ -2759,10 +2759,10 @@ function UserHub({ user }) {
               <Send size={28} className="text-white" />
             </div>
             <h3 className="text-lg sm:text-xl font-black text-white tracking-tight mb-2 group-hover:text-blue-400 transition-colors">
-              વસ્તુ મોકલવા માટે
+              સેન્ટરમાંથી વસ્તુ મુખ્ય કોઠારમાં મોકલવા માટે
             </h3>
             <p className="text-[11px] sm:text-sm text-gray-500 leading-relaxed mb-5">
-              આપના સેન્ટરમાંથી વસ્તુ મુખ્ય કોઠાર, સ્વામિનારાયણ ધામ મોકલવા માટે અહીં ક્લિક કરશો.
+              આપના સેન્ટરમાંથી વસ્તુ મુખ્ય કોઠારમાં મોકલવા માટે અહીં ક્લિક કરો.
             </p>
             <div className="inline-flex items-center gap-2 text-blue-500 font-bold text-xs sm:text-sm tracking-wider bg-blue-500/10 px-4 py-2 rounded-xl border border-blue-500/20">
               અહીં ક્લિક કરો <ArrowLeft size={14} className="rotate-180" />
@@ -3254,10 +3254,10 @@ function UserDashboard({ user, onBack = null }) {
               </div>
             )}
             <div className="col-span-1 sm:col-span-2">
-              <label className="text-[10px] text-gray-500 font-bold uppercase block mb-1">Sender Name *</label>
+              <label className="text-[10px] text-gray-500 font-bold uppercase block mb-1">Requester Name *</label>
               <input
                 className="w-full p-3 sm:p-3.5 bg-[#252525] border border-white/10 rounded-xl sm:rounded-2xl text-white outline-none focus:border-orange-500/50 transition-all text-sm"
-                placeholder="મોકલનારનું નામ"
+                placeholder="માલ મંગાવનારનું નામ"
                 value={formData.senderName}
                 onChange={e => setFormData({ ...formData, senderName: e.target.value })}
                 required
@@ -3429,7 +3429,7 @@ function UserDashboard({ user, onBack = null }) {
             onClick={() => {
               if (!formData.center) return alert("Center select karo!");
               if (formData.center === 'Other' && !formData.centerOther.trim()) return alert("Center name likho!");
-              if (!formData.senderName || !formData.mobileNumber) return alert("Sender Name ane Mobile Number fill karo!");
+              if (!formData.senderName || !formData.mobileNumber) return alert("Requester Name ane Mobile Number fill karo!");
               if (!isDigitsOnly(formData.globalId)) return alert("Global ID ma only number allowed.");
               if (!isValidEmail(formData.email)) return alert("Valid email fill karo!");
               if (cart.length === 0) return alert("Add at least one item!");
@@ -3781,7 +3781,7 @@ function SingleSendOrderView({ orderId, onBack }) {
               <p className="font-bold text-white text-sm">{(order.date || '').split('-').reverse().join('-')}</p>
             </div>
             <div className="bg-[#252525] p-4 sm:p-5 rounded-2xl sm:rounded-3xl border border-white/5">
-              <p className="text-[10px] text-gray-500 font-bold uppercase mb-1">Sender</p>
+              <p className="text-[10px] text-gray-500 font-bold uppercase mb-1">Requester</p>
               <p className="font-bold text-white text-sm">{order.senderName || '-'}</p>
             </div>
           </div>
