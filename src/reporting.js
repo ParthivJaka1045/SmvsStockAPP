@@ -1,4 +1,4 @@
-import { categories } from './data';
+import { getFallbackCatalogItems } from './itemCatalog';
 
 const isLegacyStockReportTitle = (title) => /SMVS/i.test(title) || /MONTHLY STOCK REPORT/i.test(title);
 
@@ -61,6 +61,17 @@ const ensureDateInMonth = (monthValue, selectedDate) => {
 };
 
 const getMonthStartDate = (monthValue) => `${monthValue}-01`;
+
+const getRangeStartDate = (fromMonth, monthFallback) => {
+  const normalized = getNormalizedMonthValue(fromMonth || monthFallback || new Date());
+  return `${normalized}-01`;
+};
+
+const getRangeEndDate = (toMonth, monthFallback, selectedDate) => {
+  if (selectedDate && /^\d{4}-\d{2}-\d{2}$/.test(selectedDate)) return selectedDate;
+  const normalized = getNormalizedMonthValue(toMonth || monthFallback || new Date());
+  return getLastDateOfMonth(normalized);
+};
 
 const getNormalizedMonthValue = (value) => {
   if (typeof value === 'string' && /^\d{4}-\d{2}$/.test(value)) return value;
@@ -281,6 +292,8 @@ export const buildSummaryReport = ({
   sendOrders = [],
   purchases = [],
   month = '',
+  fromMonth = '',
+  toMonth = '',
   selectedDate = '',
   createdBy = 'Admin',
   scope = 'all',
@@ -289,22 +302,35 @@ export const buildSummaryReport = ({
 }) => {
   const normalizedReportPeriod = reportPeriod === 'yearly' ? 'yearly' : 'monthly';
   const normalizedMonth = getNormalizedMonthValue(month || selectedDate || new Date());
+  const normalizedFromMonth = getNormalizedMonthValue(fromMonth || normalizedMonth);
+  const normalizedToMonth = getNormalizedMonthValue(toMonth || normalizedMonth);
+  const useMonthRange = normalizedReportPeriod === 'monthly' && normalizedFromMonth <= normalizedToMonth;
   const normalizedSelectedDate =
     normalizedReportPeriod === 'yearly'
       ? ensureDateInCalendarYear(normalizedMonth, selectedDate)
-      : ensureDateInMonth(normalizedMonth, selectedDate);
+      : (
+          useMonthRange
+            ? getRangeEndDate(normalizedToMonth, normalizedMonth, selectedDate)
+            : ensureDateInMonth(normalizedMonth, selectedDate)
+        );
   const monthLabel =
     normalizedReportPeriod === 'yearly'
       ? formatYearLabel(normalizedMonth)
-      : formatMonthLabel(normalizedMonth);
+      : (
+          useMonthRange && normalizedFromMonth !== normalizedToMonth
+            ? `${formatMonthLabel(normalizedFromMonth)} to ${formatMonthLabel(normalizedToMonth)}`
+            : formatMonthLabel(normalizedMonth)
+        );
   const normalizedScope = scope === 'center' ? 'center' : 'all';
   const normalizedCenter = (center || '').toString().trim();
   const rowMap = new Map();
+  const rangeStartDate = useMonthRange ? getRangeStartDate(normalizedFromMonth, normalizedMonth) : getMonthStartDate(normalizedMonth);
+  const rangeEndDate = normalizedSelectedDate;
 
   const dateInRange = (value) =>
     normalizedReportPeriod === 'yearly'
       ? isDateWithinSelectedYear(value, normalizedMonth, normalizedSelectedDate)
-      : isDateWithinSelectedMonth(value, normalizedMonth, normalizedSelectedDate);
+      : isDateWithinSelectedMonth(value, rangeStartDate.slice(0, 7), rangeEndDate);
 
   orders
     .filter((order) =>
@@ -349,12 +375,17 @@ export const buildSummaryReport = ({
   return hydrateReport({
     type: 'monthly-stock-report',
     month: normalizedMonth,
+    fromMonth: normalizedFromMonth,
+    toMonth: normalizedToMonth,
     monthLabel,
     selectedDate: normalizedSelectedDate,
     scope: normalizedScope,
     center: normalizedCenter,
     centerLabel: normalizedScope === 'center' && normalizedCenter ? normalizedCenter : 'All Centers / Full Report',
-    rangeLabel: getRangeLabel(normalizedSelectedDate, normalizedMonth, normalizedReportPeriod),
+    rangeLabel:
+      normalizedReportPeriod === 'monthly' && useMonthRange
+        ? `From ${formatDisplayDate(rangeStartDate)} to ${formatDisplayDate(rangeEndDate)}`
+        : getRangeLabel(normalizedSelectedDate, normalizedMonth, normalizedReportPeriod),
     reportPeriod: normalizedReportPeriod,
     title: deriveStockReportTitle({ reportPeriod: normalizedReportPeriod }),
     createdBy,
@@ -392,5 +423,5 @@ export const getReportTheme = (reportPeriod = 'monthly') => ({
 });
 
 export const getReportMasterItems = () => (
-  Object.values(categories).flat().map((item) => item.name)
+  getFallbackCatalogItems().map((item) => item.name)
 );

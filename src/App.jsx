@@ -1,8 +1,20 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { db } from './firebase'; 
 import { collection, addDoc, getDocs, getDoc, query, orderBy, doc, where, updateDoc, deleteDoc } from 'firebase/firestore'; 
-import { categories, centerData } from './data';
+import { centerData } from './data';
+import {
+  buildItemNameKey,
+  DEFAULT_ITEM_UNITS,
+  ensureCatalogItems,
+  filterGroupedCatalogItems,
+  getCatalogCategoryOptions,
+  getFallbackCatalogItems,
+  ITEM_COLLECTION,
+  ITEM_CATEGORY_COLLECTION,
+  matchesSearchText,
+  normalizeItemName,
+} from './itemCatalog';
 import emailjs from 'emailjs-com'; 
 import {
   buildSummaryReport,
@@ -147,6 +159,7 @@ function App() {
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [catalogItems, setCatalogItems] = useState(getFallbackCatalogItems);
   const directOrderId = initialRoute.directOrderId;
   const directSendOrderId = initialRoute.directSendOrderId;
   const directReportId = initialRoute.directReportId;
@@ -154,6 +167,26 @@ function App() {
 
   useEffect(() => {
     emailjs.init("m14CzkMDHuJeLH0VK"); 
+  }, []);
+
+  const refreshCatalog = useCallback(async () => {
+    try {
+      const snapshot = await getDocs(query(collection(db, ITEM_COLLECTION), orderBy('nameKey', 'asc')));
+      const firebaseItems = snapshot.docs.map((docSnap) => ({
+        id: docSnap.id,
+        ...docSnap.data(),
+        source: 'firebase',
+      }));
+      const normalizedItems = ensureCatalogItems(firebaseItems.filter((item) => item.is_active !== false));
+      setCatalogItems(normalizedItems.length > 0 ? normalizedItems : getFallbackCatalogItems());
+    } catch (error) {
+      console.warn('Item catalog fetch failed:', error);
+      setCatalogItems(getFallbackCatalogItems());
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshCatalog();
   }, []);
 
   const handleLogin = async (e) => {
@@ -334,8 +367,8 @@ function App() {
         )}
       </AnimatePresence>
 
-      {view === 'dashboard' && <UserHub user={user} />}
-      {view === 'admin' && <AdminDashboard user={user} />}
+      {view === 'dashboard' && <UserHub user={user} catalogItems={catalogItems} />}
+      {view === 'admin' && <AdminDashboard user={user} catalogItems={catalogItems} refreshCatalog={refreshCatalog} />}
     </div>
   );
 }
@@ -369,6 +402,57 @@ const calculateTotals = (items) => {
 const calculateKgTotals = (items) => ({
   totalItems: items.length,
   totalKg: items.reduce((sum, item) => sum + (parseFloat(item.kg) || 0), 0),
+});
+
+const createEmptyItemRow = (id) => ({
+  id,
+  itemName: '',
+  kg: '',
+});
+
+const getNextRowId = (rows = []) => Math.max(0, ...rows.map((row) => row.id || 0)) + 1;
+
+const createRowsFromItems = (items = [], minRows = 1) => {
+  const filledRows = items.map((item, index) => ({
+    id: index + 1,
+    itemName: item.itemName || item.name || '',
+    kg: item.kg || item.qty || '',
+  }));
+
+  const totalRows = Math.max(minRows, filledRows.length || 0);
+  const rows = [...filledRows];
+  for (let index = rows.length; index < totalRows; index += 1) {
+    rows.push(createEmptyItemRow(index + 1));
+  }
+  return rows;
+};
+
+const mergeCatalogItemsWithExisting = (catalogItems = [], existingItems = []) => {
+  const extras = existingItems
+    .map((item, index) => {
+      const name = (item.itemName || item.name || '').trim();
+      if (!name) return null;
+      return {
+        id: item.id || `existing-${index}-${buildItemNameKey(name)}`,
+        name,
+        category: item.category || 'અન્ય',
+        unit: item.unit || 'કિલો',
+        is_active: true,
+        source: 'existing',
+      };
+    })
+    .filter(Boolean);
+
+  return ensureCatalogItems([...catalogItems, ...extras]);
+};
+
+const createCatalogItemPayload = ({ name, category, unit, is_active = true }) => ({
+  name: name.trim(),
+  nameKey: buildItemNameKey(name),
+  category: category.trim(),
+  unit: (unit || 'કિલો').toString().trim() || 'કિલો',
+  is_active,
+  updatedAt: new Date(),
 });
 
 const getSmartFileName = (order) => {
@@ -411,8 +495,11 @@ const createDefaultReportForm = () => {
   const month = getMonthInputValue();
   return {
     month,
+    fromMonth: month,
+    toMonth: month,
     selectedDate: getDateWithinMonth(month, new Date().toISOString().split('T')[0]),
     reportPeriod: 'monthly',
+    reportMode: 'single',
     scope: 'all',
     center: '',
     centerOther: '',
@@ -511,8 +598,69 @@ function ReportPreviewContent({ report }) {
   );
 }
 
+function ItemNameAutocompleteInput({
+  value,
+  onChange,
+  catalogItems,
+  excludedNameKeys = [],
+  onSelectItem,
+  accent = 'blue',
+  placeholder = 'Item name...',
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+  const excluded = new Set(excludedNameKeys);
+  const filteredItems = catalogItems
+    .filter((item) => !excluded.has(item.nameKey) || normalizeItemName(value) === item.nameKey)
+    .filter((item) => !value || matchesSearchText(item.name, value) || matchesSearchText(item.category, value))
+    .slice(0, 12);
+
+  const focusClasses = {
+    blue: 'focus:border-blue-500/50',
+    violet: 'focus:border-violet-500/50',
+  }[accent] || 'focus:border-blue-500/50';
+
+  return (
+    <div className="relative">
+      <input
+        className={`w-full p-2 bg-[#252525] border border-white/5 rounded-lg text-white outline-none text-sm transition-all placeholder-gray-600 ${focusClasses}`}
+        value={value}
+        placeholder={placeholder}
+        onFocus={() => setIsOpen(true)}
+        onBlur={() => window.setTimeout(() => setIsOpen(false), 120)}
+        onChange={(event) => onChange(event.target.value)}
+      />
+      {isOpen && (
+        <div className="absolute z-50 mt-1 w-full max-h-52 overflow-y-auto rounded-xl border border-white/10 bg-[#141414] shadow-2xl">
+          {filteredItems.length > 0 ? filteredItems.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              onMouseDown={(event) => {
+                event.preventDefault();
+                onSelectItem(item);
+                setIsOpen(false);
+              }}
+              className="flex w-full items-center justify-between border-b border-white/5 px-3 py-2 text-left hover:bg-white/5"
+            >
+              <div className="min-w-0">
+                <p className="truncate text-sm font-bold text-white">{item.name}</p>
+                <p className="text-[10px] uppercase tracking-wide text-gray-500">{item.category}</p>
+              </div>
+              <span className="ml-3 rounded-md border border-white/10 bg-white/5 px-2 py-1 text-[10px] font-bold uppercase text-gray-300">
+                {item.unit}
+              </span>
+            </button>
+          )) : (
+            <div className="px-3 py-3 text-xs text-gray-500">No matching items.</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // --- ADMIN DASHBOARD ---
-function AdminDashboard({ user }) {
+function AdminDashboard({ user, catalogItems, refreshCatalog }) {
   const [activeTab, setActiveTab] = useState('requests');
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -577,15 +725,15 @@ function AdminDashboard({ user }) {
 
   const filteredOrders = orders.filter(o => {
     const dateMatch = filters.date ? o.date === filters.date : true;
-    const centerMatch = filters.center ? o.center.toLowerCase().includes(filters.center.toLowerCase()) : true;
-    const nameMatch = filters.name ? ((o.senderName || '')).toLowerCase().includes(filters.name.toLowerCase()) : true;
+    const centerMatch = filters.center ? matchesSearchText(o.center, filters.center) : true;
+    const nameMatch = filters.name ? matchesSearchText(o.senderName, filters.name) : true;
     return dateMatch && centerMatch && nameMatch;
   });
 
   const filteredSendOrders = sendOrders.filter(o => {
     const dateMatch = sendFilters.date ? o.date === sendFilters.date : true;
-    const centerMatch = sendFilters.center ? (o.fromCenter || '').toLowerCase().includes(sendFilters.center.toLowerCase()) : true;
-    const nameMatch = sendFilters.name ? (o.senderName || '').toLowerCase().includes(sendFilters.name.toLowerCase()) : true;
+    const centerMatch = sendFilters.center ? matchesSearchText(o.fromCenter, sendFilters.center) : true;
+    const nameMatch = sendFilters.name ? matchesSearchText(o.senderName, sendFilters.name) : true;
     return dateMatch && centerMatch && nameMatch;
   });
 
@@ -758,8 +906,17 @@ function AdminDashboard({ user }) {
       alert('Entries are still loading. Please wait.');
       return;
     }
+    const isRangeMode = reportForm.reportPeriod === 'monthly' && reportForm.reportMode === 'range';
     if (!reportForm.month || !reportForm.selectedDate) {
       alert('Select month and selected date first.');
+      return;
+    }
+    if (isRangeMode && (!reportForm.fromMonth || !reportForm.toMonth)) {
+      alert('Select from month and to month first.');
+      return;
+    }
+    if (isRangeMode && reportForm.fromMonth > reportForm.toMonth) {
+      alert('From month cannot be after To month.');
       return;
     }
     const reportYear = reportForm.month.slice(0, 4);
@@ -768,8 +925,11 @@ function AdminDashboard({ user }) {
         alert('Selected date must fall in the chosen calendar year.');
         return;
       }
-    } else if (!reportForm.selectedDate.startsWith(reportForm.month)) {
+    } else if (!isRangeMode && !reportForm.selectedDate.startsWith(reportForm.month)) {
       alert('Selected date must be inside the selected month.');
+      return;
+    } else if (isRangeMode && reportForm.selectedDate < `${reportForm.fromMonth}-01`) {
+      alert('Selected date must be inside selected month range.');
       return;
     }
     if (reportForm.scope === 'center' && !reportForm.center) {
@@ -794,6 +954,8 @@ function AdminDashboard({ user }) {
         sendOrders,
         purchases,
         month: reportForm.month,
+        fromMonth: isRangeMode ? reportForm.fromMonth : reportForm.month,
+        toMonth: isRangeMode ? reportForm.toMonth : reportForm.month,
         selectedDate: reportForm.selectedDate,
         createdBy: user?.username || 'Admin',
         scope: reportForm.scope,
@@ -880,13 +1042,14 @@ function AdminDashboard({ user }) {
     } catch (err) { alert("Delete Error: " + err.message); }
   };
 
-  if (editOrder) return <EditOrderScreen order={editOrder} onBack={() => { setEditOrder(null); fetchOrders(); }} />;
-  if (editSendOrder) return <EditSendOrderScreen order={editSendOrder} onBack={() => { setEditSendOrder(null); fetchSendOrders(); }} />;
+  if (editOrder) return <EditOrderScreen order={editOrder} onBack={() => { setEditOrder(null); fetchOrders(); }} catalogItems={catalogItems} />;
+  if (editSendOrder) return <EditSendOrderScreen order={editSendOrder} onBack={() => { setEditSendOrder(null); fetchSendOrders(); }} catalogItems={catalogItems} />;
 
   const isRequests = activeTab === 'requests';
   const isSends = activeTab === 'sends';
   const isReports = activeTab === 'reports';
   const isPurchases = activeTab === 'purchases';
+  const isItems = activeTab === 'items';
 
   return (
     <>
@@ -896,11 +1059,11 @@ function AdminDashboard({ user }) {
       className="p-3 sm:p-6 max-w-7xl mx-auto pb-20"
     >
       {/* Tab Switcher */}
-      <div className="grid grid-cols-1 gap-2 mb-6 sm:grid-cols-4">
+      <div className="grid grid-cols-1 gap-2 mb-6 sm:grid-cols-2 lg:grid-cols-6">
         <motion.button
           whileTap={{ scale: 0.97 }}
           onClick={() => setActiveTab('requests')}
-          className={`flex-1 py-3 rounded-2xl font-bold text-sm uppercase tracking-wide flex items-center justify-center gap-2 transition-all border ${isRequests ? 'bg-gradient-to-r from-orange-500 to-orange-600 text-white border-transparent shadow-lg shadow-orange-500/20' : 'bg-[#1e1e1e] text-gray-400 border-white/10 hover:border-orange-500/30'}`}
+          className={`py-3 rounded-2xl font-bold text-sm uppercase tracking-wide flex items-center justify-center gap-2 transition-all border lg:col-span-2 ${isRequests ? 'bg-gradient-to-r from-orange-500 to-orange-600 text-white border-transparent shadow-lg shadow-orange-500/20' : 'bg-[#1e1e1e] text-gray-400 border-white/10 hover:border-orange-500/30'}`}
         >
           <ShoppingCart size={16} /> કોઠારમાંથી વસ્તુ મંગાવેલ હોય
           <span className={`text-[10px] px-2 py-0.5 rounded-full font-black ${isRequests ? 'bg-white/20' : 'bg-white/10'}`}>{orders.length}</span>
@@ -908,7 +1071,7 @@ function AdminDashboard({ user }) {
         <motion.button
           whileTap={{ scale: 0.97 }}
           onClick={() => setActiveTab('sends')}
-          className={`py-3 rounded-2xl font-bold text-sm uppercase tracking-wide flex items-center justify-center gap-2 transition-all border ${isSends ? 'bg-gradient-to-r from-blue-500 to-blue-600 text-white border-transparent shadow-lg shadow-blue-500/20' : 'bg-[#1e1e1e] text-gray-400 border-white/10 hover:border-blue-500/30'}`}
+          className={`py-3 rounded-2xl font-bold text-sm uppercase tracking-wide flex items-center justify-center gap-2 transition-all border lg:col-span-2 ${isSends ? 'bg-gradient-to-r from-blue-500 to-blue-600 text-white border-transparent shadow-lg shadow-blue-500/20' : 'bg-[#1e1e1e] text-gray-400 border-white/10 hover:border-blue-500/30'}`}
         >
           <Send size={16} /> વસ્તુ મોકલેલ હોય
           <span className={`text-[10px] px-2 py-0.5 rounded-full font-black ${isSends ? 'bg-white/20' : 'bg-white/10'}`}>{sendOrders.length}</span>
@@ -916,7 +1079,7 @@ function AdminDashboard({ user }) {
         <motion.button
           whileTap={{ scale: 0.97 }}
           onClick={() => setActiveTab('reports')}
-          className={`py-3 rounded-2xl font-bold text-sm uppercase tracking-wide flex items-center justify-center gap-2 transition-all border ${isReports ? 'bg-gradient-to-r from-emerald-500 to-emerald-600 text-white border-transparent shadow-lg shadow-emerald-500/20' : 'bg-[#1e1e1e] text-gray-400 border-white/10 hover:border-emerald-500/30'}`}
+          className={`py-3 rounded-2xl font-bold text-sm uppercase tracking-wide flex items-center justify-center gap-2 transition-all border lg:col-span-2 ${isReports ? 'bg-gradient-to-r from-emerald-500 to-emerald-600 text-white border-transparent shadow-lg shadow-emerald-500/20' : 'bg-[#1e1e1e] text-gray-400 border-white/10 hover:border-emerald-500/30'}`}
         >
           <FileText size={16} /> Reports
           <span className={`text-[10px] px-2 py-0.5 rounded-full font-black ${isReports ? 'bg-white/20' : 'bg-white/10'}`}>{reports.length}</span>
@@ -924,9 +1087,17 @@ function AdminDashboard({ user }) {
         <motion.button
           whileTap={{ scale: 0.97 }}
           onClick={() => setActiveTab('purchases')}
-          className={`py-3 rounded-2xl font-bold text-sm uppercase tracking-wide flex items-center justify-center gap-2 transition-all border ${isPurchases ? 'bg-gradient-to-r from-violet-500 to-fuchsia-600 text-white border-transparent shadow-lg shadow-violet-500/20' : 'bg-[#1e1e1e] text-gray-400 border-white/10 hover:border-violet-500/30'}`}
+          className={`py-3 rounded-2xl font-bold text-sm uppercase tracking-wide flex items-center justify-center gap-2 transition-all border lg:col-span-3 ${isPurchases ? 'bg-gradient-to-r from-violet-500 to-fuchsia-600 text-white border-transparent shadow-lg shadow-violet-500/20' : 'bg-[#1e1e1e] text-gray-400 border-white/10 hover:border-violet-500/30'}`}
         >
           <Box size={16} /> Purchases
+        </motion.button>
+        <motion.button
+          whileTap={{ scale: 0.97 }}
+          onClick={() => setActiveTab('items')}
+          className={`py-3 rounded-2xl font-bold text-sm uppercase tracking-wide flex items-center justify-center gap-2 transition-all border lg:col-span-3 ${isItems ? 'bg-gradient-to-r from-amber-500 to-yellow-600 text-white border-transparent shadow-lg shadow-amber-500/20' : 'bg-[#1e1e1e] text-gray-400 border-white/10 hover:border-amber-500/30'}`}
+        >
+          <Package size={16} /> Items
+          <span className={`text-[10px] px-2 py-0.5 rounded-full font-black ${isItems ? 'bg-white/20' : 'bg-white/10'}`}>{catalogItems.length}</span>
         </motion.button>
       </div>
 
@@ -1228,6 +1399,7 @@ function AdminDashboard({ user }) {
                     setReportForm((prev) => ({
                       ...prev,
                       reportPeriod: next,
+                      reportMode: next === 'yearly' ? 'single' : prev.reportMode,
                       selectedDate:
                         next === 'yearly'
                           ? getDateWithinYear(prev.month, prev.selectedDate)
@@ -1239,6 +1411,32 @@ function AdminDashboard({ user }) {
                   <option value="yearly">Yearly (Jan 1 through selected date)</option>
                 </select>
               </div>
+
+              {reportForm.reportPeriod === 'monthly' && (
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Monthly Mode</label>
+                  <select
+                    className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-emerald-500/50 transition-all text-sm"
+                    value={reportForm.reportMode}
+                    onChange={(e) => {
+                      const nextMode = e.target.value;
+                      setReportForm((prev) => ({
+                        ...prev,
+                        reportMode: nextMode,
+                        fromMonth: nextMode === 'range' ? (prev.fromMonth || prev.month) : prev.month,
+                        toMonth: nextMode === 'range' ? (prev.toMonth || prev.month) : prev.month,
+                        selectedDate:
+                          nextMode === 'range'
+                            ? getLastDateForMonth(prev.toMonth || prev.month)
+                            : getDateWithinMonth(prev.month, prev.selectedDate),
+                      }));
+                    }}
+                  >
+                    <option value="single">Single month</option>
+                    <option value="range">Multiple months range</option>
+                  </select>
+                </div>
+              )}
 
               {reportForm.scope === 'center' && (
                 <div>
@@ -1269,7 +1467,9 @@ function AdminDashboard({ user }) {
               )}
 
               <div>
-                <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Month</label>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">
+                  {reportForm.reportPeriod === 'monthly' && reportForm.reportMode === 'range' ? 'Anchor Month' : 'Month'}
+                </label>
                 <input
                   type="month"
                   className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-emerald-500/50 transition-all text-sm"
@@ -1279,6 +1479,8 @@ function AdminDashboard({ user }) {
                     setReportForm((prev) => ({
                       ...prev,
                       month,
+                      fromMonth: prev.reportMode === 'range' ? prev.fromMonth : month,
+                      toMonth: prev.reportMode === 'range' ? prev.toMonth : month,
                       selectedDate:
                         prev.reportPeriod === 'yearly'
                           ? getDateWithinYear(month, prev.selectedDate)
@@ -1288,12 +1490,48 @@ function AdminDashboard({ user }) {
                 />
               </div>
 
+              {reportForm.reportPeriod === 'monthly' && reportForm.reportMode === 'range' && (
+                <>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">From Month</label>
+                    <input
+                      type="month"
+                      className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-emerald-500/50 transition-all text-sm"
+                      value={reportForm.fromMonth}
+                      onChange={e => setReportForm(prev => ({ ...prev, fromMonth: e.target.value }))}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">To Month</label>
+                    <input
+                      type="month"
+                      min={reportForm.fromMonth}
+                      className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-emerald-500/50 transition-all text-sm"
+                      value={reportForm.toMonth}
+                      onChange={e => setReportForm(prev => ({
+                        ...prev,
+                        toMonth: e.target.value,
+                        selectedDate: getLastDateForMonth(e.target.value),
+                      }))}
+                    />
+                  </div>
+                </>
+              )}
+
               <div>
                 <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Selected Date</label>
                 <input
                   type="date"
-                  min={reportForm.reportPeriod === 'yearly' ? `${reportForm.month.slice(0, 4)}-01-01` : `${reportForm.month}-01`}
-                  max={reportForm.reportPeriod === 'yearly' ? getLastDateForCalendarYear(reportForm.month) : getLastDateForMonth(reportForm.month)}
+                  min={
+                    reportForm.reportPeriod === 'yearly'
+                      ? `${reportForm.month.slice(0, 4)}-01-01`
+                      : (reportForm.reportMode === 'range' ? `${reportForm.fromMonth}-01` : `${reportForm.month}-01`)
+                  }
+                  max={
+                    reportForm.reportPeriod === 'yearly'
+                      ? getLastDateForCalendarYear(reportForm.month)
+                      : (reportForm.reportMode === 'range' ? getLastDateForMonth(reportForm.toMonth) : getLastDateForMonth(reportForm.month))
+                  }
                   className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-emerald-500/50 transition-all text-sm"
                   value={reportForm.selectedDate}
                   onChange={e => setReportForm(prev => ({ ...prev, selectedDate: e.target.value }))}
@@ -1304,7 +1542,9 @@ function AdminDashboard({ user }) {
             <div className="mt-4 rounded-2xl border border-emerald-500/20 bg-emerald-500/10 p-4">
               <p className="text-[11px] font-bold uppercase tracking-widest text-emerald-300">Dynamic range</p>
               <p className="mt-2 text-lg font-black text-white">
-                {getRangeLabel(reportForm.selectedDate, reportForm.month, reportForm.reportPeriod)}
+                {reportForm.reportPeriod === 'monthly' && reportForm.reportMode === 'range'
+                  ? `From ${formatDisplayDate(`${reportForm.fromMonth}-01`)} to ${formatDisplayDate(reportForm.selectedDate)}`
+                  : getRangeLabel(reportForm.selectedDate, reportForm.month, reportForm.reportPeriod)}
               </p>
               <p className="mt-2 text-sm font-bold text-emerald-100">{getCenterScopeLabel(reportForm.scope, getResolvedCenterValue(reportForm.center, reportForm.centerOther))}</p>
               <p className="mt-2 text-xs text-emerald-100/70">
@@ -1427,8 +1667,12 @@ function AdminDashboard({ user }) {
         </>
       )}
 
+      {isItems && (
+        <ItemAdminPanel user={user} catalogItems={catalogItems} refreshCatalog={refreshCatalog} />
+      )}
+
       {isPurchases && (
-        <PurchaseAdminPanel user={user} />
+        <PurchaseAdminPanel user={user} catalogItems={catalogItems} />
       )}
 
       {/* Request Preview Modal */}
@@ -1701,20 +1945,418 @@ function AdminDashboard({ user }) {
   );
 }
 
+const createDefaultItemForm = () => ({
+  name: '',
+  category: '',
+  unit: DEFAULT_ITEM_UNITS[0],
+});
+
+function ItemAdminPanel({ user, catalogItems, refreshCatalog }) {
+  const [itemForm, setItemForm] = useState(createDefaultItemForm);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [deletingId, setDeletingId] = useState(null);
+  const [editingId, setEditingId] = useState(null);
+  const [importingDefaults, setImportingDefaults] = useState(false);
+  const [customCategories, setCustomCategories] = useState([]);
+  const [newCategory, setNewCategory] = useState('');
+  const [inactiveItems, setInactiveItems] = useState([]);
+  const [showInactiveModal, setShowInactiveModal] = useState(false);
+  const [inactiveSearch, setInactiveSearch] = useState('');
+  const [reactivatingId, setReactivatingId] = useState(null);
+
+  const categoryOptions = Array.from(new Set([
+    ...getCatalogCategoryOptions(catalogItems),
+    ...customCategories,
+  ])).sort((left, right) => left.localeCompare(right, 'gu'));
+  const hasFirebaseItems = catalogItems.some((item) => item.source === 'firebase');
+  const visibleItems = searchQuery
+    ? catalogItems.filter((item) => (
+        matchesSearchText(item.name, searchQuery) || matchesSearchText(item.category, searchQuery)
+      ))
+    : catalogItems;
+  const visibleInactiveItems = inactiveSearch
+    ? inactiveItems.filter((item) => (
+        matchesSearchText(item.name, inactiveSearch) || matchesSearchText(item.category, inactiveSearch)
+      ))
+    : inactiveItems;
+
+  const fetchInactiveItems = useCallback(async () => {
+    try {
+      const snapshot = await getDocs(collection(db, ITEM_COLLECTION));
+      const docs = snapshot.docs
+        .map((docSnap) => ({ id: docSnap.id, ...docSnap.data() }))
+        .filter((item) => item.is_active === false);
+      setInactiveItems(ensureCatalogItems(docs));
+    } catch (error) {
+      console.warn('Inactive items fetch failed:', error);
+      setInactiveItems([]);
+    }
+  }, []);
+
+  const fetchCategoryOptions = useCallback(async () => {
+    try {
+      const snapshot = await getDocs(collection(db, ITEM_CATEGORY_COLLECTION));
+      const values = snapshot.docs
+        .map((docSnap) => (docSnap.data()?.name || '').toString().trim())
+        .filter(Boolean);
+      setCustomCategories(Array.from(new Set(values)));
+    } catch (error) {
+      console.warn('Category fetch failed:', error);
+      setCustomCategories([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchInactiveItems();
+    fetchCategoryOptions();
+  }, [fetchCategoryOptions, fetchInactiveItems]);
+
+  const resetForm = () => {
+    setItemForm(createDefaultItemForm());
+    setEditingId(null);
+  };
+
+  const handleSubmit = async () => {
+    const payload = createCatalogItemPayload({ ...itemForm, unit: 'કિલો' });
+    if (!payload.name) return alert('Item name is required.');
+    if (!payload.category) return alert('Category is required.');
+
+    const duplicate = catalogItems.find((item) => item.nameKey === payload.nameKey && item.id !== editingId);
+    if (duplicate) return alert('This item already exists in the master list.');
+
+    setSubmitting(true);
+    try {
+      if (editingId && !editingId.startsWith('static-')) {
+        await updateDoc(doc(db, ITEM_COLLECTION, editingId), payload);
+      } else {
+        await addDoc(collection(db, ITEM_COLLECTION), {
+          ...payload,
+          createdAt: new Date(),
+        });
+      }
+      await refreshCatalog();
+      await fetchInactiveItems();
+      resetForm();
+    } catch (error) {
+      alert(`Item save error: ${error.message}`);
+    }
+    setSubmitting(false);
+  };
+
+  const handleEdit = (item) => {
+    setEditingId(item.id);
+    setItemForm({
+      name: item.name,
+      category: item.category,
+      unit: item.unit,
+    });
+  };
+
+  const handleDelete = async (item) => {
+    if (!window.confirm(`Deactivate item "${item.name}"?`)) return;
+    setDeletingId(item.id);
+    try {
+      await updateDoc(doc(db, ITEM_COLLECTION, item.id), {
+        is_active: false,
+        updatedAt: new Date(),
+      });
+      await refreshCatalog();
+      await fetchInactiveItems();
+      if (editingId === item.id) resetForm();
+    } catch (error) {
+      alert(`Item delete error: ${error.message}`);
+    }
+    setDeletingId(null);
+  };
+
+  const handleImportDefaults = async () => {
+    setImportingDefaults(true);
+    try {
+      const fallbackItems = getFallbackCatalogItems();
+      // Seed the static catalog into Firestore once so every screen uses the same shared source.
+      await Promise.all(fallbackItems.map((item) => addDoc(collection(db, ITEM_COLLECTION), {
+        ...createCatalogItemPayload(item),
+        createdAt: new Date(),
+      })));
+      await refreshCatalog();
+      await fetchInactiveItems();
+    } catch (error) {
+      alert(`Default import error: ${error.message}`);
+    }
+    setImportingDefaults(false);
+  };
+
+  const handleAddCategory = async () => {
+    const value = newCategory.trim();
+    if (!value) return;
+    const exists = categoryOptions.some((item) => normalizeItemName(item) === normalizeItemName(value));
+    if (exists) {
+      setNewCategory('');
+      return;
+    }
+    try {
+      await addDoc(collection(db, ITEM_CATEGORY_COLLECTION), {
+        name: value,
+        createdAt: new Date(),
+      });
+      await fetchCategoryOptions();
+      setItemForm((prev) => ({ ...prev, category: value }));
+      setNewCategory('');
+    } catch (error) {
+      alert(`Category save error: ${error.message}`);
+    }
+  };
+
+  const handleReactivate = async (item) => {
+    setReactivatingId(item.id);
+    try {
+      await updateDoc(doc(db, ITEM_COLLECTION, item.id), {
+        is_active: true,
+        updatedAt: new Date(),
+      });
+      await refreshCatalog();
+      await fetchInactiveItems();
+    } catch (error) {
+      alert(`Item activate error: ${error.message}`);
+    }
+    setReactivatingId(null);
+  };
+
+  return (
+    <div className="grid grid-cols-1 gap-6 xl:grid-cols-[380px_minmax(0,1fr)]">
+      <motion.div initial={{ y: -20, opacity: 0 }} animate={{ y: 0, opacity: 1 }}
+        className="bg-gradient-to-b from-[#1e1e1e] to-[#181818] p-4 sm:p-6 rounded-2xl sm:rounded-3xl border border-white/5 shadow-xl">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <div className="flex items-center gap-2 text-amber-400 font-bold uppercase text-xs tracking-widest">
+              <Package size={16} /> Item Master
+            </div>
+            <h2 className="mt-2 text-xl sm:text-2xl font-black text-white">Shared Item Catalog</h2>
+            <p className="mt-2 text-sm text-gray-400">Admin can manage canonical items here so request, send, and purchase all use the same stock names.</p>
+          </div>
+          <button
+            type="button"
+            onClick={resetForm}
+            className="text-gray-400 hover:text-white flex items-center justify-center gap-1.5 text-xs font-bold uppercase transition-all bg-white/5 hover:bg-white/10 px-3 py-2 rounded-xl border border-white/10"
+          >
+            <Eraser size={14} /> Clear
+          </button>
+        </div>
+        <button
+          type="button"
+          onClick={() => {
+            setShowInactiveModal(true);
+            fetchInactiveItems();
+          }}
+          className="mt-3 inline-flex items-center gap-2 rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs font-bold uppercase text-red-300 hover:bg-red-500/20"
+        >
+          <Trash2 size={14} /> Deactive List
+        </button>
+
+        <div className="mt-6 space-y-4">
+          <div>
+            <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Item Name *</label>
+            <input
+              value={itemForm.name}
+              onChange={(e) => setItemForm((prev) => ({ ...prev, name: e.target.value }))}
+              placeholder="ઉદાહરણ: મગ"
+              className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-amber-500/50 transition-all text-sm"
+            />
+          </div>
+          <div>
+            <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Category *</label>
+            <input
+              list="item-category-options"
+              value={itemForm.category}
+              onChange={(e) => setItemForm((prev) => ({ ...prev, category: e.target.value }))}
+              placeholder="અનાજ / કઠોળ / મસાલા..."
+              className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-amber-500/50 transition-all text-sm"
+            />
+            <datalist id="item-category-options">
+              {categoryOptions.map((category) => <option key={category} value={category} />)}
+            </datalist>
+            <div className="mt-2 flex gap-2">
+              <input
+                value={newCategory}
+                onChange={(e) => setNewCategory(e.target.value)}
+                placeholder="New category add..."
+                className="flex-1 p-2.5 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-amber-500/50 text-xs"
+              />
+              <button
+                type="button"
+                onClick={handleAddCategory}
+                className="rounded-xl border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs font-bold uppercase text-amber-300 hover:bg-amber-500/20"
+              >
+                Add
+              </button>
+            </div>
+          </div>
+          <div>
+            <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Unit</label>
+            <div className="w-full rounded-xl border border-white/10 bg-[#202020] px-3 py-3 text-sm font-bold text-amber-300">
+              Kilogram (કિલો)
+            </div>
+          </div>
+        </div>
+
+        <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={handleSubmit}
+          disabled={submitting}
+          className="mt-5 w-full bg-gradient-to-r from-amber-500 to-yellow-600 text-white p-4 rounded-xl font-bold shadow-xl shadow-amber-500/20 flex items-center justify-center gap-2 text-sm sm:text-base disabled:opacity-50">
+          {submitting ? <Loader2 size={18} className="animate-spin" /> : <CheckCircle size={18} />}
+          {editingId ? 'Update Item' : 'Save Item'}
+        </motion.button>
+        {!hasFirebaseItems && (
+          <button
+            type="button"
+            onClick={handleImportDefaults}
+            disabled={importingDefaults}
+            className="mt-3 w-full rounded-xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm font-bold text-amber-300 transition-all hover:bg-amber-500/20 disabled:opacity-50"
+          >
+            {importingDefaults ? 'Importing Default Items...' : 'Import Default Item List To Firebase'}
+          </button>
+        )}
+        <p className="mt-3 text-xs text-gray-500">Logged in as {user?.username || 'Admin'}</p>
+      </motion.div>
+
+      <motion.div initial={{ y: 10, opacity: 0 }} animate={{ y: 0, opacity: 1 }}
+        className="bg-gradient-to-b from-[#1e1e1e] to-[#181818] p-4 sm:p-6 rounded-2xl sm:rounded-3xl border border-white/5 shadow-xl">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-center gap-2 text-amber-400 font-bold uppercase text-xs tracking-widest">
+            <Search size={16} /> Catalog Items
+          </div>
+          <button
+            type="button"
+            onClick={refreshCatalog}
+            className="text-gray-400 hover:text-amber-400 flex items-center justify-center gap-1.5 text-xs font-bold uppercase transition-all bg-white/5 hover:bg-amber-500/10 px-3 py-2 rounded-xl border border-white/10"
+          >
+            <RefreshCw size={14} /> Refresh
+          </button>
+        </div>
+        <div className="relative mt-5">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" size={16} />
+          <input
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search by item or category..."
+            className="w-full rounded-xl border border-white/10 bg-[#252525] py-3 pl-10 pr-3 text-sm text-white outline-none transition-all focus:border-amber-500/50"
+          />
+        </div>
+
+        <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-2">
+          {visibleItems.map((item) => (
+            <div key={item.id} className="rounded-2xl border border-white/5 bg-[#181818] p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="truncate text-base font-black text-white">{item.name}</p>
+                  <p className="mt-1 text-xs uppercase tracking-wide text-gray-500">{item.category}</p>
+                </div>
+                <span className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-2 py-1 text-[10px] font-bold uppercase text-amber-300">
+                  {item.unit}
+                </span>
+              </div>
+              <div className="mt-4 flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleEdit(item)}
+                  className="flex-1 rounded-xl border border-blue-500/20 bg-blue-500/10 px-3 py-2 text-xs font-bold uppercase text-blue-400 transition-all hover:bg-blue-500/20"
+                >
+                  Edit
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleDelete(item)}
+                  disabled={deletingId === item.id || item.source === 'static'}
+                  className="flex-1 rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs font-bold uppercase text-red-400 transition-all hover:bg-red-500/20 disabled:opacity-50"
+                >
+                  {deletingId === item.id ? 'Removing...' : 'Deactivate'}
+                </button>
+              </div>
+            </div>
+          ))}
+          {visibleItems.length === 0 && (
+            <div className="md:col-span-2 rounded-2xl border border-dashed border-white/10 bg-[#181818] px-4 py-10 text-center text-sm text-gray-500">
+              No items found in the catalog.
+            </div>
+          )}
+        </div>
+      </motion.div>
+
+      <AnimatePresence>
+        {showInactiveModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[220] bg-black/80 p-3 sm:p-6"
+            onClick={() => setShowInactiveModal(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              onClick={(event) => event.stopPropagation()}
+              className="mx-auto max-w-3xl rounded-3xl border border-white/10 bg-[#141414] p-4 sm:p-6"
+            >
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="text-lg font-black text-white">Deactive Items</h3>
+                <button
+                  type="button"
+                  onClick={() => setShowInactiveModal(false)}
+                  className="rounded-xl border border-white/10 bg-white/5 p-2 text-gray-300 hover:text-white"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+              <div className="relative mt-4">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" size={16} />
+                <input
+                  value={inactiveSearch}
+                  onChange={(e) => setInactiveSearch(e.target.value)}
+                  placeholder="Search deactive items..."
+                  className="w-full rounded-xl border border-white/10 bg-[#252525] py-3 pl-10 pr-3 text-sm text-white outline-none focus:border-red-500/40"
+                />
+              </div>
+              <div className="mt-4 max-h-[55vh] space-y-2 overflow-y-auto pr-1">
+                {visibleInactiveItems.length > 0 ? visibleInactiveItems.map((item) => (
+                  <div key={item.id} className="flex items-center justify-between rounded-xl border border-white/10 bg-[#1a1a1a] px-3 py-3">
+                    <div className="min-w-0">
+                      <p className="truncate font-bold text-white">{item.name}</p>
+                      <p className="text-xs text-gray-500">{item.category}</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleReactivate(item)}
+                      disabled={reactivatingId === item.id}
+                      className="rounded-xl border border-green-500/20 bg-green-500/10 px-3 py-2 text-xs font-bold uppercase text-green-300 hover:bg-green-500/20 disabled:opacity-50"
+                    >
+                      {reactivatingId === item.id ? 'Activating...' : 'Activate'}
+                    </button>
+                  </div>
+                )) : (
+                  <div className="rounded-xl border border-dashed border-white/10 bg-[#1a1a1a] px-3 py-8 text-center text-sm text-gray-500">
+                    No deactive items.
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
 const createDefaultPurchaseForm = () => ({
   center: '',
   centerOther: '',
   shopName: '',
   billNo: '',
   billDate: new Date().toISOString().split('T')[0],
-  rows: Array.from({ length: 5 }, (_, index) => ({
-    id: index + 1,
-    itemName: '',
-    kg: '',
-  })),
+  rows: createRowsFromItems([], 5),
 });
 
-function PurchaseAdminPanel({ user }) {
+function PurchaseAdminPanel({ user, catalogItems }) {
   const [purchaseForm, setPurchaseForm] = useState(createDefaultPurchaseForm);
   const [purchases, setPurchases] = useState([]);
   const [purchaseLoading, setPurchaseLoading] = useState(true);
@@ -1762,7 +2404,7 @@ function PurchaseAdminPanel({ user }) {
       ...prev,
       rows: [
         ...prev.rows,
-        { id: Math.max(...prev.rows.map((row) => row.id), 0) + 1, itemName: '', kg: '' },
+        createEmptyItemRow(getNextRowId(prev.rows)),
       ],
     }));
   };
@@ -1775,6 +2417,7 @@ function PurchaseAdminPanel({ user }) {
   };
 
   const filledRows = purchaseForm.rows.filter((row) => row.itemName.trim());
+  const catalogNameKeys = new Set(catalogItems.map((item) => item.nameKey));
 
   const clearPurchaseFilters = () => setPurchaseFilters({ date: '', center: '', shop: '' });
 
@@ -1813,6 +2456,10 @@ function PurchaseAdminPanel({ user }) {
     if (!purchaseForm.billNo.trim()) return alert('Bill number is required.');
     if (!purchaseForm.billDate) return alert('Bill date is required.');
     if (filledRows.length === 0) return alert('Add at least one purchased item.');
+    const invalidItem = filledRows.find((row) => !catalogNameKeys.has(normalizeItemName(row.itemName)));
+    if (invalidItem) {
+      return alert(`Invalid item name: "${invalidItem.itemName}". Please select an item from the master list.`);
+    }
 
     setPurchaseSubmitting(true);
     try {
@@ -1932,12 +2579,8 @@ function PurchaseAdminPanel({ user }) {
 
   const filteredPurchases = purchases.filter((purchase) => {
     const dateMatch = purchaseFilters.date ? purchase.billDate === purchaseFilters.date : true;
-    const centerMatch = purchaseFilters.center
-      ? (purchase.center || '').toLowerCase().includes(purchaseFilters.center.toLowerCase())
-      : true;
-    const shopMatch = purchaseFilters.shop
-      ? (purchase.shopName || '').toLowerCase().includes(purchaseFilters.shop.toLowerCase())
-      : true;
+    const centerMatch = purchaseFilters.center ? matchesSearchText(purchase.center, purchaseFilters.center) : true;
+    const shopMatch = purchaseFilters.shop ? matchesSearchText(purchase.shopName, purchaseFilters.shop) : true;
     return dateMatch && centerMatch && shopMatch;
   });
 
@@ -2018,7 +2661,8 @@ function PurchaseAdminPanel({ user }) {
           </div>
         </div>
 
-        <div className="mt-5 rounded-2xl border border-white/10 bg-white/5 overflow-hidden">
+        <div className="mt-5 space-y-4">
+          <div className="rounded-2xl border border-white/10 bg-white/5 overflow-hidden">
           <div className="p-4 border-b border-white/10 flex items-center justify-between">
             <p className="text-[11px] font-bold uppercase tracking-widest text-gray-500">Purchased Items</p>
             <span className="text-xs text-violet-300 font-bold">{filledRows.length} rows filled</span>
@@ -2038,11 +2682,17 @@ function PurchaseAdminPanel({ user }) {
                   <tr key={row.id} className={`border-t border-white/5 ${row.itemName ? 'bg-violet-500/5' : ''}`}>
                     <td className="p-2 text-gray-500 text-center text-xs font-mono">{index + 1}</td>
                     <td className="p-2">
-                      <input
-                        className="w-full p-2 bg-[#252525] border border-white/5 rounded-lg text-white outline-none focus:border-violet-500/50 text-sm transition-all placeholder-gray-600"
+                      <ItemNameAutocompleteInput
+                        accent="violet"
+                        catalogItems={catalogItems}
                         placeholder={`Item ${index + 1}...`}
                         value={row.itemName}
-                        onChange={(e) => updatePurchaseRow(row.id, 'itemName', e.target.value)}
+                        excludedNameKeys={purchaseForm.rows
+                          .filter((entry) => entry.id !== row.id)
+                          .map((entry) => normalizeItemName(entry.itemName))
+                          .filter(Boolean)}
+                        onChange={(nextValue) => updatePurchaseRow(row.id, 'itemName', nextValue)}
+                        onSelectItem={(item) => updatePurchaseRow(row.id, 'itemName', item.name)}
                       />
                     </td>
                     <td className="p-2">
@@ -2069,8 +2719,9 @@ function PurchaseAdminPanel({ user }) {
           <div className="p-3 border-t border-white/5">
             <motion.button whileHover={{ scale: 1.01 }} whileTap={{ scale: 0.98 }} onClick={addPurchaseRow}
               className="w-full p-3 bg-[#252525] hover:bg-[#2d2d2d] border border-dashed border-white/10 hover:border-violet-500/30 rounded-xl text-gray-400 hover:text-violet-400 font-bold text-sm flex items-center justify-center gap-2 transition-all">
-              <Plus size={16} /> New Row Umero
+              <Plus size={16} /> Blank Row Umero
             </motion.button>
+          </div>
           </div>
         </div>
 
@@ -2354,18 +3005,20 @@ function PurchaseAdminPanel({ user }) {
 }
 
 // --- EDIT ORDER SCREEN ---
-function EditOrderScreen({ order, onBack }) {
+function EditOrderScreen({ order, onBack, catalogItems }) {
   const [cart, setCart] = useState(order.items || []);
   const [loading, setLoading] = useState(false);
   const [openCategory, setOpenCategory] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const mergedCatalogItems = mergeCatalogItemsWithExisting(catalogItems, order.items || []);
+  const groupedCatalogItems = filterGroupedCatalogItems(mergedCatalogItems, searchQuery);
 
   const updateQuantity = (itemName, category, unit, qty) => {
-    const existing = cart.find(i => i.name === itemName);
+    const existing = cart.find(i => normalizeItemName(i.name) === normalizeItemName(itemName));
     if (qty > 0) {
-      if (existing) setCart(cart.map(i => i.name === itemName ? { ...i, qty } : i));
+      if (existing) setCart(cart.map(i => normalizeItemName(i.name) === normalizeItemName(itemName) ? { ...i, name: itemName, category, unit, qty } : i));
       else setCart([...cart, { name: itemName, category, unit, qty }]);
-    } else { setCart(cart.filter(i => i.name !== itemName)); }
+    } else { setCart(cart.filter(i => normalizeItemName(i.name) !== normalizeItemName(itemName))); }
   };
 
   const handleUpdate = async () => {
@@ -2379,14 +3032,6 @@ function EditOrderScreen({ order, onBack }) {
     } catch (e) { alert("Error: " + e.message); }
     setLoading(false);
   };
-
-  const filteredCategories = searchQuery 
-    ? Object.entries(categories).reduce((acc, [cat, items]) => {
-        const filtered = items.filter(item => item.name.toLowerCase().includes(searchQuery.toLowerCase()));
-        if (filtered.length > 0) acc[cat] = filtered;
-        return acc;
-      }, {})
-    : categories;
 
   return (
     <motion.div 
@@ -2453,8 +3098,8 @@ function EditOrderScreen({ order, onBack }) {
         animate="animate"
         className="space-y-3"
       >
-        {Object.entries(filteredCategories).map(([category, items]) => {
-          const categoryCartCount = items.filter(item => cart.find(c => c.name === item.name)).length;
+        {Object.entries(groupedCatalogItems).map(([category, items]) => {
+          const categoryCartCount = items.filter(item => cart.find(c => normalizeItemName(c.name) === item.nameKey)).length;
           return (
             <motion.div 
               key={category}
@@ -2492,7 +3137,7 @@ function EditOrderScreen({ order, onBack }) {
                   >
                     <div className="p-3 bg-[#151515] grid gap-2">
                       {items.map((item, itemIndex) => {
-                        const inCart = cart.find(c => c.name === item.name);
+                        const inCart = cart.find(c => normalizeItemName(c.name) === item.nameKey);
                         return (
                           <motion.div 
                             key={item.name}
@@ -2567,24 +3212,23 @@ function EditOrderScreen({ order, onBack }) {
 }
 
 // --- EDIT SEND ORDER SCREEN ---
-function EditSendOrderScreen({ order, onBack }) {
-  const [rows, setRows] = useState(
-    (order.items && order.items.length > 0)
-      ? order.items.map((item, i) => ({ id: i + 1, itemName: item.itemName || '', kg: item.kg || '' }))
-      : Array.from({ length: 5 }, (_, i) => ({ id: i + 1, itemName: '', kg: '' }))
-  );
+function EditSendOrderScreen({ order, onBack, catalogItems }) {
+  const mergedCatalogItems = mergeCatalogItemsWithExisting(catalogItems, order.items || []);
+  const [rows, setRows] = useState(createRowsFromItems(order.items || [], 5));
   const [loading, setLoading] = useState(false);
+  const catalogNameKeys = new Set(mergedCatalogItems.map((item) => item.nameKey));
 
   const updateRow = (id, field, value) => setRows(prev => prev.map(r => r.id === id ? { ...r, [field]: value } : r));
   const addRow = () => {
-    const nextId = rows.length > 0 ? Math.max(...rows.map(r => r.id)) + 1 : 1;
-    setRows(prev => [...prev, { id: nextId, itemName: '', kg: '' }]);
+    setRows(prev => [...prev, createEmptyItemRow(getNextRowId(prev))]);
   };
   const removeRow = (id) => { if (rows.length > 1) setRows(prev => prev.filter(r => r.id !== id)); };
 
   const handleUpdate = async () => {
     const filledRows = rows.filter(r => r.itemName && r.itemName.trim());
     if (filledRows.length === 0) return alert('Add at least one item!');
+    const invalidItem = filledRows.find((row) => !catalogNameKeys.has(normalizeItemName(row.itemName)));
+    if (invalidItem) return alert(`Invalid item name: "${invalidItem.itemName}". Please select from item list.`);
     setLoading(true);
     try {
       const totalKg = filledRows.reduce((sum, r) => sum + (parseFloat(r.kg) || 0), 0);
@@ -2642,12 +3286,17 @@ function EditSendOrderScreen({ order, onBack }) {
           {rows.map((row, index) => (
             <div key={row.id} className="grid grid-cols-[auto_1fr_80px_auto] gap-2 items-center">
               <span className="text-gray-500 text-xs font-bold w-6 text-center">{index + 1}</span>
-              <input
-                type="text"
+              <ItemNameAutocompleteInput
+                accent="blue"
+                catalogItems={mergedCatalogItems}
                 placeholder="Item Name"
                 value={row.itemName}
-                onChange={e => updateRow(row.id, 'itemName', e.target.value)}
-                className="p-2.5 bg-[#252525] border border-white/10 rounded-xl text-white text-sm outline-none focus:border-blue-500/50 transition-all placeholder-gray-600"
+                excludedNameKeys={rows
+                  .filter((entry) => entry.id !== row.id)
+                  .map((entry) => normalizeItemName(entry.itemName))
+                  .filter(Boolean)}
+                onChange={(nextValue) => updateRow(row.id, 'itemName', nextValue)}
+                onSelectItem={(item) => updateRow(row.id, 'itemName', item.name)}
               />
               <input
                 type="number"
@@ -2666,7 +3315,7 @@ function EditSendOrderScreen({ order, onBack }) {
         <div className="p-3 pt-0">
           <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={addRow}
             className="w-full py-2.5 bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 rounded-xl text-sm font-bold flex items-center justify-center gap-2 border border-blue-500/20 transition-all">
-            <Plus size={16} /> Add Row
+            <Plus size={16} /> Add Blank Row
           </motion.button>
         </div>
       </motion.div>
@@ -2690,11 +3339,11 @@ function EditSendOrderScreen({ order, onBack }) {
 }
 
 // --- USER HUB ---
-function UserHub({ user }) {
+function UserHub({ user, catalogItems }) {
   const [section, setSection] = useState(null);
 
-  if (section === 'request') return <UserDashboard user={user} onBack={() => setSection(null)} />;
-  if (section === 'send') return <SendDashboard user={user} onBack={() => setSection(null)} />;
+  if (section === 'request') return <UserDashboard user={user} onBack={() => setSection(null)} catalogItems={catalogItems} />;
+  if (section === 'send') return <SendDashboard user={user} onBack={() => setSection(null)} catalogItems={catalogItems} />;
 
   return (
     <motion.div
@@ -2775,7 +3424,7 @@ function UserHub({ user }) {
 }
 
 // --- SEND DASHBOARD ---
-function SendDashboard({ user, onBack }) {
+function SendDashboard({ user, onBack, catalogItems }) {
   const INITIAL_ROWS = 15;
   const [step, setStep] = useState('form');
   const [chalanLoading, setChalanLoading] = useState(true);
@@ -2790,10 +3439,9 @@ function SendDashboard({ user, onBack }) {
     globalId: '',
     email: '',
   });
-  const [rows, setRows] = useState(
-    Array.from({ length: INITIAL_ROWS }, (_, i) => ({ id: i + 1, itemName: '', kg: '' }))
-  );
+  const [rows, setRows] = useState(createRowsFromItems([], INITIAL_ROWS));
   const [loading, setLoading] = useState(false);
+  const catalogNameKeys = new Set(catalogItems.map((item) => item.nameKey));
 
   const fetchNextSendChalanNo = async () => {
     try {
@@ -2816,8 +3464,7 @@ function SendDashboard({ user, onBack }) {
 
   const updateRow = (id, field, value) => setRows(prev => prev.map(r => r.id === id ? { ...r, [field]: value } : r));
   const addRow = () => {
-    const nextId = rows.length > 0 ? Math.max(...rows.map(r => r.id)) + 1 : 1;
-    setRows(prev => [...prev, { id: nextId, itemName: '', kg: '' }]);
+    setRows(prev => [...prev, createEmptyItemRow(getNextRowId(prev))]);
   };
   const removeRow = (id) => { if (rows.length > 1) setRows(prev => prev.filter(r => r.id !== id)); };
 
@@ -2871,6 +3518,8 @@ function SendDashboard({ user, onBack }) {
     if (!isDigitsOnly(formData.globalId)) return alert('Global ID ma only number allowed.');
     if (!isValidEmail(formData.email)) return alert('Valid email fill karo!');
     if (filledRows.length === 0) return alert('Ochha me ek item add karo!');
+    const invalidItem = filledRows.find((row) => !catalogNameKeys.has(normalizeItemName(row.itemName)));
+    if (invalidItem) return alert(`Invalid item name: "${invalidItem.itemName}". Master list mathi select karo.`);
     setStep('review');
   };
 
@@ -3052,11 +3701,17 @@ function SendDashboard({ user, onBack }) {
                 <tr key={row.id} className={`border-t border-white/5 transition-colors ${row.itemName ? 'bg-blue-500/5' : ''}`}>
                   <td className="p-2 text-gray-500 text-center text-xs font-mono">{idx + 1}</td>
                   <td className="p-2">
-                    <input
-                      className="w-full p-2 bg-[#252525] border border-white/5 rounded-lg text-white outline-none focus:border-blue-500/50 text-sm transition-all placeholder-gray-600"
+                    <ItemNameAutocompleteInput
+                      accent="blue"
+                      catalogItems={catalogItems}
                       placeholder={`Item ${idx + 1}...`}
                       value={row.itemName}
-                      onChange={e => updateRow(row.id, 'itemName', e.target.value)}
+                      excludedNameKeys={rows
+                        .filter((entry) => entry.id !== row.id)
+                        .map((entry) => normalizeItemName(entry.itemName))
+                        .filter(Boolean)}
+                      onChange={(nextValue) => updateRow(row.id, 'itemName', nextValue)}
+                      onSelectItem={(item) => updateRow(row.id, 'itemName', item.name)}
                     />
                   </td>
                   <td className="p-2">
@@ -3080,7 +3735,7 @@ function SendDashboard({ user, onBack }) {
         <div className="p-3 border-t border-white/5">
           <motion.button whileHover={{ scale: 1.01 }} whileTap={{ scale: 0.98 }} onClick={addRow}
             className="w-full p-3 bg-[#252525] hover:bg-[#2d2d2d] border border-dashed border-white/10 hover:border-blue-500/30 rounded-xl text-gray-400 hover:text-blue-400 font-bold text-sm flex items-center justify-center gap-2 transition-all">
-            <Plus size={16} /> New Row Umero
+            <Plus size={16} /> Blank Row Umero
           </motion.button>
         </div>
       </motion.div>
@@ -3095,7 +3750,7 @@ function SendDashboard({ user, onBack }) {
 }
 
 // --- USER DASHBOARD ---
-function UserDashboard({ user, onBack = null }) {
+function UserDashboard({ user, onBack = null, catalogItems }) {
   const [formData, setFormData] = useState({
     chalanNo: '',
     date: new Date().toISOString().split('T')[0],
@@ -3113,6 +3768,7 @@ function UserDashboard({ user, onBack = null }) {
   const [step, setStep] = useState('form');
   const [searchQuery, setSearchQuery] = useState('');
   const [chalanLoading, setChalanLoading] = useState(true);
+  const groupedCatalogItems = filterGroupedCatalogItems(catalogItems, searchQuery);
 
   const fetchNextChalanNo = async () => {
     try {
@@ -3138,11 +3794,11 @@ function UserDashboard({ user, onBack = null }) {
   };
 
   const updateQuantity = (itemName, category, unit, qty) => {
-    const existing = cart.find(i => i.name === itemName);
+    const existing = cart.find(i => normalizeItemName(i.name) === normalizeItemName(itemName));
     if (qty > 0) {
-      if (existing) setCart(cart.map(i => i.name === itemName ? { ...i, qty } : i));
+      if (existing) setCart(cart.map(i => normalizeItemName(i.name) === normalizeItemName(itemName) ? { ...i, name: itemName, category, unit, qty } : i));
       else setCart([...cart, { name: itemName, category, unit, qty }]);
-    } else { setCart(cart.filter(i => i.name !== itemName)); }
+    } else { setCart(cart.filter(i => normalizeItemName(i.name) !== normalizeItemName(itemName))); }
   };
 
   const handleConfirmSubmit = async () => {
@@ -3179,15 +3835,6 @@ function UserDashboard({ user, onBack = null }) {
     } catch (error) { alert(`❌ Error: ${error.message}`); setLoading(false); }
     setLoading(false);
   };
-
-  // Filter items based on search
-  const filteredCategories = searchQuery
-    ? Object.entries(categories).reduce((acc, [cat, items]) => {
-        const filtered = items.filter(item => item.name.toLowerCase().includes(searchQuery.toLowerCase()));
-        if (filtered.length > 0) acc[cat] = filtered;
-        return acc;
-      }, {})
-    : categories;
 
   if (step === 'form') {
     return (
@@ -3330,7 +3977,7 @@ function UserDashboard({ user, onBack = null }) {
           animate="animate"
           className="space-y-3 sm:space-y-4"
         >
-          {Object.entries(filteredCategories).map(([category, items]) => (
+          {Object.entries(groupedCatalogItems).map(([category, items]) => (
             <motion.div 
               key={category}
               variants={fadeInUp}
@@ -3364,7 +4011,7 @@ function UserDashboard({ user, onBack = null }) {
                   >
                     <div className="p-3 sm:p-4 bg-[#151515] grid gap-2 sm:gap-3">
                       {items.map((item, itemIndex) => {
-                        const inCart = cart.find(c => c.name === item.name);
+                        const inCart = cart.find(c => normalizeItemName(c.name) === item.nameKey);
                         return (
                           <motion.div 
                             key={item.name}
