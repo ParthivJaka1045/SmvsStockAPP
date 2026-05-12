@@ -96,12 +96,28 @@ export const sortCatalogItems = (items = []) => (
 export const getFallbackCatalogItems = () => sortCatalogItems(dedupeCatalogItems(getStaticCatalogItems()));
 
 export const groupCatalogItemsByCategory = (items = []) => (
-  items.reduce((acc, item) => {
-    const category = item.category || 'અન્ય';
-    if (!acc[category]) acc[category] = [];
-    acc[category].push(item);
-    return acc;
-  }, {})
+  (() => {
+    const grouped = items.reduce((acc, item) => {
+      const category = item.category || 'અન્ય';
+      if (!acc[category]) acc[category] = [];
+      acc[category].push(item);
+      return acc;
+    }, {});
+
+    const OTHER_CATEGORY = 'અન્ય';
+    const categories = Object.keys(grouped).sort((left, right) => {
+      const lIsOther = left === OTHER_CATEGORY;
+      const rIsOther = right === OTHER_CATEGORY;
+      if (lIsOther && !rIsOther) return 1;
+      if (!lIsOther && rIsOther) return -1;
+      return left.localeCompare(right, 'gu');
+    });
+
+    return categories.reduce((acc, category) => {
+      acc[category] = grouped[category];
+      return acc;
+    }, {});
+  })()
 );
 
 export const filterCatalogItems = (items = [], query = '') => {

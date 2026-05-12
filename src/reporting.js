@@ -177,16 +177,222 @@ const isDateWithinSelectedMonth = (value, monthValue, selectedDate) => {
   return dateValue >= getMonthStartDate(monthValue) && dateValue <= selectedDate;
 };
 
+const toComparableIsoDate = (value) => {
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  const date = toDateObject(value);
+  if (!date) return '';
+  return `${date.getFullYear()}-${padValue(date.getMonth() + 1)}-${padValue(date.getDate())}`;
+};
+
+/** True iff transaction date is strictly before the report window starts (opening-balance cutoff). */
+const isDateStrictlyBeforeRangeStart = (value, rangeStartIso) => {
+  const dateValue = toComparableIsoDate(value);
+  if (!dateValue || !rangeStartIso) return false;
+  return dateValue < rangeStartIso;
+};
+
+/** મુખ્ય કોઠાર દર આઇટમની શરૂઆતની સ્ટોક રેન્જ પહેલાં: ખરીદી (બધા) + સેન્ડ (બધા કેન્દ્ર) − રિક્વેસ્ટ (બધા કેન્દ્ર). */
+const accumulateGlobalOpeningStockByItem = (orders, sendOrders, purchases, rangeStartIso) => {
+  const byKey = new Map();
+  const bumpOpening = (itemName, deltaKg, displayFallback) => {
+    const trimmed = (itemName || '').toString().trim();
+    if (!trimmed) return;
+    const nk = normalizeText(trimmed);
+    const prev = byKey.get(nk) || { kg: 0, displayName: trimmed };
+    const nextKg = roundMetric(prev.kg + safeNumber(deltaKg));
+    byKey.set(nk, {
+      kg: nextKg,
+      displayName: prev.displayName || displayFallback || trimmed,
+    });
+  };
+
+  purchases
+    .filter((p) => !p?.is_deleted)
+    .filter((purchase) =>
+      isDateStrictlyBeforeRangeStart(purchase.billDate || purchase.date || purchase.entryDate, rangeStartIso),
+    )
+    .forEach((purchase) => {
+      const items = Array.isArray(purchase.items) ? purchase.items : [];
+      items.forEach((item) =>
+        bumpOpening(item.itemName, getPurchaseItemValue(item), item.itemName),
+      );
+    });
+
+  sendOrders
+    .filter((o) => !o?.is_deleted)
+    .filter((order) =>
+      isDateStrictlyBeforeRangeStart(order.date, rangeStartIso),
+    )
+    .forEach((order) => {
+      const items = Array.isArray(order.items) ? order.items : [];
+      items.forEach((item) =>
+        bumpOpening(item.itemName, getSendItemValue(item), item.itemName),
+      );
+    });
+
+  orders
+    .filter((o) => !o?.is_deleted)
+    .filter((order) =>
+      isDateStrictlyBeforeRangeStart(order.date, rangeStartIso),
+    )
+    .forEach((order) => {
+      const items = Array.isArray(order.items) ? order.items : [];
+      items.forEach((item) =>
+        bumpOpening(item.name, -getRequestItemValue(item), item.name),
+      );
+    });
+
+  return byKey;
+};
+
 const matchesCenterFilter = (candidateCenter, scope, targetCenter) => {
   if (scope !== 'center') return true;
   return normalizeText(candidateCenter) === normalizeText(targetCenter);
 };
 
+/** દુકાન/કોઠાર ખરીદી દરેક સેન્ટર રિપોર્ટમાં આવક તરીકે (ગ્લોબલી ગણવી). */
+const purchaseMatchesReportCenterScope = () => true;
+
 const getSendItemValue = (item) => safeNumber(item?.kg);
 
-const getRequestItemValue = (item) => safeNumber(item?.qty);
+const getRequestItemValue = (item) => {
+  const qty = safeNumber(item?.qty);
+  const unit = normalizeText(item?.unit);
+  if (unit === normalizeText('ડબ્બા')) return qty * 13;
+  if (unit === normalizeText('ગ્રામ')) return qty / 1000;
+  return qty;
+};
 
 const getPurchaseItemValue = (item) => safeNumber(item?.kg);
+
+const getPreviousMonthValue = (monthValue) => {
+  if (!monthValue || !/^\d{4}-\d{2}$/.test(monthValue)) return '';
+  const [year, month] = monthValue.split('-').map(Number);
+  const prev = new Date(year, month - 2, 1);
+  return `${prev.getFullYear()}-${padValue(prev.getMonth() + 1)}`;
+};
+
+const monthValueFromIsoDate = (isoDate) => {
+  if (typeof isoDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(isoDate)) return isoDate.slice(0, 7);
+  return getMonthValueFromDate(isoDate);
+};
+
+const normalizeTransactionType = (value) => {
+  const type = (value || '').toString().trim().toUpperCase();
+  return type === 'OUT' ? 'OUT' : 'IN';
+};
+
+const normalizeHistoryTransactions = (stockTransactions = []) =>
+  stockTransactions
+    .map((entry) => {
+      const itemName = (entry?.itemName || entry?.item_id || '').toString().trim();
+      const centerName = (entry?.centerName || entry?.center_id || '').toString().trim();
+      const dateIso = toComparableIsoDate(entry?.transaction_date || entry?.date || entry?.created_at);
+      const quantity = safeNumber(entry?.quantity);
+      return {
+        ...entry,
+        itemName,
+        centerName,
+        dateIso,
+        quantity,
+        transactionType: normalizeTransactionType(entry?.transaction_type),
+      };
+    })
+    .filter((entry) => !entry?.is_deleted)
+    .filter((entry) => entry.itemName && entry.dateIso && safeNumber(entry.quantity) !== 0);
+
+const getSignedTransactionQuantity = (entry) =>
+  entry.transactionType === 'OUT' ? -safeNumber(entry.quantity) : safeNumber(entry.quantity);
+
+const buildMonthlyClosingLookup = (monthlyClosingStock = []) => {
+  const byKey = new Map();
+  monthlyClosingStock.forEach((entry) => {
+    if (entry?.is_deleted) return;
+    const month = (entry.month || entry.monthValue || '').toString().trim();
+    const itemName = (entry.itemName || entry.item_id || '').toString().trim();
+    if (!month || !itemName) return;
+    const key = `${month}__${normalizeText(itemName)}`;
+    byKey.set(key, {
+      month,
+      itemName,
+      closingStock: roundMetric(entry.closingStock ?? entry.closing_qty),
+    });
+  });
+  return byKey;
+};
+
+const getOpeningStockByItemFromHistory = ({
+  txRows = [],
+  monthlyClosingStock = [],
+  rangeStartDate = '',
+}) => {
+  const openingByItem = new Map();
+  if (!rangeStartDate) return openingByItem;
+  const startMonth = monthValueFromIsoDate(rangeStartDate);
+  const previousMonth = getPreviousMonthValue(startMonth);
+  const monthlyLookup = buildMonthlyClosingLookup(monthlyClosingStock);
+
+  const itemsInWindow = new Set(
+    txRows
+      .filter((entry) => entry.dateIso >= rangeStartDate)
+      .map((entry) => normalizeText(entry.itemName)),
+  );
+
+  itemsInWindow.forEach((itemKey) => {
+    const fromSnapshot = monthlyLookup.get(`${previousMonth}__${itemKey}`);
+    if (fromSnapshot) {
+      openingByItem.set(itemKey, {
+        kg: roundMetric(fromSnapshot.closingStock),
+        displayName: fromSnapshot.itemName,
+      });
+    }
+  });
+
+  txRows
+    .filter((entry) => isDateStrictlyBeforeRangeStart(entry.dateIso, rangeStartDate))
+    .forEach((entry) => {
+      const key = normalizeText(entry.itemName);
+      if (!key) return;
+      if (openingByItem.has(key)) return;
+      const prev = openingByItem.get(key) || { kg: 0, displayName: entry.itemName };
+      openingByItem.set(key, {
+        kg: roundMetric(prev.kg + getSignedTransactionQuantity(entry)),
+        displayName: prev.displayName || entry.itemName,
+      });
+    });
+
+  return openingByItem;
+};
+
+export const buildMonthlyClosingSnapshots = ({
+  stockTransactions = [],
+  throughDate = '',
+}) => {
+  const txRows = normalizeHistoryTransactions(stockTransactions)
+    .filter((entry) => !throughDate || entry.dateIso <= throughDate)
+    .sort((a, b) => a.dateIso.localeCompare(b.dateIso));
+
+  const runningByItem = new Map();
+  const monthClosingsByKey = new Map();
+  txRows.forEach((entry) => {
+    const itemKey = normalizeText(entry.itemName);
+    const month = monthValueFromIsoDate(entry.dateIso);
+    const signedQty = getSignedTransactionQuantity(entry);
+    const nextRunning = roundMetric(safeNumber(runningByItem.get(itemKey)) + signedQty);
+    runningByItem.set(itemKey, nextRunning);
+    monthClosingsByKey.set(`${month}__${itemKey}`, {
+      month,
+      itemName: entry.itemName,
+      item_id: itemKey,
+      closing_qty: nextRunning,
+      closingStock: nextRunning,
+      updatedAt: new Date(),
+      is_deleted: false,
+    });
+  });
+
+  return Array.from(monthClosingsByKey.values());
+};
 
 const buildLegacyRows = (report, monthLabel) => {
   if (!Array.isArray(report.itemBreakdown)) return [];
@@ -291,6 +497,8 @@ export const buildSummaryReport = ({
   orders = [],
   sendOrders = [],
   purchases = [],
+  stockTransactions = [],
+  monthlyClosingStock = [],
   month = '',
   fromMonth = '',
   toMonth = '',
@@ -326,47 +534,83 @@ export const buildSummaryReport = ({
   const rowMap = new Map();
   const rangeStartDate = useMonthRange ? getRangeStartDate(normalizedFromMonth, normalizedMonth) : getMonthStartDate(normalizedMonth);
   const rangeEndDate = normalizedSelectedDate;
+  const normalizedHistoryTransactions = normalizeHistoryTransactions(stockTransactions);
+  const hasHistoryLedger = normalizedHistoryTransactions.length > 0;
+
+  const openingByItem = hasHistoryLedger
+    ? getOpeningStockByItemFromHistory({
+        txRows: normalizedHistoryTransactions,
+        monthlyClosingStock,
+        rangeStartDate,
+      })
+    : accumulateGlobalOpeningStockByItem(
+        orders,
+        sendOrders,
+        purchases,
+        rangeStartDate,
+      );
+  openingByItem.forEach(({ kg, displayName }, normKey) => {
+    void normKey;
+    if (safeNumber(kg) === 0) return;
+    addMovement(rowMap, displayName, monthLabel, 'income', kg);
+  });
 
   const dateInRange = (value) =>
     normalizedReportPeriod === 'yearly'
       ? isDateWithinSelectedYear(value, normalizedMonth, normalizedSelectedDate)
       : isDateWithinSelectedMonth(value, rangeStartDate.slice(0, 7), rangeEndDate);
 
-  orders
-    .filter((order) =>
-      dateInRange(order.date)
-      && matchesCenterFilter(order.center, normalizedScope, normalizedCenter),
-    )
-    .forEach((order) => {
-      const items = Array.isArray(order.items) ? order.items : [];
-      items.forEach((item) => {
-        addMovement(rowMap, item.name, monthLabel, 'outgoing', getRequestItemValue(item));
+  if (hasHistoryLedger) {
+    normalizedHistoryTransactions
+      .filter((entry) =>
+        dateInRange(entry.dateIso)
+        && matchesCenterFilter(entry.centerName, normalizedScope, normalizedCenter),
+      )
+      .forEach((entry) => {
+        if (entry.transactionType === 'OUT') {
+          addMovement(rowMap, entry.itemName, monthLabel, 'outgoing', entry.quantity);
+          return;
+        }
+        addMovement(rowMap, entry.itemName, monthLabel, 'income', entry.quantity);
       });
-    });
+  } else {
 
-  sendOrders
-    .filter((order) =>
-      dateInRange(order.date)
-      && matchesCenterFilter(order.fromCenter, normalizedScope, normalizedCenter),
-    )
-    .forEach((order) => {
-      const items = Array.isArray(order.items) ? order.items : [];
-      items.forEach((item) => {
-        addMovement(rowMap, item.itemName, monthLabel, 'income', getSendItemValue(item));
+    orders
+      .filter((order) =>
+        dateInRange(order.date)
+        && matchesCenterFilter(order.center, normalizedScope, normalizedCenter),
+      )
+      .forEach((order) => {
+        const items = Array.isArray(order.items) ? order.items : [];
+        items.forEach((item) => {
+          addMovement(rowMap, item.name, monthLabel, 'outgoing', getRequestItemValue(item));
+        });
       });
-    });
 
-  purchases
-    .filter((purchase) =>
-      dateInRange(purchase.billDate || purchase.date)
-      && matchesCenterFilter(purchase.center, normalizedScope, normalizedCenter),
-    )
-    .forEach((purchase) => {
-      const items = Array.isArray(purchase.items) ? purchase.items : [];
-      items.forEach((item) => {
-        addMovement(rowMap, item.itemName, monthLabel, 'income', getPurchaseItemValue(item));
+    sendOrders
+      .filter((order) =>
+        dateInRange(order.date)
+        && matchesCenterFilter(order.fromCenter, normalizedScope, normalizedCenter),
+      )
+      .forEach((order) => {
+        const items = Array.isArray(order.items) ? order.items : [];
+        items.forEach((item) => {
+          addMovement(rowMap, item.itemName, monthLabel, 'income', getSendItemValue(item));
+        });
       });
-    });
+
+    purchases
+      .filter((purchase) =>
+        dateInRange(purchase.billDate || purchase.date || purchase.entryDate)
+        && purchaseMatchesReportCenterScope(purchase, normalizedScope, normalizedCenter),
+      )
+      .forEach((purchase) => {
+        const items = Array.isArray(purchase.items) ? purchase.items : [];
+        items.forEach((item) => {
+          addMovement(rowMap, item.itemName, monthLabel, 'income', getPurchaseItemValue(item));
+        });
+      });
+  }
 
   const rows = Array.from(rowMap.values())
     .filter((row) => safeNumber(row.income) !== 0 || safeNumber(row.outgoing) !== 0 || safeNumber(row.totalStock) !== 0)

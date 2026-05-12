@@ -38,6 +38,7 @@ export const centerData = [
   { center: "Bhakti nivas",          name: "Lataba",           phone: "9099090614" },
   { center: "Girls Gurukul",         name: "Lataba",           phone: "9099090614" },
   { center: "Sant-Aasharam",         name: "",                 phone: "" },
+  { center: "Sahaj Farm",             name: "",                 phone: "" },
   { center: "Other",                 name: "",                 phone: "" },
 ];
 
@@ -80,15 +81,15 @@ export const categories = {
     { name: "મસુર", unit: "કિલો" }
   ],
   "ઘી-તેલ": [
-    { name: "પામોલિન તેલ", unit: "કિલો" },
-    { name: "સનફ્લાવર તેલ", unit: "કિલો" },
-    { name: "સોયાબીન તેલ", unit: "કિલો" },
-    { name: "ચોખ્ખું ઘી", unit: "કિલો" },
-    { name: "ચાલુ ઘી", unit: "કિલો" },
-    { name: "દિવેલ", unit: "કિલો" },
-    { name: "સીંગતેલ", unit: "કિલો" },
-    { name: "કપાસિયા તેલ", unit: "કિલો" },
-    { name: "સરસિયું તેલ", unit: "કિલો" }
+    { name: "પામોલિન તેલ", unit: "ડબ્બા" },
+    { name: "સનફ્લાવર તેલ", unit: "ડબ્બા" },
+    { name: "સોયાબીન તેલ", unit: "ડબ્બા" },
+    { name: "ચોખ્ખું ઘી", unit: "ડબ્બા" },
+    { name: "ચાલુ ઘી", unit: "ડબ્બા" },
+    { name: "દિવેલ", unit: "ડબ્બા" },
+    { name: "સીંગતેલ", unit: "ડબ્બા" },
+    { name: "કપાસિયા તેલ", unit: "ડબ્બા" },
+    { name: "સરસિયું તેલ", unit: "ડબ્બા" }
   ],
   "લોટ": [
     { name: "ગાય છાપ બેસન", unit: "કિલો" },

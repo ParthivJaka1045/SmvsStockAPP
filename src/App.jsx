@@ -1,7 +1,21 @@
-import React, { useCallback, useState, useEffect } from 'react';
+import React, { useCallback, useMemo, useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { db } from './firebase'; 
-import { collection, addDoc, getDocs, getDoc, query, orderBy, doc, where, updateDoc, deleteDoc } from 'firebase/firestore'; 
+import {
+  collection,
+  addDoc,
+  getDocs,
+  getDoc,
+  query,
+  orderBy,
+  doc,
+  where,
+  updateDoc,
+  deleteDoc,
+  limit,
+  setDoc,
+  serverTimestamp,
+} from 'firebase/firestore'; 
 import { centerData } from './data';
 import {
   buildItemNameKey,
@@ -17,6 +31,7 @@ import {
 } from './itemCatalog';
 import emailjs from 'emailjs-com'; 
 import {
+  buildMonthlyClosingSnapshots,
   buildSummaryReport,
   formatDisplayDate,
   formatMetric,
@@ -31,12 +46,13 @@ import {
   generateSummaryReportPDFBlob,
 } from './pdfClient';
 import { saveBlobFromProducer } from './utils/saveBlob';
+import smvsLogo from './assets/1.png';
 import { 
   Trash2, Download, LogOut, Loader2, CheckCircle, RefreshCw, 
   ChevronDown, ChevronUp, ArrowLeft, Send, LayoutDashboard, 
   Edit3, Eye, Share2, X, Search, Calendar, MapPin, User, Eraser,
   Package, ShoppingCart, FileText, Sparkles, Box, Plus, Minus,
-  Mail
+  Mail, AlertTriangle,
 } from 'lucide-react';
 
 void motion;
@@ -103,6 +119,18 @@ const getDateWithinYear = (monthValue, dateValue) => {
   const today = new Date().toISOString().split('T')[0];
   if (today.startsWith(year)) return today;
   return getLastDateForCalendarYear(monthValue);
+};
+
+const getPreviousMonthInputValue = (monthValue) => {
+  if (!monthValue || !/^\d{4}-\d{2}$/.test(monthValue)) return '';
+  const [year, month] = monthValue.split('-').map(Number);
+  const date = new Date(year, month - 2, 1);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+};
+
+const monthFromDateValue = (value) => {
+  const iso = normalizeDateOnly(value);
+  return iso ? iso.slice(0, 7) : '';
 };
 
 const sendEmailWithConfig = (config, params) => (
@@ -243,10 +271,11 @@ function App() {
               className="text-lg sm:text-xl font-black text-transparent bg-clip-text bg-gradient-to-r from-orange-400 to-orange-600 flex items-center gap-2"
             >
               <motion.div
-                animate={{ rotate: [0, 10, -10, 0] }}
+                animate={{ rotate: [0, 5, -5, 0] }}
                 transition={{ duration: 2, repeat: Infinity, repeatDelay: 3 }}
+                className="w-8 h-8 rounded-xl bg-transparent border border-white/10 flex items-center justify-center overflow-hidden"
               >
-                <Package size={24} className="text-orange-500" />
+                <img src={smvsLogo} alt="SMVS" className="w-7 h-7 object-contain drop-shadow-[0_2px_8px_rgba(255,255,255,0.15)]" />
               </motion.div>
               <span className="hidden xs:inline">SMVS</span> Portal
             </motion.h1>
@@ -301,13 +330,13 @@ function App() {
                 transition={{ delay: 0.2 }}
               >
                 <motion.div 
-                  className="w-20 h-20 sm:w-24 sm:h-24 bg-gradient-to-br from-orange-500 to-orange-700 rounded-2xl flex items-center justify-center mx-auto mb-5 shadow-xl shadow-orange-500/30"
+                  className="w-20 h-20 sm:w-24 sm:h-24 bg-gradient-to-br from-orange-500/20 to-orange-700/10 rounded-2xl flex items-center justify-center mx-auto mb-5 shadow-xl shadow-orange-500/20 border border-white/10 overflow-hidden"
                   whileHover={{ rotate: [0, -5, 5, 0] }}
                   transition={{ duration: 0.5 }}
                 >
-                  <Package size={40} className="text-white" />
+                  <img src={smvsLogo} alt="SMVS" className="w-16 h-16 sm:w-20 sm:h-20 object-contain drop-shadow-[0_4px_14px_rgba(255,255,255,0.18)]" />
                 </motion.div>
-                <h2 className="text-2xl sm:text-3xl font-black text-white uppercase tracking-tight">Stock Portal</h2>
+                <h2 className="text-2xl sm:text-3xl font-black text-white uppercase tracking-tight">SMVS Stock Portal</h2>
                 <p className="text-gray-500 text-sm mt-2">SMVS Inventory Management</p>
               </motion.div>
 
@@ -388,20 +417,134 @@ const buildPublicRecordLink = (paramName, recordId) =>
 const getResolvedCenterValue = (selectedCenter, otherCenter = '') =>
   selectedCenter === 'Other' ? otherCenter.trim() : (selectedCenter || '').trim();
 
+/** Maps stored center string to dropdown + optional "Other" text (admin edit). */
+const deriveEditableCenterFields = (storedCenter) => {
+  const raw = (storedCenter || '').trim();
+  if (!raw) return { select: '', other: '' };
+  const exact = centerData.find((c) => c.center === raw);
+  if (exact) return { select: exact.center, other: '' };
+  const ci = centerData.find((c) => c.center.toLowerCase() === raw.toLowerCase());
+  if (ci) return { select: ci.center, other: '' };
+  return { select: 'Other', other: raw };
+};
+
+/** Saved center is not on master list (Other / typo) — show admin warning on cards. */
+const isNonListedCenterValue = (storedCenter) => {
+  const raw = (storedCenter || '').trim();
+  if (!raw) return false;
+  if (centerData.some((c) => c.center === raw)) return false;
+  return !centerData.some((c) => c.center.toLowerCase() === raw.toLowerCase());
+};
+
+function NonListedCenterBadge() {
+  return (
+    <span
+      title="આ સેન્ટર માસ્ટર લિસ્ટમાં નથી — Edit માંથી ડ્રોપડાઉનમાંનું સેન્ટર પસંદ કરો."
+      className="mt-1.5 inline-flex max-w-full items-center gap-1 rounded-lg border border-amber-500/45 bg-amber-500/15 px-2 py-1 text-[10px] font-bold text-amber-100"
+    >
+      <AlertTriangle size={12} className="shrink-0 text-amber-400" aria-hidden />
+      <span className="truncate uppercase tracking-wide">લિસ્ટ બહારનું સેન્ટર</span>
+    </span>
+  );
+}
+
 const getCenterScopeLabel = (scope, center) =>
   scope === 'center' && center ? center : 'All Centers / Full Report';
 
+const UNIT_KG = 'કિલો';
+const UNIT_GRM = 'ગ્રામ';
+const UNIT_DABBA = 'ડબ્બા';
+const TEL_DABBA_KG = 13;
+const GHEE_TEL_CATEGORY = normalizeItemName('ઘી-તેલ');
+const COLOR_CATEGORY = normalizeItemName('કલર');
+const DRYFRUIT_CATEGORY = normalizeItemName('ડ્રાયફ્રુટ');
+const MASALA_CATEGORY = normalizeItemName('મસાલા');
+const MONTH_CLOSE_GRACE_DAYS = 5;
+const ENABLE_INITIAL_STOCK_BACKFILL = true;
+const INITIAL_BACKFILL_MONTHS = 4;
+
+const normalizeCategoryKey = (value) => normalizeItemName(value);
+const isGheeTelCategory = (category) => normalizeCategoryKey(category) === GHEE_TEL_CATEGORY;
+const isColorCategory = (category) => normalizeCategoryKey(category) === COLOR_CATEGORY;
+const isDryfruitCategory = (category) => normalizeCategoryKey(category) === DRYFRUIT_CATEGORY;
+const isMasalaCategory = (category) => normalizeCategoryKey(category) === MASALA_CATEGORY;
+
+const normalizeQuantityUnit = (value) => (
+  normalizeItemName(value) === normalizeItemName(UNIT_GRM)
+    ? UNIT_GRM
+    : (normalizeItemName(value) === normalizeItemName(UNIT_DABBA) ? UNIT_DABBA : UNIT_KG)
+);
+
+const getAllowedUnitsByCategory = (category, fallbackUnit = UNIT_KG) => {
+  if (isGheeTelCategory(category)) return [UNIT_DABBA];
+  if (isColorCategory(category)) return [UNIT_GRM];
+  // All other categories: KG compulsory
+  return [UNIT_KG];
+};
+
+const normalizeUnitForCategory = (category, unit, fallbackUnit = UNIT_KG) => {
+  const allowed = getAllowedUnitsByCategory(category, fallbackUnit);
+  return allowed.includes(unit) ? unit : allowed[0];
+};
+
+const convertItemQtyToKg = (qty, unit) => {
+  const numericQty = parseFloat(qty) || 0;
+  if (normalizeQuantityUnit(unit) === UNIT_DABBA) return numericQty * TEL_DABBA_KG;
+  if (normalizeQuantityUnit(unit) === UNIT_GRM) return numericQty / 1000;
+  return numericQty;
+};
+
+const roundKg2 = (value) => {
+  const numeric = parseFloat(value);
+  if (!Number.isFinite(numeric)) return 0;
+  return Math.round((numeric + Number.EPSILON) * 100) / 100;
+};
+
+const clampQtyByCategory = (category, qty) => {
+  const numericQty = parseFloat(qty);
+  if (!Number.isFinite(numericQty)) return qty;
+  if (isGheeTelCategory(category)) return Math.max(0, Math.trunc(numericQty));
+  return numericQty;
+};
+
+const canSubmitStockEntryDate = (entryDate) => {
+  const normalized = normalizeDateOnly(entryDate);
+  if (!normalized) return false;
+  const today = new Date();
+  const currentMonth = getMonthInputValue(today);
+  const entryMonth = normalized.slice(0, 7);
+
+  if (entryMonth > currentMonth) return false;
+  if (entryMonth === currentMonth) return true;
+
+  if (ENABLE_INITIAL_STOCK_BACKFILL) {
+    const [entryYear, entryMon] = entryMonth.split('-').map(Number);
+    const diffMonths = ((today.getFullYear() - entryYear) * 12) + ((today.getMonth() + 1) - entryMon);
+    return diffMonths >= 1 && diffMonths <= INITIAL_BACKFILL_MONTHS;
+  }
+
+  const previousMonth = getPreviousMonthInputValue(currentMonth);
+  if (entryMonth !== previousMonth) return false;
+  return today.getDate() <= MONTH_CLOSE_GRACE_DAYS;
+};
+
 const calculateTotals = (items) => {
+  let totalQty = 0;
   let totalKg = 0;
   items.forEach((item) => {
-    totalKg += parseFloat(item.qty) || 0;
+    totalQty += parseFloat(item.qty) || 0;
+    totalKg += convertItemQtyToKg(item.qty, item.unit);
   });
-  return { totalItems: items.length, totalKg };
+  return {
+    totalItems: items.length,
+    totalQty: roundKg2(totalQty),
+    totalKg: roundKg2(totalKg),
+  };
 };
 
 const calculateKgTotals = (items) => ({
   totalItems: items.length,
-  totalKg: items.reduce((sum, item) => sum + (parseFloat(item.kg) || 0), 0),
+  totalKg: roundKg2(items.reduce((sum, item) => sum + (parseFloat(item.kg) || 0), 0)),
 });
 
 const createEmptyItemRow = (id) => ({
@@ -466,8 +609,321 @@ const getSmartFileName = (order) => {
 const getSendFileName = (order) =>
   `send-${sanitizeFilePart(order?.fromCenter)}-${sanitizeFilePart(order?.chalanNo)}.pdf`;
 
-const getPurchaseFileName = (purchase) =>
-  `purchase-${sanitizeFilePart(purchase?.center || purchase?.shopName)}-${sanitizeFilePart(purchase?.billNo)}.pdf`;
+const PURCHASE_SOURCE_SHOP = 'shop';
+const PURCHASE_SOURCE_KOTHAR_STOCK = 'khothar_stock';
+const PURCHASE_SHOP_NAMES_COLLECTION = 'purchase-shop-names';
+/** Matches Firebase console collection — દુકાન/કોઠાર સ્ટોક ખરીદી સિંક (availableKg). */
+const GLOBAL_STOCK_COLLECTION = 'global-stock';
+const STOCK_TRANSACTIONS_COLLECTION = 'stock-transactions';
+const MONTHLY_CLOSING_STOCK_COLLECTION = 'monthly-closing-stock';
+
+const globalStockKg = (value) => {
+  const n = parseFloat(value);
+  return Number.isFinite(n) ? n : 0;
+};
+
+const normalizeDateOnly = (value) => {
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+};
+
+const toSafeTxQuantity = (value) => {
+  const parsed = parseFloat(value);
+  return Number.isFinite(parsed) ? Math.round((parsed + Number.EPSILON) * 100) / 100 : 0;
+};
+
+const makeStockTransactionDocId = (sourceType, sourceId, lineIndex, transactionType) =>
+  `${sourceType}__${sourceId}__${lineIndex}__${transactionType}`;
+
+const makeMonthlyClosingDocId = (monthValue, itemKey) =>
+  `${encodeURIComponent((monthValue || '').toString())}__${encodeURIComponent((itemKey || '').toString())}`;
+
+const buildStockTransactionsFromDocuments = ({ orders = [], sendOrders = [], purchases = [] }) => {
+  const transactions = [];
+
+  purchases
+    .filter((entry) => !entry?.is_deleted)
+    .forEach((purchase) => {
+      const txDate = normalizeDateOnly(purchase.billDate || purchase.date || purchase.entryDate);
+      const items = Array.isArray(purchase.items) ? purchase.items : [];
+      items.forEach((item, lineIndex) => {
+        const itemName = (item?.itemName || '').trim();
+        const quantity = toSafeTxQuantity(item?.kg);
+        if (!itemName || !txDate || !quantity) return;
+        transactions.push({
+          id: makeStockTransactionDocId('purchase', purchase.id, lineIndex, 'IN'),
+          sourceType: 'purchase',
+          sourceId: purchase.id,
+          lineIndex,
+          center_id: 'global',
+          centerName: 'All Centers / Full Report',
+          item_id: normalizeItemName(itemName),
+          itemName,
+          transaction_type: 'IN',
+          quantity,
+          transaction_date: txDate,
+          created_at: purchase.timestamp || new Date(),
+          is_deleted: false,
+          autoSynced: true,
+        });
+      });
+    });
+
+  sendOrders
+    .filter((entry) => !entry?.is_deleted)
+    .forEach((order) => {
+      const txDate = normalizeDateOnly(order.date || order.timestamp);
+      const centerName = (order.fromCenter || '').trim();
+      const items = Array.isArray(order.items) ? order.items : [];
+      items.forEach((item, lineIndex) => {
+        const itemName = (item?.itemName || '').trim();
+        const quantity = toSafeTxQuantity(item?.kg);
+        if (!itemName || !txDate || !quantity) return;
+        transactions.push({
+          id: makeStockTransactionDocId('send', order.id, lineIndex, 'IN'),
+          sourceType: 'send',
+          sourceId: order.id,
+          lineIndex,
+          center_id: normalizeItemName(centerName),
+          centerName,
+          item_id: normalizeItemName(itemName),
+          itemName,
+          transaction_type: 'IN',
+          quantity,
+          transaction_date: txDate,
+          created_at: order.timestamp || new Date(),
+          is_deleted: false,
+          autoSynced: true,
+        });
+      });
+    });
+
+  orders
+    .filter((entry) => !entry?.is_deleted)
+    .forEach((order) => {
+      const txDate = normalizeDateOnly(order.date || order.timestamp);
+      const centerName = (order.center || '').trim();
+      const items = Array.isArray(order.items) ? order.items : [];
+      items.forEach((item, lineIndex) => {
+        const itemName = (item?.name || '').trim();
+        const quantity = toSafeTxQuantity(convertItemQtyToKg(item?.qty, item?.unit));
+        if (!itemName || !txDate || !quantity) return;
+        transactions.push({
+          id: makeStockTransactionDocId('order', order.id, lineIndex, 'OUT'),
+          sourceType: 'order',
+          sourceId: order.id,
+          lineIndex,
+          center_id: normalizeItemName(centerName),
+          centerName,
+          item_id: normalizeItemName(itemName),
+          itemName,
+          transaction_type: 'OUT',
+          quantity,
+          transaction_date: txDate,
+          created_at: order.timestamp || new Date(),
+          is_deleted: false,
+          autoSynced: true,
+        });
+      });
+    });
+
+  return transactions;
+};
+
+async function syncStockHistoryFromPrimaryCollections() {
+  const [ordersSnapshot, sendSnapshot, purchaseSnapshot, existingTxSnapshot] = await Promise.all([
+    getDocs(collection(db, 'orders')),
+    getDocs(collection(db, 'send-orders')),
+    getDocs(collection(db, 'purchases')),
+    getDocs(collection(db, STOCK_TRANSACTIONS_COLLECTION)),
+  ]);
+
+  const allOrders = ordersSnapshot.docs.map((docSnap) => ({ id: docSnap.id, ...docSnap.data() }));
+  const allSendOrders = sendSnapshot.docs.map((docSnap) => ({ id: docSnap.id, ...docSnap.data() }));
+  const allPurchases = purchaseSnapshot.docs.map((docSnap) => ({ id: docSnap.id, ...docSnap.data() }));
+  const nextTransactions = buildStockTransactionsFromDocuments({
+    orders: allOrders,
+    sendOrders: allSendOrders,
+    purchases: allPurchases,
+  });
+
+  const activeIdSet = new Set(nextTransactions.map((entry) => entry.id));
+
+  await Promise.all(
+    nextTransactions.map((entry) =>
+      setDoc(doc(db, STOCK_TRANSACTIONS_COLLECTION, entry.id), {
+        ...entry,
+        updatedAt: new Date(),
+      }, { merge: true }),
+    ),
+  );
+
+  const staleTxUpdates = existingTxSnapshot.docs
+    .map((docSnap) => ({ id: docSnap.id, ...docSnap.data() }))
+    .filter((entry) => entry.autoSynced)
+    .filter((entry) => !activeIdSet.has(entry.id))
+    .map((entry) =>
+      updateDoc(doc(db, STOCK_TRANSACTIONS_COLLECTION, entry.id), {
+        is_deleted: true,
+        updatedAt: new Date(),
+      }),
+    );
+
+  if (staleTxUpdates.length) {
+    await Promise.all(staleTxUpdates);
+  }
+
+  const stockTxSnapshot = await getDocs(collection(db, STOCK_TRANSACTIONS_COLLECTION));
+  return stockTxSnapshot.docs
+    .map((docSnap) => ({ id: docSnap.id, ...docSnap.data() }))
+    .filter((entry) => !entry.is_deleted);
+}
+
+async function setSourceTransactionsDeleted(sourceType, sourceId, isDeleted = true) {
+  const sourceQuery = query(
+    collection(db, STOCK_TRANSACTIONS_COLLECTION),
+    where('sourceType', '==', sourceType),
+    where('sourceId', '==', sourceId),
+  );
+  const snapshot = await getDocs(sourceQuery);
+  if (snapshot.empty) return;
+  await Promise.all(
+    snapshot.docs.map((docSnap) =>
+      updateDoc(doc(db, STOCK_TRANSACTIONS_COLLECTION, docSnap.id), {
+        is_deleted: isDeleted,
+        updatedAt: new Date(),
+      }),
+    ),
+  );
+}
+
+async function migrateMonthlyClosingDocIdsToSafeFormat() {
+  const snapshot = await getDocs(collection(db, MONTHLY_CLOSING_STOCK_COLLECTION));
+  const docs = snapshot.docs.map((docSnap) => ({ id: docSnap.id, ...docSnap.data() }));
+  let migratedCount = 0;
+  let skippedCount = 0;
+
+  for (const entry of docs) {
+    if (entry?.is_deleted) {
+      skippedCount += 1;
+      continue;
+    }
+    const monthValue = (entry.month || entry.monthValue || '').toString().trim();
+    const itemKey = (entry.item_id || normalizeItemName(entry.itemName || '')).toString().trim();
+    if (!monthValue || !itemKey) {
+      skippedCount += 1;
+      continue;
+    }
+
+    const safeId = makeMonthlyClosingDocId(monthValue, itemKey);
+    if (safeId === entry.id) {
+      skippedCount += 1;
+      continue;
+    }
+
+    const safeRef = doc(db, MONTHLY_CLOSING_STOCK_COLLECTION, safeId);
+    await setDoc(
+      safeRef,
+      {
+        ...entry,
+        month: monthValue,
+        monthValue,
+        item_id: itemKey,
+        migratedFromId: entry.id,
+        updatedAt: new Date(),
+        is_deleted: false,
+      },
+      { merge: true },
+    );
+
+    await updateDoc(doc(db, MONTHLY_CLOSING_STOCK_COLLECTION, entry.id), {
+      is_deleted: true,
+      migratedToId: safeId,
+      updatedAt: new Date(),
+    });
+    migratedCount += 1;
+  }
+
+  return { migratedCount, skippedCount, totalDocs: docs.length };
+}
+
+/** +/- KG dari દરેક purchase લાઈનમને મુજબ global-stock મર્જ કરે. Doc ID = buildItemNameKey(itemName). */
+async function applyGlobalStockKgDelta(items = [], deltaMultiplier = 1) {
+  for (const item of items) {
+    const name = (item.itemName || '').trim();
+    if (!name) continue;
+    const kgDelta = deltaMultiplier * globalStockKg(item.kg);
+    if (!kgDelta) continue;
+    const docKey = buildItemNameKey(name);
+    if (!docKey) continue;
+    const docRef = doc(db, GLOBAL_STOCK_COLLECTION, docKey);
+    const snap = await getDoc(docRef);
+    const prev = snap.exists() ? globalStockKg(snap.data().availableKg) : 0;
+    const next = Math.max(0, Math.round((prev + kgDelta + Number.EPSILON) * 100) / 100);
+    await setDoc(
+      docRef,
+      {
+        itemName: name,
+        availableKg: next,
+        lastUpdated: serverTimestamp(),
+      },
+      { merge: true },
+    );
+  }
+}
+
+const getPurchaseResolvedSource = (purchase) => {
+  if (purchase?.purchaseSource === PURCHASE_SOURCE_KOTHAR_STOCK) return PURCHASE_SOURCE_KOTHAR_STOCK;
+  return PURCHASE_SOURCE_SHOP;
+};
+
+const getPurchaseFileName = (purchase) => {
+  if (getPurchaseResolvedSource(purchase) === PURCHASE_SOURCE_KOTHAR_STOCK) {
+    return `purchase-kothar-stock-${sanitizeFilePart(purchase?.date || purchase?.entryDate)}.pdf`;
+  }
+  return `purchase-${sanitizeFilePart(purchase?.shopName || purchase?.center)}-${sanitizeFilePart(purchase?.billNo)}.pdf`;
+};
+
+async function ensurePurchaseShopNameSaved(shopNameTrimmed) {
+  const name = (shopNameTrimmed || '').trim();
+  if (!name) return;
+  const nameKey = normalizeItemName(name);
+  try {
+    const nameQuery = query(
+      collection(db, PURCHASE_SHOP_NAMES_COLLECTION),
+      where('nameKey', '==', nameKey),
+      limit(1),
+    );
+    const snap = await getDocs(nameQuery);
+    if (!snap.empty) {
+      await updateDoc(doc(db, PURCHASE_SHOP_NAMES_COLLECTION, snap.docs[0].id), {
+        name,
+        updatedAt: new Date(),
+      });
+      return;
+    }
+    await addDoc(collection(db, PURCHASE_SHOP_NAMES_COLLECTION), {
+      name,
+      nameKey,
+      createdAt: new Date(),
+    });
+  } catch (err) {
+    console.warn('purchase shop name save skipped:', err);
+  }
+}
+
+async function fetchPurchaseShopNameList() {
+  try {
+    const snapshot = await getDocs(collection(db, PURCHASE_SHOP_NAMES_COLLECTION));
+    const names = [...new Set(snapshot.docs.map((d) => (d.data().name || '').trim()).filter(Boolean))];
+    names.sort((a, b) => a.localeCompare(b, 'gu'));
+    return names;
+  } catch {
+    return [];
+  }
+}
 
 // Category icons for visual appeal
 const categoryIcons = {
@@ -598,6 +1054,19 @@ function ReportPreviewContent({ report }) {
   );
 }
 
+const ITEM_SEARCH_HINT_GU =
+  'આપને જે વસ્તુ મોકલવાની હોય તે Searchમાં લખશો તે વસ્તુ આપને દેખાશે.';
+
+function ItemsListSearchHint() {
+  return (
+    <div className="border-y border-white/10 bg-[#121212]/90">
+      <p className="mx-5 my-5 px-3 py-2 text-center text-[13px] sm:text-sm leading-relaxed text-amber-300">
+        {ITEM_SEARCH_HINT_GU}
+      </p>
+    </div>
+  );
+}
+
 function ItemNameAutocompleteInput({
   value,
   onChange,
@@ -608,11 +1077,35 @@ function ItemNameAutocompleteInput({
   placeholder = 'Item name...',
 }) {
   const [isOpen, setIsOpen] = useState(false);
-  const excluded = new Set(excludedNameKeys);
-  const filteredItems = catalogItems
-    .filter((item) => !excluded.has(item.nameKey) || normalizeItemName(value) === item.nameKey)
-    .filter((item) => !value || matchesSearchText(item.name, value) || matchesSearchText(item.category, value))
-    .slice(0, 12);
+
+  const filteredItems = useMemo(() => {
+    const excluded = new Set(excludedNameKeys);
+    const normalizedQuery = normalizeItemName(value);
+    const baseList = catalogItems.filter(
+      (item) => !excluded.has(item.nameKey) || normalizedQuery === item.nameKey,
+    );
+
+    if (!normalizedQuery) {
+      const sorted = [...baseList].sort((left, right) => {
+        const categoryCompare = (left.category || '').localeCompare(right.category || '', 'gu');
+        if (categoryCompare !== 0) return categoryCompare;
+        return (left.name || '').localeCompare(right.name || '', 'gu');
+      });
+      const seenCategories = new Set();
+      const onePerCategory = [];
+      for (const item of sorted) {
+        const cat = item.category || 'અન્ય';
+        if (seenCategories.has(cat)) continue;
+        seenCategories.add(cat);
+        onePerCategory.push(item);
+      }
+      return onePerCategory;
+    }
+
+    return baseList
+      .filter((item) => matchesSearchText(item.name, value) || matchesSearchText(item.category, value))
+      .slice(0, 48);
+  }, [catalogItems, excludedNameKeys, value]);
 
   const focusClasses = {
     blue: 'focus:border-blue-500/50',
@@ -687,6 +1180,20 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
   const [customEmailError, setCustomEmailError] = useState('');
   const [mailSending, setMailSending] = useState(false);
   const [selectedReportEmail, setSelectedReportEmail] = useState(REPORT_DEFAULT_EMAILS[0]);
+  const [closingMigrationLoading, setClosingMigrationLoading] = useState(false);
+  const [previousMonthClosingInfo, setPreviousMonthClosingInfo] = useState({
+    month: '',
+    currentMonth: '',
+    previousIncomingKg: 0,
+    previousOutgoingKg: 0,
+    totalClosingKg: 0,
+    currentIncomingKg: 0,
+    currentOutgoingKg: 0,
+    currentNetKg: 0,
+    itemCount: 0,
+    loading: false,
+    error: '',
+  });
 
   const fetchOrders = async () => {
     setLoading(true);
@@ -719,6 +1226,122 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
 
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { fetchOrders(); fetchSendOrders(); fetchReports(); }, []);
+
+  useEffect(() => {
+    const targetMonth = getPreviousMonthInputValue(reportForm.month);
+    if (!targetMonth) {
+      setPreviousMonthClosingInfo({
+        month: '',
+        currentMonth: reportForm.month || '',
+        previousIncomingKg: 0,
+        previousOutgoingKg: 0,
+        totalClosingKg: 0,
+        currentIncomingKg: 0,
+        currentOutgoingKg: 0,
+        currentNetKg: 0,
+        itemCount: 0,
+        loading: false,
+        error: '',
+      });
+      return;
+    }
+
+    let cancelled = false;
+    (async () => {
+      setPreviousMonthClosingInfo((prev) => ({
+        ...prev,
+        month: targetMonth,
+        currentMonth: reportForm.month,
+        loading: true,
+        error: '',
+      }));
+      try {
+        let snapshot = await getDocs(collection(db, STOCK_TRANSACTIONS_COLLECTION));
+        let rows = snapshot.docs
+          .map((docSnap) => ({ id: docSnap.id, ...docSnap.data() }))
+          .filter((entry) => !entry?.is_deleted);
+
+        // If ledger is still empty (e.g. report never generated yet), hydrate once from primary collections.
+        if (rows.length === 0) {
+          try {
+            rows = await syncStockHistoryFromPrimaryCollections();
+          } catch (syncErr) {
+            console.warn('stock-transactions sync skipped in closing widget:', syncErr);
+          }
+        }
+
+        const previousMonthRows = rows.filter(
+          (entry) => monthFromDateValue(entry.transaction_date || entry.date || entry.created_at) === targetMonth,
+        );
+        const currentMonthRows = rows.filter(
+          (entry) => monthFromDateValue(entry.transaction_date || entry.date || entry.created_at) === reportForm.month,
+        );
+
+        const previousIncomingKg = previousMonthRows
+          .filter((entry) => (entry.transaction_type || '').toString().toUpperCase() === 'IN')
+          .reduce((sum, entry) => sum + globalStockKg(entry.quantity), 0);
+        const previousOutgoingKg = previousMonthRows
+          .filter((entry) => (entry.transaction_type || '').toString().toUpperCase() === 'OUT')
+          .reduce((sum, entry) => sum + globalStockKg(entry.quantity), 0);
+        const currentIncomingKg = currentMonthRows
+          .filter((entry) => (entry.transaction_type || '').toString().toUpperCase() === 'IN')
+          .reduce((sum, entry) => sum + globalStockKg(entry.quantity), 0);
+        const currentOutgoingKg = currentMonthRows
+          .filter((entry) => (entry.transaction_type || '').toString().toUpperCase() === 'OUT')
+          .reduce((sum, entry) => sum + globalStockKg(entry.quantity), 0);
+
+        const previousMonthEnd = `${targetMonth}-31`;
+        const totalClosingKg = rows
+          .filter((entry) => {
+            const txDate = normalizeDateOnly(entry.transaction_date || entry.date || entry.created_at);
+            return txDate && txDate <= previousMonthEnd;
+          })
+          .reduce((sum, entry) => sum + (
+            (entry.transaction_type || '').toString().toUpperCase() === 'OUT'
+              ? -globalStockKg(entry.quantity)
+              : globalStockKg(entry.quantity)
+          ), 0);
+        const itemCount = new Set(
+          previousMonthRows.map((entry) => normalizeItemName(entry.itemName || entry.item_id || '')),
+        ).size;
+        const currentNetKg = currentIncomingKg - currentOutgoingKg;
+
+        if (!cancelled) {
+          setPreviousMonthClosingInfo({
+            month: targetMonth,
+            currentMonth: reportForm.month,
+            previousIncomingKg,
+            previousOutgoingKg,
+            totalClosingKg,
+            currentIncomingKg,
+            currentOutgoingKg,
+            currentNetKg,
+            itemCount,
+            loading: false,
+            error: '',
+          });
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setPreviousMonthClosingInfo({
+            month: targetMonth,
+            currentMonth: reportForm.month,
+            previousIncomingKg: 0,
+            previousOutgoingKg: 0,
+            totalClosingKg: 0,
+            currentIncomingKg: 0,
+            currentOutgoingKg: 0,
+            currentNetKg: 0,
+            itemCount: 0,
+            loading: false,
+            error: err?.message || 'Failed to load previous month closing.',
+          });
+        }
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [reportForm.month]);
 
   const clearFilters = () => setFilters({ date: '', center: '', name: '' });
   const clearSendFilters = () => setSendFilters({ date: '', center: '', name: '' });
@@ -874,6 +1497,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
     if (!window.confirm(`Delete order #${order.chalanNo} from ${order.center}?`)) return;
     try {
       await updateDoc(doc(db, "orders", order.id), { is_deleted: true });
+      await setSourceTransactionsDeleted('order', order.id, true);
       setOrders(orders.filter(o => o.id !== order.id));
     } catch (err) { alert("Delete Error: " + err.message); }
   };
@@ -944,15 +1568,33 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
     setReportGenerating(true);
     try {
       const effectiveCenter = getResolvedCenterValue(reportForm.center, reportForm.centerOther);
-      const purchaseSnapshot = await getDocs(query(collection(db, 'purchases'), orderBy('timestamp', 'desc')));
-      const purchases = purchaseSnapshot.docs
-        .map((docSnap) => ({ id: docSnap.id, ...docSnap.data() }))
-        .filter((item) => !item.is_deleted);
+      const [stockTransactions, monthlySnapshot] = await Promise.all([
+        syncStockHistoryFromPrimaryCollections(),
+        getDocs(collection(db, MONTHLY_CLOSING_STOCK_COLLECTION)),
+      ]);
+      const monthlyClosings = monthlySnapshot.docs.map((docSnap) => ({ id: docSnap.id, ...docSnap.data() }));
+      const closingSnapshots = buildMonthlyClosingSnapshots({
+        stockTransactions,
+        throughDate: reportForm.selectedDate,
+      });
+      await Promise.all(
+        closingSnapshots.map((entry) =>
+          setDoc(
+            doc(db, MONTHLY_CLOSING_STOCK_COLLECTION, makeMonthlyClosingDocId(entry.month, entry.item_id)),
+            {
+              ...entry,
+              monthValue: entry.month,
+            },
+            { merge: true },
+          ),
+        ),
+      );
 
       const draft = buildSummaryReport({
         orders,
         sendOrders,
-        purchases,
+        stockTransactions,
+        monthlyClosingStock: monthlyClosings,
         month: reportForm.month,
         fromMonth: isRangeMode ? reportForm.fromMonth : reportForm.month,
         toMonth: isRangeMode ? reportForm.toMonth : reportForm.month,
@@ -1038,12 +1680,45 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
     if (!window.confirm(`Delete send chalan #${order.chalanNo} from ${order.fromCenter}?`)) return;
     try {
       await updateDoc(doc(db, "send-orders", order.id), { is_deleted: true });
+      await setSourceTransactionsDeleted('send', order.id, true);
       setSendOrders(sendOrders.filter(o => o.id !== order.id));
     } catch (err) { alert("Delete Error: " + err.message); }
   };
 
-  if (editOrder) return <EditOrderScreen order={editOrder} onBack={() => { setEditOrder(null); fetchOrders(); }} catalogItems={catalogItems} />;
-  if (editSendOrder) return <EditSendOrderScreen order={editSendOrder} onBack={() => { setEditSendOrder(null); fetchSendOrders(); }} catalogItems={catalogItems} />;
+  const handleMigrateClosingSnapshots = async () => {
+    if (closingMigrationLoading) return;
+    setClosingMigrationLoading(true);
+    try {
+      const result = await migrateMonthlyClosingDocIdsToSafeFormat();
+      alert(
+        `Monthly closing migration done ✅\nMigrated: ${result.migratedCount}\nSkipped: ${result.skippedCount}\nTotal scanned: ${result.totalDocs}`,
+      );
+    } catch (err) {
+      alert(`Migration Error: ${err.message}`);
+    }
+    setClosingMigrationLoading(false);
+  };
+
+  if (editOrder) {
+    return (
+      <EditOrderScreen
+        key={editOrder.id}
+        order={editOrder}
+        onBack={() => { setEditOrder(null); fetchOrders(); }}
+        catalogItems={catalogItems}
+      />
+    );
+  }
+  if (editSendOrder) {
+    return (
+      <EditSendOrderScreen
+        key={editSendOrder.id}
+        order={editSendOrder}
+        onBack={() => { setEditSendOrder(null); fetchSendOrders(); }}
+        catalogItems={catalogItems}
+      />
+    );
+  }
 
   const isRequests = activeTab === 'requests';
   const isSends = activeTab === 'sends';
@@ -1161,12 +1836,13 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
                     transition={{ delay: index * 0.05 }} whileHover={{ y: -5, transition: { duration: 0.2 } }}
                     className="bg-gradient-to-b from-[#1e1e1e] to-[#181818] rounded-2xl sm:rounded-3xl border border-white/5 shadow-xl overflow-hidden hover:border-orange-500/30 transition-colors group">
                     <div className="p-4 sm:p-5 border-b border-white/5 bg-gradient-to-r from-[#252525] to-[#1e1e1e]">
-                      <div className="flex justify-between items-start">
-                        <div>
+                      <div className="flex justify-between items-start gap-2">
+                        <div className="min-w-0 flex-1">
                           <h3 className="font-bold text-white uppercase text-sm sm:text-base group-hover:text-orange-400 transition-colors">{order.center}</h3>
                           <span className="text-xs text-orange-500 font-bold">#CHALAN: {order.chalanNo}</span>
+                          {isNonListedCenterValue(order.center) && <NonListedCenterBadge />}
                         </div>
-                        <div className="text-xs text-gray-500 font-medium bg-white/5 px-2 py-1 rounded-lg">{order.date.split('-').reverse().join('-')}</div>
+                        <div className="shrink-0 text-xs text-gray-500 font-medium bg-white/5 px-2 py-1 rounded-lg">{order.date.split('-').reverse().join('-')}</div>
                       </div>
                     </div>
                     <div className="p-4 sm:p-5">
@@ -1279,18 +1955,19 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
               <AnimatePresence>
                 {filteredSendOrders.map((order, index) => {
                   const filledItems = (order.items || []).filter(r => r.itemName && r.itemName.trim());
-                  const totalKg = filledItems.reduce((sum, r) => sum + (parseFloat(r.kg) || 0), 0);
+                  const totalKg = roundKg2(filledItems.reduce((sum, r) => sum + (parseFloat(r.kg) || 0), 0));
                   return (
                     <motion.div key={order.id} variants={fadeInUp} initial="initial" animate="animate" exit="exit"
                       transition={{ delay: index * 0.05 }} whileHover={{ y: -5, transition: { duration: 0.2 } }}
                       className="bg-gradient-to-b from-[#1e1e1e] to-[#181818] rounded-2xl sm:rounded-3xl border border-white/5 shadow-xl overflow-hidden hover:border-blue-500/30 transition-colors group">
                       <div className="p-4 sm:p-5 border-b border-white/5 bg-gradient-to-r from-[#252525] to-[#1e1e1e]">
-                        <div className="flex justify-between items-start">
-                          <div>
+                        <div className="flex justify-between items-start gap-2">
+                          <div className="min-w-0 flex-1">
                             <h3 className="font-bold text-white uppercase text-sm sm:text-base group-hover:text-blue-400 transition-colors">{order.fromCenter}</h3>
                             <span className="text-xs text-blue-500 font-bold">#CHALAN: {order.chalanNo}</span>
+                            {isNonListedCenterValue(order.fromCenter) && <NonListedCenterBadge />}
                           </div>
-                          <div className="text-xs text-gray-500 font-medium bg-white/5 px-2 py-1 rounded-lg">{(order.date || '').split('-').reverse().join('-')}</div>
+                          <div className="shrink-0 text-xs text-gray-500 font-medium bg-white/5 px-2 py-1 rounded-lg">{(order.date || '').split('-').reverse().join('-')}</div>
                         </div>
                       </div>
                       <div className="p-4 sm:p-5">
@@ -1361,13 +2038,23 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
                 </div>
                 <h2 className="mt-2 text-xl sm:text-2xl font-black text-white">Create fixed monthly stock report</h2>
                 <p className="mt-2 text-sm text-gray-400 max-w-2xl">
-                  One clean monthly table only. Income includes center send entries plus purchase entries, outgoing uses kothar request entries, and total stock is income minus outgoing.
+                  One monthly table per run. Income column = opening mug (all entries before period start globally) plus period sends (filtered) plus shop/khothar-stock purchases in the chosen date range—so May ભરતી Aprilનો રિપોર્ટ બનાવો તો પણ ફક્ત April તારીખની ટ્રાન્ઝેક્શન દેખાશે. Outgoing = requests filtered by centre.
                 </p>
               </div>
               <div className="flex gap-2 sm:gap-3">
                 <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }} onClick={fetchReports}
                   className="text-gray-400 hover:text-emerald-400 flex items-center justify-center gap-1.5 text-xs font-bold uppercase transition-all bg-white/5 hover:bg-emerald-500/10 px-3 py-2 rounded-xl border border-white/10">
                   <RefreshCw size={14} /> Refresh
+                </motion.button>
+                <motion.button
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                  onClick={handleMigrateClosingSnapshots}
+                  disabled={closingMigrationLoading}
+                  className="text-gray-400 hover:text-blue-300 disabled:opacity-50 flex items-center justify-center gap-1.5 text-xs font-bold uppercase transition-all bg-white/5 hover:bg-blue-500/10 px-3 py-2 rounded-xl border border-white/10"
+                >
+                  {closingMigrationLoading ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+                  Fix Closing IDs
                 </motion.button>
                 <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }} onClick={() => setReportForm(createDefaultReportForm())}
                   className="text-gray-400 hover:text-white flex items-center justify-center gap-1.5 text-xs font-bold uppercase transition-all bg-white/5 hover:bg-white/10 px-3 py-2 rounded-xl border border-white/10">
@@ -1552,9 +2239,35 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
               </p>
             </div>
 
+            <div className="mt-3 rounded-2xl border border-blue-500/20 bg-blue-500/10 p-4">
+              <p className="text-[11px] font-bold uppercase tracking-widest text-blue-300">Previous Month Closing (Admin View)</p>
+              <p className="mt-2 text-sm font-bold text-blue-100">
+                Month: {previousMonthClosingInfo.month ? formatDisplayDate(`${previousMonthClosingInfo.month}-01`).slice(3) : '-'}
+              </p>
+              <p className="mt-1 text-lg font-black text-white">
+                {previousMonthClosingInfo.loading ? 'Loading...' : `${formatMetric(previousMonthClosingInfo.totalClosingKg)} KG`}
+              </p>
+              <p className="mt-1 text-xs text-blue-100/80">
+                Prev month IN: {previousMonthClosingInfo.loading ? '-' : formatMetric(previousMonthClosingInfo.previousIncomingKg)} KG | OUT: {previousMonthClosingInfo.loading ? '-' : formatMetric(previousMonthClosingInfo.previousOutgoingKg)} KG
+              </p>
+              <p className="mt-1 text-xs text-blue-100/80">
+                Items touched (prev month): {previousMonthClosingInfo.loading ? '-' : formatMetric(previousMonthClosingInfo.itemCount)}
+              </p>
+              <p className="mt-3 text-[11px] font-bold uppercase tracking-widest text-blue-300">Current Month Totals</p>
+              <p className="mt-1 text-xs text-blue-100/80">
+                Month: {previousMonthClosingInfo.currentMonth ? formatDisplayDate(`${previousMonthClosingInfo.currentMonth}-01`).slice(3) : '-'}
+              </p>
+              <p className="mt-1 text-xs text-blue-100/80">
+                IN: {previousMonthClosingInfo.loading ? '-' : formatMetric(previousMonthClosingInfo.currentIncomingKg)} KG | OUT: {previousMonthClosingInfo.loading ? '-' : formatMetric(previousMonthClosingInfo.currentOutgoingKg)} KG | NET: {previousMonthClosingInfo.loading ? '-' : formatMetric(previousMonthClosingInfo.currentNetKg)} KG
+              </p>
+              {previousMonthClosingInfo.error && (
+                <p className="mt-2 text-xs text-red-300">{previousMonthClosingInfo.error}</p>
+              )}
+            </div>
+
             <div className="mt-5 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
               <p className="text-xs text-gray-500">
-                Columns: item name, income (KG), outgoing (KG), total stock (KG). Centewise mode filters request, send, and purchase entries for the selected center only.
+                Columns: income also embeds મુખ્ય કોઠારની ખુલવાની સ્ટોક — પહેલાં ગ્લોબલ રીતે થઈ ચુકેલી ટ્રાન્ઝેક્શન. દરેક સેન્ટર રિપોર્ટમાં પિરીયડ ખરીદી દેખાશે; રિક્વેસ્ટ/સેન્ડ સેન્ટર મુજબ ફિલ્ટર.
               </p>
               <motion.button
                 whileHover={{ scale: 1.02 }}
@@ -1711,6 +2424,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
                       <th className="border p-2 w-10 sm:w-12 text-center">No</th>
                       <th className="border p-2 text-left">Item Name</th>
                       <th className="border p-2 w-16 sm:w-20 text-center">Qty</th>
+                      <th className="border p-2 w-16 sm:w-20 text-center">KG</th>
                       <th className="border p-2 w-16 sm:w-20 text-center">Unit</th>
                     </tr>
                   </thead>
@@ -1720,16 +2434,23 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
                         <td className="border p-2 text-center text-gray-500 font-sans">{i+1}</td>
                         <td className="border p-2 font-bold">{it.name}</td>
                         <td className="border p-2 text-center font-bold">{it.qty}</td>
+                        <td className="border p-2 text-center font-bold text-orange-700">{formatMetric(convertItemQtyToKg(it.qty, it.unit))}</td>
                         <td className="border p-2 text-center text-gray-400 text-[10px] uppercase font-sans font-bold">{it.unit}</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
-              <div className="mt-6 sm:mt-10 grid grid-cols-2 border-4 border-black p-3 sm:p-5 font-black text-center uppercase text-xs sm:text-sm tracking-tighter">
-                <div className="border-r border-gray-200">ITEMS: {previewOrder.items.length}</div>
-                <div>TOTAL KG: {calculateTotals(previewOrder.items).totalKg}</div>
-              </div>
+              {(() => {
+                const totals = calculateTotals(previewOrder.items);
+                return (
+                  <div className="mt-6 sm:mt-10 grid grid-cols-3 border-4 border-black p-3 sm:p-5 font-black text-center uppercase text-xs sm:text-sm tracking-tighter">
+                    <div className="border-r border-gray-200">ITEMS: {previewOrder.items.length}</div>
+                    <div className="border-r border-gray-200">TOTAL QTY: {formatMetric(totals.totalQty)}</div>
+                    <div>TOTAL KG: {formatMetric(totals.totalKg)}</div>
+                  </div>
+                );
+              })()}
             </motion.div>
           </motion.div>
         )}
@@ -1783,7 +2504,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
               </div>
               {(() => {
                 const filledItems = (previewSendOrder.items || []).filter(r => r.itemName && r.itemName.trim());
-                const totalKg = filledItems.reduce((sum, r) => sum + (parseFloat(r.kg) || 0), 0);
+                const totalKg = roundKg2(filledItems.reduce((sum, r) => sum + (parseFloat(r.kg) || 0), 0));
                 return (
                   <div className="mt-6 sm:mt-10 grid grid-cols-2 border-4 border-black p-3 sm:p-5 font-black text-center uppercase text-xs sm:text-sm tracking-tighter">
                     <div className="border-r border-gray-200">ITEMS: {filledItems.length}</div>
@@ -2348,11 +3069,11 @@ function ItemAdminPanel({ user, catalogItems, refreshCatalog }) {
 }
 
 const createDefaultPurchaseForm = () => ({
-  center: '',
-  centerOther: '',
+  purchaseSource: '',
   shopName: '',
   billNo: '',
   billDate: new Date().toISOString().split('T')[0],
+  entryDate: new Date().toISOString().split('T')[0],
   rows: createRowsFromItems([], 5),
 });
 
@@ -2362,7 +3083,8 @@ function PurchaseAdminPanel({ user, catalogItems }) {
   const [purchaseLoading, setPurchaseLoading] = useState(true);
   const [purchaseSubmitting, setPurchaseSubmitting] = useState(false);
   const [purchaseDeleting, setPurchaseDeleting] = useState(null);
-  const [purchaseFilters, setPurchaseFilters] = useState({ date: '', center: '', shop: '' });
+  const [purchaseFilters, setPurchaseFilters] = useState({ date: '', source: '', shop: '' });
+  const [savedShopNames, setSavedShopNames] = useState([]);
   const [previewPurchase, setPreviewPurchase] = useState(null);
   const [purchasePdfLoading, setPurchasePdfLoading] = useState(null);
   const [purchaseMailLoading, setPurchaseMailLoading] = useState(null);
@@ -2392,6 +3114,15 @@ function PurchaseAdminPanel({ user, catalogItems }) {
     return () => window.clearTimeout(timeoutId);
   }, []);
 
+  const refreshSavedShopNames = useCallback(async () => {
+    const names = await fetchPurchaseShopNameList();
+    setSavedShopNames(names);
+  }, []);
+
+  useEffect(() => {
+    refreshSavedShopNames();
+  }, [refreshSavedShopNames]);
+
   const updatePurchaseRow = (id, field, value) => {
     setPurchaseForm((prev) => ({
       ...prev,
@@ -2419,7 +3150,7 @@ function PurchaseAdminPanel({ user, catalogItems }) {
   const filledRows = purchaseForm.rows.filter((row) => row.itemName.trim());
   const catalogNameKeys = new Set(catalogItems.map((item) => item.nameKey));
 
-  const clearPurchaseFilters = () => setPurchaseFilters({ date: '', center: '', shop: '' });
+  const clearPurchaseFilters = () => setPurchaseFilters({ date: '', source: '', shop: '' });
 
   const openPurchaseMailModal = (purchase) => {
     setPurchaseMailModal(purchase);
@@ -2449,12 +3180,14 @@ function PurchaseAdminPanel({ user, catalogItems }) {
   };
 
   const handlePurchaseSubmit = async () => {
-    const effectiveCenter = getResolvedCenterValue(purchaseForm.center, purchaseForm.centerOther);
-    if (!purchaseForm.center) return alert('Center is required.');
-    if (purchaseForm.center === 'Other' && !purchaseForm.centerOther.trim()) return alert('Center name is required.');
-    if (!purchaseForm.shopName.trim()) return alert('Shop name is required.');
-    if (!purchaseForm.billNo.trim()) return alert('Bill number is required.');
-    if (!purchaseForm.billDate) return alert('Bill date is required.');
+    if (!purchaseForm.purchaseSource) return alert('પ્રકાર પસંદ કરો (દુકાન અથવા કોઠાર સ્ટોક).');
+    if (purchaseForm.purchaseSource === PURCHASE_SOURCE_SHOP) {
+      if (!purchaseForm.shopName.trim()) return alert('દુકાનનું નામ લખો.');
+      if (!purchaseForm.billNo.trim()) return alert('બિલ નંબર લખો.');
+      if (!purchaseForm.billDate) return alert('બિલ તારીખ પસંદ કરો.');
+    } else if (purchaseForm.purchaseSource === PURCHASE_SOURCE_KOTHAR_STOCK) {
+      if (!purchaseForm.entryDate) return alert('તારીખ પસંદ કરો.');
+    }
     if (filledRows.length === 0) return alert('Add at least one purchased item.');
     const invalidItem = filledRows.find((row) => !catalogNameKeys.has(normalizeItemName(row.itemName)));
     if (invalidItem) {
@@ -2463,13 +3196,25 @@ function PurchaseAdminPanel({ user, catalogItems }) {
 
     setPurchaseSubmitting(true);
     try {
+      const isShop = purchaseForm.purchaseSource === PURCHASE_SOURCE_SHOP;
+      const primaryDate = isShop ? purchaseForm.billDate : purchaseForm.entryDate;
+      if (!canSubmitStockEntryDate(primaryDate)) {
+        const backfillNote = ENABLE_INITIAL_STOCK_BACKFILL
+          ? ` (initial mode: last ${INITIAL_BACKFILL_MONTHS} months allowed)`
+          : ` (previous month only till day ${MONTH_CLOSE_GRACE_DAYS})`;
+        alert(`This month is closed for stock entry${backfillNote}.`);
+        setPurchaseSubmitting(false);
+        return;
+      }
       const payload = {
         type: 'purchase',
-        center: effectiveCenter,
-        shopName: purchaseForm.shopName.trim(),
-        billNo: purchaseForm.billNo.trim(),
-        billDate: purchaseForm.billDate,
-        date: purchaseForm.billDate,
+        purchaseSource: purchaseForm.purchaseSource,
+        center: '',
+        shopName: isShop ? purchaseForm.shopName.trim() : '',
+        billNo: isShop ? purchaseForm.billNo.trim() : '',
+        billDate: isShop ? purchaseForm.billDate : '',
+        entryDate: isShop ? '' : purchaseForm.entryDate,
+        date: primaryDate,
         items: filledRows.map((row) => ({
           itemName: row.itemName.trim(),
           kg: row.kg,
@@ -2477,12 +3222,52 @@ function PurchaseAdminPanel({ user, catalogItems }) {
         totalKg: filledRows.reduce((sum, row) => sum + (parseFloat(row.kg) || 0), 0),
         timestamp: new Date(),
         submittedBy: user.username,
+        globalStockSynced: false,
       };
 
       const docRef = await addDoc(collection(db, 'purchases'), payload);
-      setPurchases((prev) => [{ id: docRef.id, ...payload }, ...prev]);
+      await Promise.all(
+        payload.items.map((item, lineIndex) =>
+          setDoc(
+            doc(db, STOCK_TRANSACTIONS_COLLECTION, makeStockTransactionDocId('purchase', docRef.id, lineIndex, 'IN')),
+            {
+              sourceType: 'purchase',
+              sourceId: docRef.id,
+              lineIndex,
+              center_id: 'global',
+              centerName: 'All Centers / Full Report',
+              item_id: normalizeItemName(item.itemName),
+              itemName: item.itemName,
+              transaction_type: 'IN',
+              quantity: toSafeTxQuantity(item.kg),
+              transaction_date: normalizeDateOnly(payload.date),
+              created_at: payload.timestamp,
+              autoSynced: true,
+              is_deleted: false,
+              updatedAt: new Date(),
+            },
+            { merge: true },
+          ),
+        ),
+      );
+      if (isShop) await ensurePurchaseShopNameSaved(purchaseForm.shopName.trim());
+      let stockSyncWarning = '';
+      let globalStockSyncedOk = false;
+      try {
+        await applyGlobalStockKgDelta(payload.items, 1);
+        await updateDoc(doc(db, 'purchases', docRef.id), { globalStockSynced: true });
+        globalStockSyncedOk = true;
+      } catch (stockErr) {
+        console.error('global-stock sync:', stockErr);
+        stockSyncWarning = `\n\n⚠ "${GLOBAL_STOCK_COLLECTION}" અપડેટ નિષ્ફળ — rules / નેટવર્ક તપાસો.\n${stockErr.message}`;
+      }
+      setPurchases((prev) => [
+        { id: docRef.id, ...payload, globalStockSynced: globalStockSyncedOk },
+        ...prev,
+      ]);
       setPurchaseForm(createDefaultPurchaseForm());
-      alert('Purchase entry saved! ✅');
+      if (isShop) refreshSavedShopNames();
+      alert(`Purchase entry saved! ✅${stockSyncWarning}`);
     } catch (error) {
       alert(`Purchase Error: ${error.message}`);
     }
@@ -2490,10 +3275,24 @@ function PurchaseAdminPanel({ user, catalogItems }) {
   };
 
   const handleDeletePurchase = async (purchase) => {
-    if (!window.confirm(`Delete purchase bill ${purchase.billNo} from ${purchase.shopName}?`)) return;
+    const delLabel = getPurchaseResolvedSource(purchase) === PURCHASE_SOURCE_KOTHAR_STOCK
+      ? `કોઠાર સ્ટોક એન્ટ્રી (${formatDisplayDate(purchase.date || purchase.entryDate)})`
+      : `બિલ ${purchase.billNo} — ${purchase.shopName}`;
+    if (!window.confirm(`Delete ${delLabel}?`)) return;
     setPurchaseDeleting(purchase.id);
     try {
+      if (purchase.globalStockSynced === true) {
+        try {
+          await applyGlobalStockKgDelta(purchase.items || [], -1);
+        } catch (stockErr) {
+          console.error('global-stock revert:', stockErr);
+          alert(`સ્ટોકમાંથી KG ઘટાડવામાં ભૂલ — એન્ટ્રી ડિલીટ રોકાઈ.\n${stockErr.message}`);
+          setPurchaseDeleting(null);
+          return;
+        }
+      }
       await updateDoc(doc(db, 'purchases', purchase.id), { is_deleted: true });
+      await setSourceTransactionsDeleted('purchase', purchase.id, true);
       setPurchases((prev) => prev.filter((item) => item.id !== purchase.id));
     } catch (error) {
       alert(`Delete Error: ${error.message}`);
@@ -2520,7 +3319,9 @@ function PurchaseAdminPanel({ user, catalogItems }) {
         await navigator.share({
           files: [file],
           title: 'Purchase Report',
-          text: `${purchase.shopName} - Bill ${purchase.billNo}`,
+          text: getPurchaseResolvedSource(purchase) === PURCHASE_SOURCE_KOTHAR_STOCK
+            ? `મુખ્ય કોઠાર સ્ટોક — ${formatDisplayDate(purchase.date)}`
+            : `${purchase.shopName} - Bill ${purchase.billNo}`,
         });
       } else {
         await saveBlobFromProducer(() => Promise.resolve(blob), getPurchaseFileName(purchase));
@@ -2553,11 +3354,17 @@ function PurchaseAdminPanel({ user, catalogItems }) {
         bcc_email: DEFAULT_BCC_EMAIL,
         from_name: 'Purchased Material',
         report_title: 'Purchase Report',
-        month: purchaseMailModal.center || '-',
-        chalan_no: purchaseMailModal.billNo || '-',
+        month: getPurchaseResolvedSource(purchaseMailModal) === PURCHASE_SOURCE_KOTHAR_STOCK
+          ? 'મુખ્ય કોઠાર સ્ટોક'
+          : '-',
+        chalan_no: getPurchaseResolvedSource(purchaseMailModal) === PURCHASE_SOURCE_KOTHAR_STOCK
+          ? '-'
+          : (purchaseMailModal.billNo || '-'),
         date: formatDisplayDate(purchaseMailModal.billDate || purchaseMailModal.date),
         range: formatDisplayDate(purchaseMailModal.billDate || purchaseMailModal.date),
-        receiver: purchaseMailModal.shopName || '-',
+        receiver: getPurchaseResolvedSource(purchaseMailModal) === PURCHASE_SOURCE_KOTHAR_STOCK
+          ? 'સ્વામિનારાયણ ધામ મુખ્ય કોઠાર સ્ટોક'
+          : (purchaseMailModal.shopName || '-'),
         generated_on: formatDisplayDate(purchaseMailModal.billDate || purchaseMailModal.date),
         total_rows: formatMetric((purchaseMailModal.items || []).length),
         total_stock: formatMetric(purchaseMailModal.totalKg),
@@ -2578,10 +3385,12 @@ function PurchaseAdminPanel({ user, catalogItems }) {
   };
 
   const filteredPurchases = purchases.filter((purchase) => {
-    const dateMatch = purchaseFilters.date ? purchase.billDate === purchaseFilters.date : true;
-    const centerMatch = purchaseFilters.center ? matchesSearchText(purchase.center, purchaseFilters.center) : true;
+    const displayDate = purchase.date || purchase.billDate || purchase.entryDate;
+    const dateMatch = purchaseFilters.date ? displayDate === purchaseFilters.date : true;
+    const resolvedSrc = getPurchaseResolvedSource(purchase);
+    const sourceMatch = purchaseFilters.source ? resolvedSrc === purchaseFilters.source : true;
     const shopMatch = purchaseFilters.shop ? matchesSearchText(purchase.shopName, purchaseFilters.shop) : true;
-    return dateMatch && centerMatch && shopMatch;
+    return dateMatch && sourceMatch && shopMatch;
   });
 
   return (
@@ -2596,9 +3405,9 @@ function PurchaseAdminPanel({ user, catalogItems }) {
             <div className="flex items-center gap-2 text-violet-400 font-bold uppercase text-xs tracking-widest">
               <Box size={16} /> Purchased Material
             </div>
-            <h2 className="mt-2 text-xl sm:text-2xl font-black text-white">દુકાન માંથી ખરીદેલ માલ</h2>
+            <h2 className="mt-2 text-xl sm:text-2xl font-black text-white">ખરીદી / મુખ્ય કોઠાર સ્ટોક</h2>
             <p className="mt-2 text-sm text-gray-400 max-w-2xl">
-              Admin-only purchase log. These entries are added into report income (આવક).
+              દુકાનની ખરીદી અથવા મુખ્ય કોઠાર સ્ટોક એન્ટ્રી. ઓલ-સેન્ટર્સ રિપોર્ટમાં નવી ખરીદી ગ્લોબલ આવક તરીકે ગણાશે; જુની એન્ટ્રીઓમાં Center હોય તો સેન્ટરવાઇઝ રિપોર્ટ મુજબ જ દેખાશે.
             </p>
           </div>
           <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }} onClick={() => setPurchaseForm(createDefaultPurchaseForm())}
@@ -2607,58 +3416,72 @@ function PurchaseAdminPanel({ user, catalogItems }) {
           </motion.button>
         </div>
 
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4 mt-6">
-          <div>
-            <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Center *</label>
+        <div className="grid grid-cols-1 gap-3 mt-6">
+          <div className="sm:max-w-xl">
+            <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">પ્રકાર *</label>
             <select
-              className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-violet-500/50 transition-all text-sm"
-              value={purchaseForm.center}
-              onChange={(e) => setPurchaseForm((prev) => ({ ...prev, center: e.target.value, centerOther: e.target.value === 'Other' ? prev.centerOther : '' }))}
+              className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-violet-500/50 transition-all text-sm appearance-none cursor-pointer"
+              value={purchaseForm.purchaseSource}
+              onChange={(e) => setPurchaseForm((prev) => ({ ...prev, purchaseSource: e.target.value }))}
             >
-              <option value="">- Center Select Karo -</option>
-              {centerData.map((center) => (
-                <option key={center.center} value={center.center}>{center.center}</option>
-              ))}
+              <option value="">- પ્રકાર પસંદ કરો -</option>
+              <option value={PURCHASE_SOURCE_SHOP}>દુકાન માંથી ખરીદેલ માલ</option>
+              <option value={PURCHASE_SOURCE_KOTHAR_STOCK}>સ્વામિનારાયણ ધામ મુખ્ય કોઠાર સ્ટોક</option>
             </select>
           </div>
-          {purchaseForm.center === 'Other' && (
-            <div>
-              <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Center Name *</label>
-              <input
-                className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-violet-500/50 transition-all text-sm"
-                value={purchaseForm.centerOther}
-                onChange={(e) => setPurchaseForm((prev) => ({ ...prev, centerOther: e.target.value }))}
-                placeholder="Center name..."
-              />
+
+          {purchaseForm.purchaseSource === PURCHASE_SOURCE_SHOP && (
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <div className="sm:col-span-2 lg:col-span-2">
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Shop Name *</label>
+                <input
+                  list="purchase-shop-datalist"
+                  autoComplete="off"
+                  className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-violet-500/50 transition-all text-sm"
+                  value={purchaseForm.shopName}
+                  onChange={(e) => setPurchaseForm((prev) => ({ ...prev, shopName: e.target.value }))}
+                  placeholder="દુકાનનું નામ — લિસ્ટમાંથી અથવા નવું લખો"
+                />
+                <datalist id="purchase-shop-datalist">
+                  {savedShopNames.map((name) => (
+                    <option key={name} value={name} />
+                  ))}
+                </datalist>
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Bill Number *</label>
+                <input
+                  className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-violet-500/50 transition-all text-sm"
+                  value={purchaseForm.billNo}
+                  onChange={(e) => setPurchaseForm((prev) => ({ ...prev, billNo: e.target.value }))}
+                  placeholder="બિલ નંબર"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Bill Date *</label>
+                <input
+                  type="date"
+                  className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-violet-500/50 transition-all text-sm"
+                  value={purchaseForm.billDate}
+                  onChange={(e) => setPurchaseForm((prev) => ({ ...prev, billDate: e.target.value }))}
+                />
+              </div>
             </div>
           )}
-          <div>
-            <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Shop Name *</label>
-            <input
-              className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-violet-500/50 transition-all text-sm"
-              value={purchaseForm.shopName}
-              onChange={(e) => setPurchaseForm((prev) => ({ ...prev, shopName: e.target.value }))}
-              placeholder="દુકાનનું નામ"
-            />
-          </div>
-          <div>
-            <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Bill Number *</label>
-            <input
-              className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-violet-500/50 transition-all text-sm"
-              value={purchaseForm.billNo}
-              onChange={(e) => setPurchaseForm((prev) => ({ ...prev, billNo: e.target.value }))}
-              placeholder="બિલ નંબર"
-            />
-          </div>
-          <div>
-            <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Bill Date *</label>
-            <input
-              type="date"
-              className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-violet-500/50 transition-all text-sm"
-              value={purchaseForm.billDate}
-              onChange={(e) => setPurchaseForm((prev) => ({ ...prev, billDate: e.target.value }))}
-            />
-          </div>
+
+          {purchaseForm.purchaseSource === PURCHASE_SOURCE_KOTHAR_STOCK && (
+            <div className="grid grid-cols-1 gap-3 sm:max-w-xs">
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">તારીખ *</label>
+                <input
+                  type="date"
+                  className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-violet-500/50 transition-all text-sm"
+                  value={purchaseForm.entryDate}
+                  onChange={(e) => setPurchaseForm((prev) => ({ ...prev, entryDate: e.target.value }))}
+                />
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="mt-5 space-y-4">
@@ -2667,6 +3490,7 @@ function PurchaseAdminPanel({ user, catalogItems }) {
             <p className="text-[11px] font-bold uppercase tracking-widest text-gray-500">Purchased Items</p>
             <span className="text-xs text-violet-300 font-bold">{filledRows.length} rows filled</span>
           </div>
+          <ItemsListSearchHint />
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="bg-[#151515]">
@@ -2760,12 +3584,15 @@ function PurchaseAdminPanel({ user, catalogItems }) {
             value={purchaseFilters.date}
             onChange={(e) => setPurchaseFilters((prev) => ({ ...prev, date: e.target.value }))}
           />
-          <input
-            placeholder="Center name..."
-            className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-violet-500/50 transition-all text-sm placeholder-gray-500"
-            value={purchaseFilters.center}
-            onChange={(e) => setPurchaseFilters((prev) => ({ ...prev, center: e.target.value }))}
-          />
+          <select
+            className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-violet-500/50 transition-all text-sm appearance-none cursor-pointer"
+            value={purchaseFilters.source}
+            onChange={(e) => setPurchaseFilters((prev) => ({ ...prev, source: e.target.value }))}
+          >
+            <option value="">બધા પ્રકાર</option>
+            <option value={PURCHASE_SOURCE_SHOP}>દુકાન ખરીદી</option>
+            <option value={PURCHASE_SOURCE_KOTHAR_STOCK}>મુખ્ય કોઠાર સ્ટોક</option>
+          </select>
           <input
             placeholder="Shop name..."
             className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-violet-500/50 transition-all text-sm placeholder-gray-500"
@@ -2786,12 +3613,25 @@ function PurchaseAdminPanel({ user, catalogItems }) {
               <div key={purchase.id} className="bg-[#181818] rounded-2xl border border-white/5 overflow-hidden">
                 <div className="p-4 border-b border-white/5 bg-gradient-to-r from-violet-500/10 to-fuchsia-500/5">
                   <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <p className="text-[11px] font-black uppercase tracking-[0.2em] text-violet-300">{purchase.center || 'No Center'}</p>
-                      <p className="font-black text-white text-sm">{purchase.shopName}</p>
-                      <p className="text-xs text-violet-300 mt-1">Bill #{purchase.billNo}</p>
+                    <div className="min-w-0">
+                      <p className="text-[10px] font-black uppercase tracking-[0.15em] text-fuchsia-300/90 mb-1">
+                        {getPurchaseResolvedSource(purchase) === PURCHASE_SOURCE_KOTHAR_STOCK
+                          ? 'મુખ્ય કોઠાર સ્ટોક'
+                          : 'દુકાન ખરીદી'}
+                      </p>
+                      <p className="font-black text-white text-sm truncate">
+                        {getPurchaseResolvedSource(purchase) === PURCHASE_SOURCE_KOTHAR_STOCK
+                          ? 'સ્વામિનારાયણ ધામ મુખ્ય કોઠાર'
+                          : (purchase.shopName || '-')}
+                      </p>
+                      {getPurchaseResolvedSource(purchase) === PURCHASE_SOURCE_SHOP && (
+                        <p className="text-xs text-violet-300 mt-1">Bill #{purchase.billNo || '-'}</p>
+                      )}
+                      {(purchase.center || '').trim() !== '' && (
+                        <p className="text-[10px] text-amber-400/90 mt-1 font-bold uppercase tracking-wide">જુનો Center: {purchase.center}</p>
+                      )}
                     </div>
-                    <p className="text-xs text-gray-400">{formatDisplayDate(purchase.billDate)}</p>
+                    <p className="text-xs text-gray-400 shrink-0">{formatDisplayDate(purchase.date || purchase.billDate || purchase.entryDate)}</p>
                   </div>
                 </div>
                 <div className="p-4 space-y-3">
@@ -2877,9 +3717,18 @@ function PurchaseAdminPanel({ user, catalogItems }) {
               </div>
 
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 text-sm mb-6 bg-gray-50 p-4 sm:p-5 rounded-2xl border border-gray-100">
-                <div><p className="text-gray-400 text-[10px] font-bold uppercase mb-1">Shop Name</p><p className="font-bold">{previewPurchase.shopName}</p></div>
-                <div><p className="text-gray-400 text-[10px] font-bold uppercase mb-1">Bill Number</p><p className="font-bold">#{previewPurchase.billNo}</p></div>
-                <div><p className="text-gray-400 text-[10px] font-bold uppercase mb-1">Bill Date</p><p className="font-bold">{formatDisplayDate(previewPurchase.billDate || previewPurchase.date)}</p></div>
+                {getPurchaseResolvedSource(previewPurchase) === PURCHASE_SOURCE_KOTHAR_STOCK ? (
+                  <>
+                    <div className="sm:col-span-2"><p className="text-gray-400 text-[10px] font-bold uppercase mb-1">પ્રકાર</p><p className="font-bold">સ્વામિનારાયણ ધામ મુખ્ય કોઠાર સ્ટોક</p></div>
+                    <div><p className="text-gray-400 text-[10px] font-bold uppercase mb-1">તારીખ</p><p className="font-bold">{formatDisplayDate(previewPurchase.date || previewPurchase.entryDate)}</p></div>
+                  </>
+                ) : (
+                  <>
+                    <div><p className="text-gray-400 text-[10px] font-bold uppercase mb-1">Shop Name</p><p className="font-bold">{previewPurchase.shopName}</p></div>
+                    <div><p className="text-gray-400 text-[10px] font-bold uppercase mb-1">Bill Number</p><p className="font-bold">#{previewPurchase.billNo}</p></div>
+                    <div><p className="text-gray-400 text-[10px] font-bold uppercase mb-1">Bill Date</p><p className="font-bold">{formatDisplayDate(previewPurchase.billDate || previewPurchase.date)}</p></div>
+                  </>
+                )}
               </div>
 
               <div className="overflow-x-auto">
@@ -2939,8 +3788,17 @@ function PurchaseAdminPanel({ user, catalogItems }) {
 
               <div className="p-5 space-y-4">
                 <p className="text-gray-300 text-sm">
-                  Send purchase PDF link for <span className="font-bold text-white">{purchaseMailModal.shopName}</span>
-                  <span className="text-blue-400 font-bold"> — Bill #{purchaseMailModal.billNo}</span>
+                  {getPurchaseResolvedSource(purchaseMailModal) === PURCHASE_SOURCE_KOTHAR_STOCK ? (
+                    <>
+                      મુખ્ય કોઠાર સ્ટોક એન્ટ્રી —
+                      <span className="font-bold text-white">{formatDisplayDate(purchaseMailModal.date)}</span>
+                    </>
+                  ) : (
+                    <>
+                      Send purchase PDF link for <span className="font-bold text-white">{purchaseMailModal.shopName}</span>
+                      <span className="text-blue-400 font-bold"> — Bill #{purchaseMailModal.billNo}</span>
+                    </>
+                  )}
                 </p>
 
                 <div>
@@ -3006,27 +3864,43 @@ function PurchaseAdminPanel({ user, catalogItems }) {
 
 // --- EDIT ORDER SCREEN ---
 function EditOrderScreen({ order, onBack, catalogItems }) {
+  const centerInitial = useMemo(() => deriveEditableCenterFields(order.center), [order.center]);
+  const [centerSelect, setCenterSelect] = useState(centerInitial.select);
+  const [centerOther, setCenterOther] = useState(centerInitial.other);
   const [cart, setCart] = useState(order.items || []);
   const [loading, setLoading] = useState(false);
   const [openCategory, setOpenCategory] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
   const mergedCatalogItems = mergeCatalogItemsWithExisting(catalogItems, order.items || []);
   const groupedCatalogItems = filterGroupedCatalogItems(mergedCatalogItems, searchQuery);
+  const resolvedCenter = getResolvedCenterValue(centerSelect, centerOther);
 
   const updateQuantity = (itemName, category, unit, qty) => {
     const existing = cart.find(i => normalizeItemName(i.name) === normalizeItemName(itemName));
-    if (qty > 0) {
-      if (existing) setCart(cart.map(i => normalizeItemName(i.name) === normalizeItemName(itemName) ? { ...i, name: itemName, category, unit, qty } : i));
-      else setCart([...cart, { name: itemName, category, unit, qty }]);
+    const normalizedUnit = normalizeUnitForCategory(category, unit, unit);
+    const normalizedQty = clampQtyByCategory(category, qty);
+    if (normalizedQty > 0) {
+      if (existing) {
+        setCart(cart.map((i) => (
+          normalizeItemName(i.name) === normalizeItemName(itemName)
+            ? { ...i, name: itemName, category, unit: normalizedUnit, qty: normalizedQty }
+            : i
+        )));
+      } else {
+        setCart([...cart, { name: itemName, category, unit: normalizedUnit, qty: normalizedQty }]);
+      }
     } else { setCart(cart.filter(i => normalizeItemName(i.name) !== normalizeItemName(itemName))); }
   };
 
   const handleUpdate = async () => {
+    if (!centerSelect) return alert('Center select karo!');
+    if (centerSelect === 'Other' && !centerOther.trim()) return alert('Center name likho!');
     if (cart.length === 0) return alert("Add at least one item!");
+    const effectiveCenter = getResolvedCenterValue(centerSelect, centerOther);
     setLoading(true);
     try {
       const { totalKg } = calculateTotals(cart);
-      await updateDoc(doc(db, "orders", order.id), { items: cart, totalKg });
+      await updateDoc(doc(db, "orders", order.id), { center: effectiveCenter, items: cart, totalKg });
       alert("Updated Successfully! ✅");
       onBack();
     } catch (e) { alert("Error: " + e.message); }
@@ -3056,8 +3930,38 @@ function EditOrderScreen({ order, onBack, catalogItems }) {
         className="bg-gradient-to-b from-[#1e1e1e] to-[#181818] p-4 sm:p-5 rounded-2xl border border-white/5 mb-4 shadow-xl"
       >
         <h2 className="text-lg sm:text-xl font-bold mb-3 text-transparent bg-clip-text bg-gradient-to-r from-orange-400 to-orange-600 flex items-center gap-2">
-          <Edit3 size={22} /> Edit: {order.center}
+          <Edit3 size={22} /> Edit request
         </h2>
+        <div className="mb-4">
+          <label className="block text-[10px] text-gray-500 font-bold uppercase mb-1.5">Center *</label>
+          <select
+            className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-orange-500/50 transition-all text-sm appearance-none cursor-pointer"
+            value={centerSelect}
+            onChange={(e) => {
+              const next = e.target.value;
+              setCenterSelect(next);
+              if (next !== 'Other') setCenterOther('');
+            }}
+          >
+            <option value="">- Center Select Karo -</option>
+            {centerData.map((c) => (
+              <option key={c.center} value={c.center}>{c.center}</option>
+            ))}
+          </select>
+          {centerSelect === 'Other' && (
+            <input
+              className="mt-2 w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-orange-500/50 transition-all text-sm"
+              placeholder="Center name..."
+              value={centerOther}
+              onChange={(e) => setCenterOther(e.target.value)}
+            />
+          )}
+          {resolvedCenter && (
+            <p className="mt-2 text-[11px] text-gray-500">
+              Saved as: <span className="font-bold text-orange-300">{resolvedCenter}</span>
+            </p>
+          )}
+        </div>
         <div className="grid grid-cols-3 gap-2 text-center">
           <div className="bg-[#252525] p-2 rounded-xl border border-white/5">
             <p className="text-[10px] text-gray-500 font-bold uppercase">Chalan</p>
@@ -3136,8 +4040,19 @@ function EditOrderScreen({ order, onBack, catalogItems }) {
                     className="overflow-hidden"
                   >
                     <div className="p-3 bg-[#151515] grid gap-2">
+                      {isGheeTelCategory(category) && (
+                        <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] font-bold text-amber-100">
+                          ૧ ડબ્બો = ૧૩ કિલોગ્રામ થશે, માટે આપે નીચેના બોક્સમાં ડબ્બાની સંખ્યા લખવી.
+                        </div>
+                      )}
+                      {isColorCategory(category) && (
+                        <div className="rounded-xl border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 text-[11px] font-bold text-emerald-100">
+                          નીચેની કોલમમાં બધી કિંમત ગ્રામમાં જ ઉમેરાશે, તેથી જો કિલોગ્રામમાં મંગાવવું હોય તો તેને ગ્રામમાં ફેરવીને જ દાખલ કરવું.
+                        </div>
+                      )}
                       {items.map((item, itemIndex) => {
                         const inCart = cart.find(c => normalizeItemName(c.name) === item.nameKey);
+                        const telKg = isGheeTelCategory(category) ? ((parseFloat(inCart?.qty) || 0) * TEL_DABBA_KG) : 0;
                         return (
                           <motion.div 
                             key={item.name}
@@ -3148,12 +4063,12 @@ function EditOrderScreen({ order, onBack, catalogItems }) {
                           >
                             <span className="text-sm text-gray-300 font-medium flex-1">{item.name}</span>
                             <div className="flex items-center gap-2 sm:gap-3">
-                              {inCart && (
+                              {(isColorCategory(category) || isGheeTelCategory(category)) && inCart && (
                                 <motion.button
                                   initial={{ scale: 0 }}
                                   animate={{ scale: 1 }}
                                   whileTap={{ scale: 0.9 }}
-                                  onClick={() => updateQuantity(item.name, category, item.unit, Math.max(0, (parseFloat(inCart.qty) || 0) - 1))}
+                                  onClick={() => updateQuantity(item.name, category, inCart.unit || item.unit, Math.max(0, (parseFloat(inCart.qty) || 0) - 1))}
                                   className="w-8 h-8 flex items-center justify-center bg-[#252525] rounded-lg text-orange-500 hover:bg-[#2d2d2d] transition-colors"
                                 >
                                   <Minus size={14} />
@@ -3164,16 +4079,32 @@ function EditOrderScreen({ order, onBack, catalogItems }) {
                                 className="w-14 sm:w-16 p-2 bg-[#252525] border border-white/10 rounded-lg text-center text-white font-bold text-sm outline-none focus:border-orange-500/50 transition-all" 
                                 value={inCart ? inCart.qty : ''} 
                                 placeholder="0"
-                                onChange={(e) => updateQuantity(item.name, category, item.unit, e.target.value)} 
+                                onChange={(e) => updateQuantity(item.name, category, inCart?.unit || item.unit, e.target.value)} 
                               />
-                              <motion.button
-                                whileTap={{ scale: 0.9 }}
-                                onClick={() => updateQuantity(item.name, category, item.unit, (parseFloat(inCart?.qty) || 0) + 1)}
-                                className="w-8 h-8 flex items-center justify-center bg-orange-500/20 rounded-lg text-orange-500 hover:bg-orange-500/30 transition-colors"
-                              >
-                                <Plus size={14} />
-                              </motion.button>
-                              <span className="text-[10px] text-gray-500 font-bold w-8 uppercase hidden sm:inline">{item.unit}</span>
+                              <span className="text-[10px] text-gray-500 font-bold w-9 text-center uppercase">
+                                {isGheeTelCategory(category) ? 'TIN' : (isColorCategory(category) ? 'GM' : 'KG')}
+                              </span>
+                              {(isColorCategory(category) || isGheeTelCategory(category)) && (
+                                <motion.button
+                                  whileTap={{ scale: 0.9 }}
+                                  onClick={() => updateQuantity(item.name, category, inCart?.unit || item.unit, (parseFloat(inCart?.qty) || 0) + 1)}
+                                  className="w-8 h-8 flex items-center justify-center bg-orange-500/20 rounded-lg text-orange-500 hover:bg-orange-500/30 transition-colors"
+                                >
+                                  <Plus size={14} />
+                                </motion.button>
+                              )}
+                              {isGheeTelCategory(category) && (
+                                <div className="hidden sm:flex items-center gap-2">
+                                  <input
+                                    readOnly
+                                    tabIndex={-1}
+                                    value={inCart ? String(telKg) : ''}
+                                    placeholder="0"
+                                    className="w-20 p-2 bg-[#1f1f1f] border border-white/10 rounded-lg text-center text-white font-black text-sm outline-none"
+                                  />
+                                  <span className="text-[10px] text-gray-500 font-bold uppercase">KG</span>
+                                </div>
+                              )}
                             </div>
                           </motion.div>
                         );
@@ -3213,10 +4144,14 @@ function EditOrderScreen({ order, onBack, catalogItems }) {
 
 // --- EDIT SEND ORDER SCREEN ---
 function EditSendOrderScreen({ order, onBack, catalogItems }) {
+  const fromCenterInitial = useMemo(() => deriveEditableCenterFields(order.fromCenter), [order.fromCenter]);
+  const [fromCenterSelect, setFromCenterSelect] = useState(fromCenterInitial.select);
+  const [fromCenterOther, setFromCenterOther] = useState(fromCenterInitial.other);
   const mergedCatalogItems = mergeCatalogItemsWithExisting(catalogItems, order.items || []);
   const [rows, setRows] = useState(createRowsFromItems(order.items || [], 5));
   const [loading, setLoading] = useState(false);
   const catalogNameKeys = new Set(mergedCatalogItems.map((item) => item.nameKey));
+  const resolvedFromCenter = getResolvedCenterValue(fromCenterSelect, fromCenterOther);
 
   const updateRow = (id, field, value) => setRows(prev => prev.map(r => r.id === id ? { ...r, [field]: value } : r));
   const addRow = () => {
@@ -3225,14 +4160,18 @@ function EditSendOrderScreen({ order, onBack, catalogItems }) {
   const removeRow = (id) => { if (rows.length > 1) setRows(prev => prev.filter(r => r.id !== id)); };
 
   const handleUpdate = async () => {
+    if (!fromCenterSelect) return alert('Center select karo!');
+    if (fromCenterSelect === 'Other' && !fromCenterOther.trim()) return alert('Center name likho!');
     const filledRows = rows.filter(r => r.itemName && r.itemName.trim());
     if (filledRows.length === 0) return alert('Add at least one item!');
     const invalidItem = filledRows.find((row) => !catalogNameKeys.has(normalizeItemName(row.itemName)));
     if (invalidItem) return alert(`Invalid item name: "${invalidItem.itemName}". Please select from item list.`);
+    const effectiveFromCenter = getResolvedCenterValue(fromCenterSelect, fromCenterOther);
     setLoading(true);
     try {
-      const totalKg = filledRows.reduce((sum, r) => sum + (parseFloat(r.kg) || 0), 0);
+      const totalKg = roundKg2(filledRows.reduce((sum, r) => sum + (parseFloat(r.kg) || 0), 0));
       await updateDoc(doc(db, 'send-orders', order.id), {
+        fromCenter: effectiveFromCenter,
         items: filledRows.map((row) => ({ itemName: row.itemName.trim(), kg: row.kg })),
         totalKg,
       });
@@ -3257,8 +4196,38 @@ function EditSendOrderScreen({ order, onBack, catalogItems }) {
       <motion.div initial={{ y: -20, opacity: 0 }} animate={{ y: 0, opacity: 1 }}
         className="bg-gradient-to-b from-[#1e1e1e] to-[#181818] p-4 sm:p-5 rounded-2xl border border-white/5 mb-4 shadow-xl">
         <h2 className="text-lg sm:text-xl font-bold mb-3 text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-blue-600 flex items-center gap-2">
-          <Edit3 size={22} /> Edit Dispatch: {order.fromCenter}
+          <Edit3 size={22} /> Edit dispatch
         </h2>
+        <div className="mb-4">
+          <label className="block text-[10px] text-gray-500 font-bold uppercase mb-1.5">From center *</label>
+          <select
+            className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-blue-500/50 transition-all text-sm appearance-none cursor-pointer"
+            value={fromCenterSelect}
+            onChange={(e) => {
+              const next = e.target.value;
+              setFromCenterSelect(next);
+              if (next !== 'Other') setFromCenterOther('');
+            }}
+          >
+            <option value="">- Center Select Karo -</option>
+            {centerData.map((c) => (
+              <option key={c.center} value={c.center}>{c.center}</option>
+            ))}
+          </select>
+          {fromCenterSelect === 'Other' && (
+            <input
+              className="mt-2 w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-blue-500/50 transition-all text-sm"
+              placeholder="Center name..."
+              value={fromCenterOther}
+              onChange={(e) => setFromCenterOther(e.target.value)}
+            />
+          )}
+          {resolvedFromCenter && (
+            <p className="mt-2 text-[11px] text-gray-500">
+              Saved as: <span className="font-bold text-blue-300">{resolvedFromCenter}</span>
+            </p>
+          )}
+        </div>
         <div className="grid grid-cols-3 gap-2 text-center">
           <div className="bg-[#252525] p-2 rounded-xl border border-white/5">
             <p className="text-[10px] text-gray-500 font-bold uppercase">Chalan</p>
@@ -3472,6 +4441,18 @@ function SendDashboard({ user, onBack, catalogItems }) {
   const effectiveCenter = formData.fromCenter === 'Other' ? formData.fromCenterOther.trim() : formData.fromCenter;
 
   const handleSubmit = async () => {
+    if (filledRows.length === 0) return alert('Ochha me ek item add karo!');
+    if (!canSubmitStockEntryDate(formData.date)) {
+      const backfillNote = ENABLE_INITIAL_STOCK_BACKFILL
+        ? ` (initial mode: last ${INITIAL_BACKFILL_MONTHS} months allowed)`
+        : ` (previous month only till day ${MONTH_CLOSE_GRACE_DAYS})`;
+      return alert(`This month is closed for stock add${backfillNote}.`);
+    }
+    const invalidSubmitItem = filledRows.find((row) => !catalogNameKeys.has(normalizeItemName(row.itemName)));
+    if (invalidSubmitItem) {
+      return alert(`Invalid item name: "${invalidSubmitItem.itemName}". Master list mathi select karo.`);
+    }
+
     setLoading(true);
     try {
       const payload = {
@@ -3493,6 +4474,30 @@ function SendDashboard({ user, onBack, catalogItems }) {
         submittedBy: user.username,
       };
       const docRef = await addDoc(collection(db, 'send-orders'), payload);
+      await Promise.all(
+        payload.items.map((item, lineIndex) =>
+          setDoc(
+            doc(db, STOCK_TRANSACTIONS_COLLECTION, makeStockTransactionDocId('send', docRef.id, lineIndex, 'IN')),
+            {
+              sourceType: 'send',
+              sourceId: docRef.id,
+              lineIndex,
+              center_id: normalizeItemName(payload.fromCenter),
+              centerName: payload.fromCenter,
+              item_id: normalizeItemName(item.itemName),
+              itemName: item.itemName,
+              transaction_type: 'IN',
+              quantity: toSafeTxQuantity(item.kg),
+              transaction_date: normalizeDateOnly(payload.date),
+              created_at: payload.timestamp,
+              autoSynced: true,
+              is_deleted: false,
+              updatedAt: new Date(),
+            },
+            { merge: true },
+          ),
+        ),
+      );
       setStep('done');
       sendEmailWithConfig(SEND_MAIL_CONFIG, {
         email: formData.email.trim(),
@@ -3610,9 +4615,6 @@ function SendDashboard({ user, onBack, catalogItems }) {
       {/* Header Card */}
       <motion.div initial={{ y: -20, opacity: 0 }} animate={{ y: 0, opacity: 1 }}
         className="bg-gradient-to-b from-[#1e1e1e] to-[#181818] p-4 sm:p-6 rounded-2xl sm:rounded-3xl border border-white/5 mb-4 shadow-xl">
-        <h2 className="text-lg sm:text-xl font-bold mb-4 text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-blue-600 flex items-center gap-2">
-          <Send size={22} /> Center thi Kothar ne Moko
-        </h2>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
             <label className="text-[10px] text-gray-500 font-bold uppercase block mb-1">Chalan No (Auto)</label>
@@ -3686,6 +4688,7 @@ function SendDashboard({ user, onBack, catalogItems }) {
           </h3>
           <span className="text-xs text-blue-400 font-bold bg-blue-500/10 px-3 py-1 rounded-lg border border-blue-500/20">{filledRows.length} items filled</span>
         </div>
+        <ItemsListSearchHint />
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="bg-[#151515]">
@@ -3795,9 +4798,18 @@ function UserDashboard({ user, onBack = null, catalogItems }) {
 
   const updateQuantity = (itemName, category, unit, qty) => {
     const existing = cart.find(i => normalizeItemName(i.name) === normalizeItemName(itemName));
-    if (qty > 0) {
-      if (existing) setCart(cart.map(i => normalizeItemName(i.name) === normalizeItemName(itemName) ? { ...i, name: itemName, category, unit, qty } : i));
-      else setCart([...cart, { name: itemName, category, unit, qty }]);
+    const normalizedUnit = normalizeUnitForCategory(category, unit, unit);
+    const normalizedQty = clampQtyByCategory(category, qty);
+    if (normalizedQty > 0) {
+      if (existing) {
+        setCart(cart.map((i) => (
+          normalizeItemName(i.name) === normalizeItemName(itemName)
+            ? { ...i, name: itemName, category, unit: normalizedUnit, qty: normalizedQty }
+            : i
+        )));
+      } else {
+        setCart([...cart, { name: itemName, category, unit: normalizedUnit, qty: normalizedQty }]);
+      }
     } else { setCart(cart.filter(i => normalizeItemName(i.name) !== normalizeItemName(itemName))); }
   };
 
@@ -3819,6 +4831,30 @@ function UserDashboard({ user, onBack = null, catalogItems }) {
         submittedBy: user.username,
       };
       const docRef = await addDoc(collection(db, "orders"), payload);
+      await Promise.all(
+        payload.items.map((item, lineIndex) =>
+          setDoc(
+            doc(db, STOCK_TRANSACTIONS_COLLECTION, makeStockTransactionDocId('order', docRef.id, lineIndex, 'OUT')),
+            {
+              sourceType: 'order',
+              sourceId: docRef.id,
+              lineIndex,
+              center_id: normalizeItemName(payload.center),
+              centerName: payload.center,
+              item_id: normalizeItemName(item.name),
+              itemName: item.name,
+              transaction_type: 'OUT',
+              quantity: toSafeTxQuantity(convertItemQtyToKg(item.qty, item.unit)),
+              transaction_date: normalizeDateOnly(payload.date),
+              created_at: payload.timestamp,
+              autoSynced: true,
+              is_deleted: false,
+              updatedAt: new Date(),
+            },
+            { merge: true },
+          ),
+        ),
+      );
       setStep('download');
       sendEmailWithConfig(REQUEST_MAIL_CONFIG, {
         email: formData.email.trim(),
@@ -3854,9 +4890,6 @@ function UserDashboard({ user, onBack = null, catalogItems }) {
           animate={{ y: 0, opacity: 1 }}
           className="bg-gradient-to-b from-[#1e1e1e] to-[#181818] p-4 sm:p-6 rounded-2xl sm:rounded-3xl border border-white/5 mb-4 sm:mb-6 shadow-xl"
         >
-          <h2 className="text-lg sm:text-xl font-bold mb-4 sm:mb-6 text-transparent bg-clip-text bg-gradient-to-r from-orange-400 to-orange-600 flex items-center gap-2">
-            <FileText size={24} /> New Stock Request
-          </h2>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4">
             {/* Chalan No - Auto Generated */}
             <div>
@@ -4010,8 +5043,19 @@ function UserDashboard({ user, onBack = null, catalogItems }) {
                     className="overflow-hidden"
                   >
                     <div className="p-3 sm:p-4 bg-[#151515] grid gap-2 sm:gap-3">
+                      {isGheeTelCategory(category) && (
+                        <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] font-bold text-amber-100">
+                          ૧ ડબ્બો = ૧૩ કિલોગ્રામ થશે, માટે આપે નીચેના બોક્સમાં ડબ્બાની સંખ્યા લખવી.
+                        </div>
+                      )}
+                      {isColorCategory(category) && (
+                        <div className="rounded-xl border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 text-[11px] font-bold text-emerald-100">
+                          નીચેની કોલમમાં બધી કિંમત ગ્રામમાં જ ઉમેરાશે, તેથી જો કિલોગ્રામમાં મંગાવવું હોય તો તેને ગ્રામમાં ફેરવીને જ દાખલ કરવું.
+                        </div>
+                      )}
                       {items.map((item, itemIndex) => {
                         const inCart = cart.find(c => normalizeItemName(c.name) === item.nameKey);
+                        const telKg = isGheeTelCategory(category) ? ((parseFloat(inCart?.qty) || 0) * TEL_DABBA_KG) : 0;
                         return (
                           <motion.div 
                             key={item.name}
@@ -4022,12 +5066,12 @@ function UserDashboard({ user, onBack = null, catalogItems }) {
                           >
                             <span className="text-sm text-gray-300 font-medium flex-1">{item.name}</span>
                             <div className="flex items-center gap-2 sm:gap-3">
-                              {inCart && (
+                              {(isColorCategory(category) || isGheeTelCategory(category)) && inCart && (
                                 <motion.button
                                   initial={{ scale: 0 }}
                                   animate={{ scale: 1 }}
                                   whileTap={{ scale: 0.9 }}
-                                  onClick={() => updateQuantity(item.name, category, item.unit, Math.max(0, (parseFloat(inCart.qty) || 0) - 1))}
+                                  onClick={() => updateQuantity(item.name, category, inCart.unit || item.unit, Math.max(0, (parseFloat(inCart.qty) || 0) - 1))}
                                   className="w-8 h-8 flex items-center justify-center bg-[#252525] rounded-lg text-orange-500 hover:bg-[#2d2d2d] transition-colors"
                                 >
                                   <Minus size={14} />
@@ -4038,16 +5082,32 @@ function UserDashboard({ user, onBack = null, catalogItems }) {
                                 className="w-14 sm:w-16 p-2 sm:p-2.5 bg-[#252525] border border-white/10 rounded-lg sm:rounded-xl text-center text-white font-bold text-sm outline-none focus:border-orange-500/50 transition-all" 
                                 value={inCart ? inCart.qty : ''} 
                                 placeholder="0"
-                                onChange={(e) => updateQuantity(item.name, category, item.unit, e.target.value)} 
+                                onChange={(e) => updateQuantity(item.name, category, inCart?.unit || item.unit, e.target.value)} 
                               />
-                              <motion.button
-                                whileTap={{ scale: 0.9 }}
-                                onClick={() => updateQuantity(item.name, category, item.unit, (parseFloat(inCart?.qty) || 0) + 1)}
-                                className="w-8 h-8 flex items-center justify-center bg-orange-500/20 rounded-lg text-orange-500 hover:bg-orange-500/30 transition-colors"
-                              >
-                                <Plus size={14} />
-                              </motion.button>
-                              <span className="text-[10px] text-gray-500 font-bold w-8 sm:w-10 uppercase hidden xs:inline">{item.unit}</span>
+                              <span className="text-[10px] text-gray-500 font-bold w-9 text-center uppercase">
+                                {isGheeTelCategory(category) ? 'TIN' : (isColorCategory(category) ? 'GM' : 'KG')}
+                              </span>
+                              {(isColorCategory(category) || isGheeTelCategory(category)) && (
+                                <motion.button
+                                  whileTap={{ scale: 0.9 }}
+                                  onClick={() => updateQuantity(item.name, category, inCart?.unit || item.unit, (parseFloat(inCart?.qty) || 0) + 1)}
+                                  className="w-8 h-8 flex items-center justify-center bg-orange-500/20 rounded-lg text-orange-500 hover:bg-orange-500/30 transition-colors"
+                                >
+                                  <Plus size={14} />
+                                </motion.button>
+                              )}
+                              {isGheeTelCategory(category) && (
+                                <div className="hidden sm:flex items-center gap-2">
+                                  <input
+                                    readOnly
+                                    tabIndex={-1}
+                                    value={inCart ? String(telKg) : ''}
+                                    placeholder="0"
+                                    className="w-20 p-2 bg-[#1f1f1f] border border-white/10 rounded-lg text-center text-white font-black text-sm outline-none"
+                                  />
+                                  <span className="text-[10px] text-gray-500 font-bold uppercase">KG</span>
+                                </div>
+                              )}
                             </div>
                           </motion.div>
                         );
@@ -4145,7 +5205,13 @@ function UserDashboard({ user, onBack = null, catalogItems }) {
                   >
                     <td className="p-3 sm:p-4 text-sm font-medium">{item.name}</td>
                     <td className="p-3 sm:p-4 text-right font-black text-white">
-                      {item.qty} <span className="text-[10px] text-gray-500 uppercase font-bold">{item.unit}</span>
+                      {item.qty}{' '}
+                      <span className="text-[10px] text-gray-500 uppercase font-bold">{item.unit}</span>
+                      {normalizeQuantityUnit(item.unit) === UNIT_DABBA && (
+                        <span className="ml-2 text-[10px] text-gray-400 font-bold">
+                          (= {convertItemQtyToKg(item.qty, item.unit)} KG)
+                        </span>
+                      )}
                     </td>
                   </motion.tr>
                 ))}
@@ -4516,7 +5582,11 @@ function SinglePurchaseView({ purchaseId, onBack }) {
         <div className="bg-gradient-to-r from-violet-500 to-fuchsia-600 p-5 sm:p-6 text-white flex justify-between items-center">
           <div>
             <h2 className="text-lg sm:text-xl font-extrabold uppercase tracking-tight">Purchase Report</h2>
-            <p className="text-violet-100 text-xs mt-0.5">દુકાન માંથી ખરીદેલ માલ</p>
+            <p className="text-violet-100 text-xs mt-0.5">
+              {getPurchaseResolvedSource(purchase) === PURCHASE_SOURCE_KOTHAR_STOCK
+                ? 'મુખ્ય કોઠાર સ્ટોક'
+                : 'દુકાન માંથી ખરીદેલ માલ'}
+            </p>
           </div>
           <motion.button
             whileHover={{ scale: 1.1 }}
@@ -4528,26 +5598,40 @@ function SinglePurchaseView({ purchaseId, onBack }) {
           </motion.button>
         </div>
         <div className="p-6 sm:p-10">
-          <div className="grid grid-cols-2 gap-4 sm:gap-6 mb-4">
-            <div className="bg-[#252525] p-4 sm:p-5 rounded-2xl sm:rounded-3xl border border-white/5">
-              <p className="text-[10px] text-gray-500 font-bold uppercase mb-1">Center</p>
-              <p className="font-black text-white uppercase text-base sm:text-lg">{purchase.center || '-'}</p>
+          {getPurchaseResolvedSource(purchase) === PURCHASE_SOURCE_KOTHAR_STOCK ? (
+            <div className="grid grid-cols-1 gap-4 sm:gap-6 mb-8">
+              <div className="bg-[#252525] p-4 sm:p-5 rounded-2xl sm:rounded-3xl border border-white/5">
+                <p className="text-[10px] text-gray-500 font-bold uppercase mb-1">પ્રકાર</p>
+                <p className="font-black text-white text-base sm:text-lg">સ્વામિનારાયણ ધામ મુખ્ય કોઠાર સ્ટોક</p>
+              </div>
+              <div className="bg-[#252525] p-4 sm:p-5 rounded-2xl sm:rounded-3xl border border-white/5">
+                <p className="text-[10px] text-gray-500 font-bold uppercase mb-1">તારીખ</p>
+                <p className="font-bold text-white text-sm">{formatDisplayDate(purchase.date || purchase.entryDate)}</p>
+              </div>
             </div>
-            <div className="bg-[#252525] p-4 sm:p-5 rounded-2xl sm:rounded-3xl border border-white/5">
-              <p className="text-[10px] text-gray-500 font-bold uppercase mb-1">Bill Number</p>
-              <p className="font-black text-violet-300 text-base sm:text-lg">#{purchase.billNo}</p>
-            </div>
-          </div>
-          <div className="grid grid-cols-2 gap-4 sm:gap-6 mb-8">
-            <div className="bg-[#252525] p-4 sm:p-5 rounded-2xl sm:rounded-3xl border border-white/5">
-              <p className="text-[10px] text-gray-500 font-bold uppercase mb-1">Shop Name</p>
-              <p className="font-bold text-white text-sm">{purchase.shopName || '-'}</p>
-            </div>
-            <div className="bg-[#252525] p-4 sm:p-5 rounded-2xl sm:rounded-3xl border border-white/5">
-              <p className="text-[10px] text-gray-500 font-bold uppercase mb-1">Bill Date</p>
-              <p className="font-bold text-white text-sm">{formatDisplayDate(purchase.billDate || purchase.date)}</p>
-            </div>
-          </div>
+          ) : (
+            <>
+              {(purchase.center || '').trim() !== '' && (
+                <div className="mb-4 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-[11px] font-bold text-amber-200">
+                  જુનો Center: {purchase.center}
+                </div>
+              )}
+              <div className="grid grid-cols-2 gap-4 sm:gap-6 mb-4">
+                <div className="bg-[#252525] p-4 sm:p-5 rounded-2xl sm:rounded-3xl border border-white/5 sm:col-span-2">
+                  <p className="text-[10px] text-gray-500 font-bold uppercase mb-1">Shop Name</p>
+                  <p className="font-black text-white uppercase text-base sm:text-lg">{purchase.shopName || '-'}</p>
+                </div>
+                <div className="bg-[#252525] p-4 sm:p-5 rounded-2xl sm:rounded-3xl border border-white/5">
+                  <p className="text-[10px] text-gray-500 font-bold uppercase mb-1">Bill Number</p>
+                  <p className="font-black text-violet-300 text-base sm:text-lg">#{purchase.billNo || '-'}</p>
+                </div>
+                <div className="bg-[#252525] p-4 sm:p-5 rounded-2xl sm:rounded-3xl border border-white/5">
+                  <p className="text-[10px] text-gray-500 font-bold uppercase mb-1">Bill Date</p>
+                  <p className="font-bold text-white text-sm">{formatDisplayDate(purchase.billDate || purchase.date)}</p>
+                </div>
+              </div>
+            </>
+          )}
           <motion.button
             whileHover={{ scale: 1.02 }}
             whileTap={{ scale: 0.98 }}
