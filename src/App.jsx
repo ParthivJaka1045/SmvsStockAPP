@@ -32,9 +32,13 @@ import {
 import emailjs from 'emailjs-com'; 
 import {
   buildMonthlyClosingSnapshots,
+  buildSummaryReportFromSnapshots,
   buildSummaryReport,
   formatDisplayDate,
   formatMetric,
+  formatMonthLabel,
+  getMonthBounds,
+  isLockedPastMonth,
   getRangeLabel,
   getReportFileName,
   hydrateReport,
@@ -90,6 +94,13 @@ const isDigitsOnly = (value) => /^\d+$/.test((value || '').trim());
 const getMonthInputValue = (value = new Date()) => {
   const date = value instanceof Date ? value : new Date(value);
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+};
+
+/** Lock/unlock month picker: current or past only (future months disabled / clamped). */
+const clampLockUnlockMonthValue = (monthValue) => {
+  const cap = getMonthInputValue();
+  if (!monthValue || !/^\d{4}-\d{2}$/.test(monthValue)) return cap;
+  return monthValue > cap ? cap : monthValue;
 };
 
 const getLastDateForMonth = (monthValue) => {
@@ -616,6 +627,10 @@ const PURCHASE_SHOP_NAMES_COLLECTION = 'purchase-shop-names';
 const GLOBAL_STOCK_COLLECTION = 'global-stock';
 const STOCK_TRANSACTIONS_COLLECTION = 'stock-transactions';
 const MONTHLY_CLOSING_STOCK_COLLECTION = 'monthly-closing-stock';
+const MONTHLY_STOCK_SNAPSHOTS_COLLECTION = 'monthly_stock_snapshots';
+const STOCK_UNLOCK_AUDIT_LOGS_COLLECTION = 'stock_unlock_audit_logs';
+const STOCK_MONTH_LOCKS_COLLECTION = 'stock_month_locks';
+const PHYSICAL_ADJUSTMENT_SOURCE_TYPE = 'physical_adjustment';
 
 const globalStockKg = (value) => {
   const n = parseFloat(value);
@@ -639,6 +654,9 @@ const makeStockTransactionDocId = (sourceType, sourceId, lineIndex, transactionT
 
 const makeMonthlyClosingDocId = (monthValue, itemKey) =>
   `${encodeURIComponent((monthValue || '').toString())}__${encodeURIComponent((itemKey || '').toString())}`;
+
+const makeStockSnapshotDocId = (monthValue, itemKey, centerKey = 'all') =>
+  `${encodeURIComponent((monthValue || '').toString())}__${encodeURIComponent((centerKey || 'all').toString())}__${encodeURIComponent((itemKey || '').toString())}`;
 
 const buildStockTransactionsFromDocuments = ({ orders = [], sendOrders = [], purchases = [] }) => {
   const transactions = [];
@@ -959,8 +977,19 @@ const createDefaultReportForm = () => {
     scope: 'all',
     center: '',
     centerOther: '',
+    /** full_balance: opening rolled into Income. month_movements_only: Income = period IN only; Total Stock = closing. */
+    stockViewMode: 'full_balance',
   };
 };
+
+const createDefaultAdjustmentForm = () => ({
+  date: new Date().toISOString().split('T')[0],
+  itemName: '',
+  quantity: '',
+  direction: 'OUT',
+  reason: 'Shrinkage',
+  remark: '',
+});
 
 function PreviewInfoCard({ label, value, accentClass = 'text-slate-900', className = '' }) {
   return (
@@ -990,6 +1019,7 @@ function ReportPreviewContent({ report }) {
   const preparedReport = hydrateReport(report);
   const uiTheme = getReportUiTheme();
   const periodLabel = preparedReport.reportPeriod === 'yearly' ? 'Year' : 'Month';
+  const isMonthOnlyView = preparedReport.stockViewMode === 'month_movements_only';
 
   return (
     <div className="space-y-6 font-sans">
@@ -1000,6 +1030,11 @@ function ReportPreviewContent({ report }) {
             <p className="mt-2 text-[13px] sm:text-sm text-slate-600">
               Stock movements for the selected range (income, outgoing, and balance in KG).
             </p>
+            {isMonthOnlyView && (
+              <p className="mt-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] font-bold text-amber-900">
+                મોડ: ફક્ત આ પિરિયડની IN/OUT — આવકમાં ખુલ્લી સ્ટોક નથી; Total Stock = ખુલ્લી + પિરિયડ IN − OUT (closing).
+              </p>
+            )}
           </div>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
             <PreviewInfoCard label={periodLabel} value={preparedReport.monthLabel} />
@@ -1018,7 +1053,7 @@ function ReportPreviewContent({ report }) {
             <thead className="bg-slate-900 text-white">
               <tr>
                 <th className="px-4 py-3 text-left">Item Name</th>
-                <th className="px-4 py-3 text-center">Income (KG)</th>
+                <th className="px-4 py-3 text-center">{isMonthOnlyView ? 'Income (IN only)' : 'Income (KG)'}</th>
                 <th className="px-4 py-3 text-center">Outgoing (KG)</th>
                 <th className="px-4 py-3 text-center">Total Stock (KG)</th>
               </tr>
@@ -1046,7 +1081,11 @@ function ReportPreviewContent({ report }) {
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <ReportSummaryCard labelLines={['Items']} value={formatMetric(preparedReport.summary.totalRows)} />
-        <ReportSummaryCard labelLines={['Income', '(KG)']} value={formatMetric(preparedReport.summary.totalIncome)} accentClass={uiTheme.text} />
+        <ReportSummaryCard
+          labelLines={isMonthOnlyView ? ['Income', '(IN only)'] : ['Income', '(KG)']}
+          value={formatMetric(preparedReport.summary.totalIncome)}
+          accentClass={uiTheme.text}
+        />
         <ReportSummaryCard labelLines={['Outgoing', '(KG)']} value={formatMetric(preparedReport.summary.totalOutgoing)} />
         <ReportSummaryCard labelLines={['Total Stock', '(KG)']} value={formatMetric(preparedReport.summary.totalStock)} />
       </div>
@@ -1110,6 +1149,7 @@ function ItemNameAutocompleteInput({
   const focusClasses = {
     blue: 'focus:border-blue-500/50',
     violet: 'focus:border-violet-500/50',
+    fuchsia: 'focus:border-fuchsia-500/50',
   }[accent] || 'focus:border-blue-500/50';
 
   return (
@@ -1181,6 +1221,16 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
   const [mailSending, setMailSending] = useState(false);
   const [selectedReportEmail, setSelectedReportEmail] = useState(REPORT_DEFAULT_EMAILS[0]);
   const [closingMigrationLoading, setClosingMigrationLoading] = useState(false);
+  const [unlockReason, setUnlockReason] = useState('');
+  const [unlockReasonStepVisible, setUnlockReasonStepVisible] = useState(false);
+  const [monthLockSubmitting, setMonthLockSubmitting] = useState(false);
+  const [monthLockMonth, setMonthLockMonth] = useState(() => clampLockUnlockMonthValue(createDefaultReportForm().month));
+  const [reportMonthLock, setReportMonthLock] = useState({ loading: true, is_locked: false });
+  const [lockPanelMonthLock, setLockPanelMonthLock] = useState({ loading: true, is_locked: false });
+  const [lockPanelClosingKg, setLockPanelClosingKg] = useState(0);
+  const [unlockAuditLogs, setUnlockAuditLogs] = useState([]);
+  const [adjustmentForm, setAdjustmentForm] = useState(createDefaultAdjustmentForm);
+  const [adjustmentSubmitting, setAdjustmentSubmitting] = useState(false);
   const [previousMonthClosingInfo, setPreviousMonthClosingInfo] = useState({
     month: '',
     currentMonth: '',
@@ -1190,10 +1240,19 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
     currentIncomingKg: 0,
     currentOutgoingKg: 0,
     currentNetKg: 0,
+    currentMonthClosedStockKg: 0,
     itemCount: 0,
     loading: false,
     error: '',
   });
+
+  const adjustmentCatalogNameKeys = useMemo(
+    () => new Set(catalogItems.map((item) => item.nameKey)),
+    [catalogItems],
+  );
+
+  const [ledgerDataNonce, setLedgerDataNonce] = useState(0);
+  const bumpLedgerData = () => setLedgerDataNonce((n) => n + 1);
 
   const fetchOrders = async () => {
     setLoading(true);
@@ -1224,33 +1283,199 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
     setReportLoading(false);
   };
 
+  const fetchUnlockAuditLogs = async () => {
+    try {
+      const snapshot = await getDocs(
+        query(collection(db, STOCK_UNLOCK_AUDIT_LOGS_COLLECTION), orderBy('unlocked_at', 'desc'), limit(20)),
+      );
+      setUnlockAuditLogs(snapshot.docs.map((docSnap) => ({ id: docSnap.id, ...docSnap.data() })));
+    } catch (err) {
+      console.warn('unlock audit fetch failed:', err);
+      setUnlockAuditLogs([]);
+    }
+  };
+
   // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { fetchOrders(); fetchSendOrders(); fetchReports(); }, []);
+  useEffect(() => { fetchOrders(); fetchSendOrders(); fetchReports(); fetchUnlockAuditLogs(); }, []);
 
   useEffect(() => {
-    const targetMonth = getPreviousMonthInputValue(reportForm.month);
-    if (!targetMonth) {
-      setPreviousMonthClosingInfo({
-        month: '',
-        currentMonth: reportForm.month || '',
-        previousIncomingKg: 0,
-        previousOutgoingKg: 0,
-        totalClosingKg: 0,
-        currentIncomingKg: 0,
-        currentOutgoingKg: 0,
-        currentNetKg: 0,
-        itemCount: 0,
-        loading: false,
-        error: '',
-      });
+    setReportMonthLock((prev) => ({ ...prev, loading: true }));
+    const month = reportForm.month;
+    if (!month || !/^\d{4}-\d{2}$/.test(month)) {
+      setReportMonthLock({ loading: false, is_locked: false });
       return;
     }
-
     let cancelled = false;
+    (async () => {
+      try {
+        const snap = await getDoc(doc(db, STOCK_MONTH_LOCKS_COLLECTION, month));
+        const data = snap.exists() ? snap.data() : {};
+        const locked = data.is_locked === true;
+        if (!cancelled) setReportMonthLock({ loading: false, is_locked: locked });
+      } catch (err) {
+        console.warn('report month lock fetch failed:', err);
+        if (!cancelled) setReportMonthLock({ loading: false, is_locked: false });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [reportForm.month]);
+
+  useEffect(() => {
+    setUnlockReasonStepVisible(false);
+    setUnlockReason('');
+    setLockPanelMonthLock((prev) => ({ ...prev, loading: true }));
+    const month = monthLockMonth;
+    if (!month || !/^\d{4}-\d{2}$/.test(month)) {
+      setLockPanelMonthLock({ loading: false, is_locked: false });
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const snap = await getDoc(doc(db, STOCK_MONTH_LOCKS_COLLECTION, month));
+        const data = snap.exists() ? snap.data() : {};
+        const locked = data.is_locked === true;
+        if (!cancelled) setLockPanelMonthLock({ loading: false, is_locked: locked });
+      } catch (err) {
+        console.warn('lock panel month fetch failed:', err);
+        if (!cancelled) setLockPanelMonthLock({ loading: false, is_locked: false });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [monthLockMonth]);
+
+  const handleUnlockMonth = async () => {
+    const month = clampLockUnlockMonthValue(monthLockMonth);
+    if (month !== monthLockMonth) setMonthLockMonth(month);
+    if (!month || !/^\d{4}-\d{2}$/.test(month)) return alert('લૉક માટે મહિનો પસંદ કરો.');
+    if (!unlockReason.trim()) return alert('Unlock reason is required.');
+    if (monthLockSubmitting) return;
+
+    setMonthLockSubmitting(true);
+    try {
+      await setDoc(
+        doc(db, STOCK_MONTH_LOCKS_COLLECTION, month),
+        {
+          month,
+          year: month.slice(0, 4),
+          is_locked: false,
+          unlocked_at: new Date(),
+          unlocked_by: user?.username || 'Admin',
+          reason: unlockReason.trim(),
+          updatedAt: new Date(),
+        },
+        { merge: true },
+      );
+
+      await addDoc(collection(db, STOCK_UNLOCK_AUDIT_LOGS_COLLECTION), {
+        month,
+        year: month.slice(0, 4),
+        reason: unlockReason.trim(),
+        unlocked_by: user?.username || 'Admin',
+        unlocked_at: new Date(),
+        recalc_status: 'queued',
+      });
+
+      setUnlockReason('');
+      setUnlockReasonStepVisible(false);
+      setLockPanelMonthLock({ loading: false, is_locked: false });
+      if (month === reportForm.month) {
+        setReportMonthLock({ loading: false, is_locked: false });
+      }
+      await fetchUnlockAuditLogs();
+      alert(`Month ${month} unlocked successfully.`);
+    } catch (err) {
+      alert(`Unlock Error: ${err.message}`);
+    }
+    setMonthLockSubmitting(false);
+  };
+
+  const handleLockMonth = async () => {
+    const month = clampLockUnlockMonthValue(monthLockMonth);
+    if (month !== monthLockMonth) setMonthLockMonth(month);
+    if (!month || !/^\d{4}-\d{2}$/.test(month)) return alert('લૉક માટે મહિનો પસંદ કરો.');
+    if (monthLockSubmitting) return;
+
+    setMonthLockSubmitting(true);
+    try {
+      await setDoc(
+        doc(db, STOCK_MONTH_LOCKS_COLLECTION, month),
+        {
+          month,
+          year: month.slice(0, 4),
+          is_locked: true,
+          locked_at: new Date(),
+          locked_by: user?.username || 'Admin',
+          updatedAt: new Date(),
+        },
+        { merge: true },
+      );
+      setLockPanelMonthLock({ loading: false, is_locked: true });
+      if (month === reportForm.month) {
+        setReportMonthLock({ loading: false, is_locked: true });
+      }
+      setUnlockReasonStepVisible(false);
+      alert(`Month ${month} locked successfully.`);
+    } catch (err) {
+      alert(`Lock Error: ${err.message}`);
+    }
+    setMonthLockSubmitting(false);
+  };
+
+  const handlePhysicalAdjustmentSubmit = async () => {
+    const normalizedDate = normalizeDateOnly(adjustmentForm.date);
+    const itemName = (adjustmentForm.itemName || '').trim();
+    const quantity = toSafeTxQuantity(adjustmentForm.quantity);
+    const direction = adjustmentForm.direction === 'IN' ? 'IN' : 'OUT';
+    if (!normalizedDate) return alert('Adjustment date is required.');
+    if (!itemName) return alert('Item name is required.');
+    if (!quantity || quantity <= 0) return alert('Quantity must be greater than zero.');
+    if (!adjustmentForm.reason.trim()) return alert('Reason is required.');
+    if (adjustmentSubmitting) return;
+
+    if (!adjustmentCatalogNameKeys.has(normalizeItemName(itemName))) {
+      return alert(`Invalid item name: "${itemName}". Please select an item from the master list.`);
+    }
+
+    setAdjustmentSubmitting(true);
+    try {
+      const adjustmentRef = await addDoc(collection(db, STOCK_TRANSACTIONS_COLLECTION), {
+        sourceType: PHYSICAL_ADJUSTMENT_SOURCE_TYPE,
+        sourceId: '',
+        lineIndex: 0,
+        center_id: 'global',
+        centerName: 'All Centers / Full Report',
+        item_id: normalizeItemName(itemName),
+        itemName,
+        transaction_type: direction,
+        quantity,
+        transaction_date: normalizedDate,
+        adjustment_reason: adjustmentForm.reason.trim(),
+        remark: adjustmentForm.remark.trim(),
+        created_by: user?.username || 'Admin',
+        created_at: new Date(),
+        autoSynced: false,
+        is_deleted: false,
+        updatedAt: new Date(),
+      });
+      await updateDoc(doc(db, STOCK_TRANSACTIONS_COLLECTION, adjustmentRef.id), { sourceId: adjustmentRef.id });
+      setAdjustmentForm(createDefaultAdjustmentForm());
+      alert('Physical adjustment saved successfully.');
+      bumpLedgerData();
+    } catch (err) {
+      alert(`Adjustment Error: ${err.message}`);
+    }
+    setAdjustmentSubmitting(false);
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    const targetMonth = getPreviousMonthInputValue(reportForm.month);
+
     (async () => {
       setPreviousMonthClosingInfo((prev) => ({
         ...prev,
-        month: targetMonth,
+        month: targetMonth || '',
         currentMonth: reportForm.month,
         loading: true,
         error: '',
@@ -1261,13 +1486,48 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
           .map((docSnap) => ({ id: docSnap.id, ...docSnap.data() }))
           .filter((entry) => !entry?.is_deleted);
 
-        // If ledger is still empty (e.g. report never generated yet), hydrate once from primary collections.
         if (rows.length === 0) {
           try {
             rows = await syncStockHistoryFromPrimaryCollections();
           } catch (syncErr) {
             console.warn('stock-transactions sync skipped in closing widget:', syncErr);
           }
+        }
+
+        let lockPanelClosedKg = 0;
+        if (monthLockMonth && /^\d{4}-\d{2}$/.test(monthLockMonth)) {
+          const lockMonthEnd = getLastDateForMonth(monthLockMonth);
+          lockPanelClosedKg = rows
+            .filter((entry) => {
+              const txDate = normalizeDateOnly(entry.transaction_date || entry.date || entry.created_at);
+              return txDate && txDate <= lockMonthEnd;
+            })
+            .reduce((sum, entry) => sum + (
+              (entry.transaction_type || '').toString().toUpperCase() === 'OUT'
+                ? -globalStockKg(entry.quantity)
+                : globalStockKg(entry.quantity)
+            ), 0);
+        }
+        if (!cancelled) setLockPanelClosingKg(lockPanelClosedKg);
+
+        if (!targetMonth) {
+          if (!cancelled) {
+            setPreviousMonthClosingInfo({
+              month: '',
+              currentMonth: reportForm.month || '',
+              previousIncomingKg: 0,
+              previousOutgoingKg: 0,
+              totalClosingKg: 0,
+              currentIncomingKg: 0,
+              currentOutgoingKg: 0,
+              currentNetKg: 0,
+              currentMonthClosedStockKg: 0,
+              itemCount: 0,
+              loading: false,
+              error: '',
+            });
+          }
+          return;
         }
 
         const previousMonthRows = rows.filter(
@@ -1290,11 +1550,23 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
           .filter((entry) => (entry.transaction_type || '').toString().toUpperCase() === 'OUT')
           .reduce((sum, entry) => sum + globalStockKg(entry.quantity), 0);
 
-        const previousMonthEnd = `${targetMonth}-31`;
+        const previousMonthEnd = getLastDateForMonth(targetMonth);
         const totalClosingKg = rows
           .filter((entry) => {
             const txDate = normalizeDateOnly(entry.transaction_date || entry.date || entry.created_at);
             return txDate && txDate <= previousMonthEnd;
+          })
+          .reduce((sum, entry) => sum + (
+            (entry.transaction_type || '').toString().toUpperCase() === 'OUT'
+              ? -globalStockKg(entry.quantity)
+              : globalStockKg(entry.quantity)
+          ), 0);
+
+        const currentMonthEnd = getLastDateForMonth(reportForm.month);
+        const currentMonthClosedStockKg = rows
+          .filter((entry) => {
+            const txDate = normalizeDateOnly(entry.transaction_date || entry.date || entry.created_at);
+            return txDate && txDate <= currentMonthEnd;
           })
           .reduce((sum, entry) => sum + (
             (entry.transaction_type || '').toString().toUpperCase() === 'OUT'
@@ -1316,6 +1588,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
             currentIncomingKg,
             currentOutgoingKg,
             currentNetKg,
+            currentMonthClosedStockKg,
             itemCount,
             loading: false,
             error: '',
@@ -1324,7 +1597,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
       } catch (err) {
         if (!cancelled) {
           setPreviousMonthClosingInfo({
-            month: targetMonth,
+            month: targetMonth || '',
             currentMonth: reportForm.month,
             previousIncomingKg: 0,
             previousOutgoingKg: 0,
@@ -1332,16 +1605,18 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
             currentIncomingKg: 0,
             currentOutgoingKg: 0,
             currentNetKg: 0,
+            currentMonthClosedStockKg: 0,
             itemCount: 0,
             loading: false,
             error: err?.message || 'Failed to load previous month closing.',
           });
+          setLockPanelClosingKg(0);
         }
       }
     })();
 
     return () => { cancelled = true; };
-  }, [reportForm.month]);
+  }, [reportForm.month, monthLockMonth, ledgerDataNonce, orders.length, sendOrders.length]);
 
   const clearFilters = () => setFilters({ date: '', center: '', name: '' });
   const clearSendFilters = () => setSendFilters({ date: '', center: '', name: '' });
@@ -1499,6 +1774,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
       await updateDoc(doc(db, "orders", order.id), { is_deleted: true });
       await setSourceTransactionsDeleted('order', order.id, true);
       setOrders(orders.filter(o => o.id !== order.id));
+      bumpLedgerData();
     } catch (err) { alert("Delete Error: " + err.message); }
   };
 
@@ -1568,11 +1844,13 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
     setReportGenerating(true);
     try {
       const effectiveCenter = getResolvedCenterValue(reportForm.center, reportForm.centerOther);
-      const [stockTransactions, monthlySnapshot] = await Promise.all([
+      const [stockTransactions, monthlySnapshot, snapshotSnapshot] = await Promise.all([
         syncStockHistoryFromPrimaryCollections(),
         getDocs(collection(db, MONTHLY_CLOSING_STOCK_COLLECTION)),
+        getDocs(collection(db, MONTHLY_STOCK_SNAPSHOTS_COLLECTION)),
       ]);
       const monthlyClosings = monthlySnapshot.docs.map((docSnap) => ({ id: docSnap.id, ...docSnap.data() }));
+      const monthlyStockSnapshots = snapshotSnapshot.docs.map((docSnap) => ({ id: docSnap.id, ...docSnap.data() }));
       const closingSnapshots = buildMonthlyClosingSnapshots({
         stockTransactions,
         throughDate: reportForm.selectedDate,
@@ -1590,20 +1868,98 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
         ),
       );
 
-      const draft = buildSummaryReport({
-        orders,
-        sendOrders,
-        stockTransactions,
-        monthlyClosingStock: monthlyClosings,
-        month: reportForm.month,
-        fromMonth: isRangeMode ? reportForm.fromMonth : reportForm.month,
-        toMonth: isRangeMode ? reportForm.toMonth : reportForm.month,
-        selectedDate: reportForm.selectedDate,
-        createdBy: user?.username || 'Admin',
-        scope: reportForm.scope,
-        center: effectiveCenter,
-        reportPeriod: reportForm.reportPeriod,
-      });
+      const shouldUseMonthlySnapshot =
+        reportForm.reportPeriod === 'monthly'
+        && reportForm.reportMode === 'single'
+        && isLockedPastMonth(reportForm.month, reportForm.selectedDate);
+      const monthSnapshots = monthlyStockSnapshots.filter(
+        (entry) => (entry.month || '').toString().trim() === reportForm.month
+          && entry.is_locked !== false
+          && !entry.is_deleted,
+      );
+
+      const draft = shouldUseMonthlySnapshot && monthSnapshots.length > 0
+        ? buildSummaryReportFromSnapshots({
+            snapshots: monthSnapshots,
+            month: reportForm.month,
+            selectedDate: reportForm.selectedDate,
+            createdBy: user?.username || 'Admin',
+            scope: reportForm.scope,
+            center: effectiveCenter,
+            reportPeriod: reportForm.reportPeriod,
+            stockViewMode: reportForm.stockViewMode,
+          })
+        : buildSummaryReport({
+            orders,
+            sendOrders,
+            stockTransactions,
+            monthlyClosingStock: monthlyClosings,
+            month: reportForm.month,
+            fromMonth: isRangeMode ? reportForm.fromMonth : reportForm.month,
+            toMonth: isRangeMode ? reportForm.toMonth : reportForm.month,
+            selectedDate: reportForm.selectedDate,
+            createdBy: user?.username || 'Admin',
+            scope: reportForm.scope,
+            center: effectiveCenter,
+            reportPeriod: reportForm.reportPeriod,
+            stockViewMode: reportForm.stockViewMode,
+          });
+
+      if (!shouldUseMonthlySnapshot && reportForm.reportPeriod === 'monthly' && reportForm.reportMode === 'single') {
+        const { startDate, endDate } = getMonthBounds(reportForm.month);
+        const monthTxRows = stockTransactions.filter((entry) => {
+          const txDate = normalizeDateOnly(entry.transaction_date || entry.date || entry.created_at);
+          return txDate >= startDate && txDate <= endDate && !entry?.is_deleted;
+        });
+        const rowMap = new Map();
+        monthTxRows.forEach((entry) => {
+          const key = normalizeItemName(entry.itemName || entry.item_id || '');
+          if (!key) return;
+          const prev = rowMap.get(key) || {
+            item_id: key,
+            item_name: (entry.itemName || entry.item_id || '').toString().trim(),
+            total_inward: 0,
+            total_outward: 0,
+          };
+          if ((entry.transaction_type || '').toString().toUpperCase() === 'OUT') {
+            prev.total_outward = roundKg2(prev.total_outward + globalStockKg(entry.quantity));
+          } else {
+            prev.total_inward = roundKg2(prev.total_inward + globalStockKg(entry.quantity));
+          }
+          rowMap.set(key, prev);
+        });
+
+        await Promise.all(
+          draft.rows.map((row) => {
+            const itemKey = normalizeItemName(row.itemName);
+            const monthAgg = rowMap.get(itemKey) || { total_inward: 0, total_outward: 0 };
+            const periodIn = roundKg2(monthAgg.total_inward || 0);
+            const periodOut = roundKg2(monthAgg.total_outward || 0);
+            const closing = roundKg2(row.totalStock || 0);
+            const openingBalance = reportForm.stockViewMode === 'month_movements_only'
+              ? roundKg2(closing - periodIn + periodOut)
+              : roundKg2((parseFloat(row.income) || 0) - periodIn);
+            return setDoc(
+              doc(db, MONTHLY_STOCK_SNAPSHOTS_COLLECTION, makeStockSnapshotDocId(reportForm.month, itemKey, 'all')),
+              {
+                month: reportForm.month,
+                year: reportForm.month.slice(0, 4),
+                item_id: itemKey,
+                item_name: row.itemName,
+                opening_balance: openingBalance,
+                total_inward: roundKg2(monthAgg.total_inward || 0),
+                total_outward: roundKg2(monthAgg.total_outward || 0),
+                closing_balance: roundKg2(row.totalStock || 0),
+                is_locked: true,
+                locked_at: new Date(),
+                lock_source: 'manual_report_generation',
+                updatedAt: new Date(),
+              },
+              { merge: true },
+            );
+          }),
+        );
+      }
 
       if (draft.rows.length === 0) {
         alert(`No entries found for ${draft.centerLabel}.`);
@@ -1620,6 +1976,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
       const savedReport = hydrateReport({ id: docRef.id, ...payload });
       setReports(prev => [savedReport, ...prev]);
       setPreviewReport(savedReport);
+      bumpLedgerData();
       alert('Monthly report created! ✅');
     } catch (err) {
       alert('Report Error: ' + err.message);
@@ -1682,6 +2039,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
       await updateDoc(doc(db, "send-orders", order.id), { is_deleted: true });
       await setSourceTransactionsDeleted('send', order.id, true);
       setSendOrders(sendOrders.filter(o => o.id !== order.id));
+      bumpLedgerData();
     } catch (err) { alert("Delete Error: " + err.message); }
   };
 
@@ -1853,7 +2211,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
                         </div>
                         <div className="bg-gradient-to-br from-orange-500/10 to-orange-600/5 p-2 sm:p-3 rounded-xl border border-orange-500/20 text-center">
                           <p className="text-[10px] text-orange-400 uppercase font-bold">Total KG</p>
-                          <p className="font-black text-orange-400 text-sm sm:text-base">{calculateTotals(order.items).totalKg}</p>
+                          <p className="font-black text-orange-400 text-sm sm:text-base">{formatMetric(calculateTotals(order.items).totalKg)}</p>
                         </div>
                       </div>
                       <div className="grid grid-cols-2 gap-2">
@@ -1978,7 +2336,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
                           </div>
                           <div className="bg-gradient-to-br from-blue-500/10 to-blue-600/5 p-2 sm:p-3 rounded-xl border border-blue-500/20 text-center">
                             <p className="text-[10px] text-blue-400 uppercase font-bold">Total KG</p>
-                            <p className="font-black text-blue-400 text-sm sm:text-base">{totalKg}</p>
+                            <p className="font-black text-blue-400 text-sm sm:text-base">{formatMetric(totalKg)}</p>
                           </div>
                         </div>
                         <div className="grid grid-cols-2 gap-2">
@@ -2051,6 +2409,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
                   whileTap={{ scale: 0.95 }}
                   onClick={handleMigrateClosingSnapshots}
                   disabled={closingMigrationLoading}
+                  title="monthly-closing-stock દરેક document નું ID month+item મુજબ safe format માં લાવે છે. જુના / ખોટા ID હોય તો એક વાર ચલાવો; નવા ડેટા પર જરૂર નથી."
                   className="text-gray-400 hover:text-blue-300 disabled:opacity-50 flex items-center justify-center gap-1.5 text-xs font-bold uppercase transition-all bg-white/5 hover:bg-blue-500/10 px-3 py-2 rounded-xl border border-white/10"
                 >
                   {closingMigrationLoading ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
@@ -2124,6 +2483,44 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
                   </select>
                 </div>
               )}
+
+              <div className="sm:col-span-2 lg:col-span-4">
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">
+                  Stock columns (Income)
+                </label>
+                <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
+                  <label className="flex cursor-pointer items-start gap-2 rounded-xl border border-white/10 bg-[#252525] px-3 py-2.5 text-sm text-white hover:border-emerald-500/40 sm:flex-1 sm:min-w-[200px]">
+                    <input
+                      type="radio"
+                      name="stockViewMode"
+                      className="mt-1"
+                      checked={reportForm.stockViewMode === 'full_balance'}
+                      onChange={() => setReportForm((prev) => ({ ...prev, stockViewMode: 'full_balance' }))}
+                    />
+                    <span>
+                      <span className="font-bold">Full balance</span>
+                      <span className="mt-0.5 block text-[11px] font-normal text-gray-400">
+                        Income = ખુલ્લી સ્ટોક + પિરિયડ IN (ડિફોલ્ટ)
+                      </span>
+                    </span>
+                  </label>
+                  <label className="flex cursor-pointer items-start gap-2 rounded-xl border border-white/10 bg-[#252525] px-3 py-2.5 text-sm text-white hover:border-emerald-500/40 sm:flex-1 sm:min-w-[200px]">
+                    <input
+                      type="radio"
+                      name="stockViewMode"
+                      className="mt-1"
+                      checked={reportForm.stockViewMode === 'month_movements_only'}
+                      onChange={() => setReportForm((prev) => ({ ...prev, stockViewMode: 'month_movements_only' }))}
+                    />
+                    <span>
+                      <span className="font-bold">Month IN only</span>
+                      <span className="mt-0.5 block text-[11px] font-normal text-gray-400">
+                        ફક્ત આ પિરિયડની IN જ Income; Total Stock = closing (ખુલ્લી + IN − OUT)
+                      </span>
+                    </span>
+                  </label>
+                </div>
+              </div>
 
               {reportForm.scope === 'center' && (
                 <div>
@@ -2239,30 +2636,267 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
               </p>
             </div>
 
+            {reportForm.reportPeriod === 'monthly' && reportForm.reportMode === 'single' && (
             <div className="mt-3 rounded-2xl border border-blue-500/20 bg-blue-500/10 p-4">
-              <p className="text-[11px] font-bold uppercase tracking-widest text-blue-300">Previous Month Closing (Admin View)</p>
-              <p className="mt-2 text-sm font-bold text-blue-100">
-                Month: {previousMonthClosingInfo.month ? formatDisplayDate(`${previousMonthClosingInfo.month}-01`).slice(3) : '-'}
-              </p>
-              <p className="mt-1 text-lg font-black text-white">
-                {previousMonthClosingInfo.loading ? 'Loading...' : `${formatMetric(previousMonthClosingInfo.totalClosingKg)} KG`}
-              </p>
-              <p className="mt-1 text-xs text-blue-100/80">
-                Prev month IN: {previousMonthClosingInfo.loading ? '-' : formatMetric(previousMonthClosingInfo.previousIncomingKg)} KG | OUT: {previousMonthClosingInfo.loading ? '-' : formatMetric(previousMonthClosingInfo.previousOutgoingKg)} KG
-              </p>
-              <p className="mt-1 text-xs text-blue-100/80">
-                Items touched (prev month): {previousMonthClosingInfo.loading ? '-' : formatMetric(previousMonthClosingInfo.itemCount)}
-              </p>
-              <p className="mt-3 text-[11px] font-bold uppercase tracking-widest text-blue-300">Current Month Totals</p>
-              <p className="mt-1 text-xs text-blue-100/80">
-                Month: {previousMonthClosingInfo.currentMonth ? formatDisplayDate(`${previousMonthClosingInfo.currentMonth}-01`).slice(3) : '-'}
-              </p>
-              <p className="mt-1 text-xs text-blue-100/80">
-                IN: {previousMonthClosingInfo.loading ? '-' : formatMetric(previousMonthClosingInfo.currentIncomingKg)} KG | OUT: {previousMonthClosingInfo.loading ? '-' : formatMetric(previousMonthClosingInfo.currentOutgoingKg)} KG | NET: {previousMonthClosingInfo.loading ? '-' : formatMetric(previousMonthClosingInfo.currentNetKg)} KG
-              </p>
+              <p className="text-[11px] font-bold uppercase tracking-widest text-blue-300">Month summary (ledger)</p>
               {previousMonthClosingInfo.error && (
                 <p className="mt-2 text-xs text-red-300">{previousMonthClosingInfo.error}</p>
               )}
+
+              {/* Previous month — month name + 3 boxes */}
+              <div className="mt-3">
+                <p className="text-center text-sm font-black text-white">
+                  {previousMonthClosingInfo.month ? formatMonthLabel(previousMonthClosingInfo.month) : '-'}
+                </p>
+                <div className="mt-2 grid grid-cols-3 gap-2">
+                  <div className="rounded-xl border border-white/10 bg-[#252525]/90 p-3 text-center">
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-gray-500">Income</p>
+                    <p className="mt-1 text-base font-black text-emerald-300 sm:text-lg">
+                      {previousMonthClosingInfo.loading ? '…' : `${formatMetric(previousMonthClosingInfo.previousIncomingKg)}`}
+                    </p>
+                    <p className="text-[10px] text-gray-500">KG</p>
+                  </div>
+                  <div className="rounded-xl border border-white/10 bg-[#252525]/90 p-3 text-center">
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-gray-500">Outgoing</p>
+                    <p className="mt-1 text-base font-black text-orange-300 sm:text-lg">
+                      {previousMonthClosingInfo.loading ? '…' : `${formatMetric(previousMonthClosingInfo.previousOutgoingKg)}`}
+                    </p>
+                    <p className="text-[10px] text-gray-500">KG</p>
+                  </div>
+                  <div className="rounded-xl border border-white/10 bg-[#252525]/90 p-3 text-center">
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-gray-500">Stock closed</p>
+                    <p className="mt-1 text-base font-black text-white sm:text-lg">
+                      {previousMonthClosingInfo.loading ? '…' : `${formatMetric(previousMonthClosingInfo.totalClosingKg)}`}
+                    </p>
+                    <p className="text-[10px] text-gray-500">KG</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Current report month — same 3 boxes; stock closed blank until locked */}
+              <div className="mt-5 border-t border-blue-500/20 pt-4">
+                <p className="text-center text-sm font-black text-white">
+                  {previousMonthClosingInfo.currentMonth ? formatMonthLabel(previousMonthClosingInfo.currentMonth) : '-'}
+                </p>
+                <div className="mt-2 grid grid-cols-3 gap-2">
+                  <div className="rounded-xl border border-white/10 bg-[#252525]/90 p-3 text-center">
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-gray-500">Income</p>
+                    <p className="mt-1 text-base font-black text-emerald-300 sm:text-lg">
+                      {previousMonthClosingInfo.loading ? '…' : `${formatMetric(previousMonthClosingInfo.currentIncomingKg)}`}
+                    </p>
+                    <p className="text-[10px] text-gray-500">KG</p>
+                  </div>
+                  <div className="rounded-xl border border-white/10 bg-[#252525]/90 p-3 text-center">
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-gray-500">Outgoing</p>
+                    <p className="mt-1 text-base font-black text-orange-300 sm:text-lg">
+                      {previousMonthClosingInfo.loading ? '…' : `${formatMetric(previousMonthClosingInfo.currentOutgoingKg)}`}
+                    </p>
+                    <p className="text-[10px] text-gray-500">KG</p>
+                  </div>
+                  <div className="rounded-xl border border-white/10 bg-[#252525]/90 p-3 text-center">
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-gray-500">Stock closed</p>
+                    <p className="mt-1 text-base font-black text-white sm:text-lg">
+                      {previousMonthClosingInfo.loading
+                        ? '…'
+                        : (reportMonthLock.is_locked ? formatMetric(previousMonthClosingInfo.currentMonthClosedStockKg) : '—')}
+                    </p>
+                    <p className="text-[10px] text-gray-500">KG</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+            )}
+
+            <div className="mt-3 rounded-2xl border border-amber-500/20 bg-amber-500/10 p-4">
+              <p className="text-[11px] font-bold uppercase tracking-widest text-amber-300">Month lock / unlock</p>
+              <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="mb-2 block text-[11px] font-bold uppercase tracking-widest text-amber-100/80">લૉક / અનલૉક મહિનો *</label>
+                  <input
+                    type="month"
+                    max={getMonthInputValue()}
+                    className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-amber-500/50 transition-all text-sm"
+                    value={monthLockMonth}
+                    onChange={(e) => setMonthLockMonth(clampLockUnlockMonthValue(e.target.value))}
+                  />
+                  <p className="mt-1.5 text-[10px] text-amber-100/70">
+                    ભવિષ્યના મહિનો અહીં પસંદ થઈ શકતા નથી (મહત્તમ: {formatMonthLabel(getMonthInputValue())}). ખરીદી/રિક્વેસ્ટ/સેન્ડ માટે તારીખ પર ભવિષ્યની એન્ટ્રી યથાવત રહેશે.
+                  </p>
+                  <p className="mt-1.5 text-[10px] text-amber-100/70">
+                    રિપોર્ટ મહિનો: <span className="font-bold text-white">{reportForm.month ? formatMonthLabel(reportForm.month) : '-'}</span>
+                    {' · '}
+                    <button
+                      type="button"
+                      className="font-bold text-amber-200 underline-offset-2 hover:underline"
+                      onClick={() => setMonthLockMonth(clampLockUnlockMonthValue(reportForm.month || monthLockMonth))}
+                    >
+                      Report month પર સેટ કરો
+                    </button>
+                  </p>
+                </div>
+                <div className="flex items-end">
+                  <p className="rounded-xl border border-white/10 bg-[#252525]/80 px-3 py-2 text-xs text-amber-100/90">
+                    સ્ટેટસ: <span className="font-black text-white">{formatMonthLabel(monthLockMonth)}</span>
+                    {lockPanelMonthLock.loading ? ' — લોડ થઈ રહ્યું છે' : (lockPanelMonthLock.is_locked ? ' — બંધ (locked)' : ' — ખુલ્લો')}
+                  </p>
+                </div>
+              </div>
+
+              {lockPanelMonthLock.loading ? (
+                <p className="mt-3 text-sm text-amber-100/80">Loading lock status…</p>
+              ) : lockPanelMonthLock.is_locked ? (
+                <div className="mt-3 space-y-3">
+                  <div className="rounded-xl border border-amber-500/30 bg-[#252525]/80 px-4 py-3">
+                    <p className="text-sm font-black text-amber-200">This month is closed</p>
+                    <p className="mt-1 text-xs text-gray-400">
+                      <span className="font-bold text-white">{formatMonthLabel(monthLockMonth)}</span>
+                      {' — '}closed stock (month end):{' '}
+                      <span className="font-bold text-white">
+                        {previousMonthClosingInfo.loading ? '…' : `${formatMetric(lockPanelClosingKg)} KG`}
+                      </span>
+                    </p>
+                  </div>
+                  {!unlockReasonStepVisible ? (
+                    <motion.button
+                      type="button"
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.98 }}
+                      onClick={() => setUnlockReasonStepVisible(true)}
+                      disabled={monthLockSubmitting}
+                      className="w-full bg-gradient-to-r from-amber-500 to-orange-500 text-white p-3 rounded-xl font-bold text-sm uppercase tracking-wide disabled:opacity-50"
+                    >
+                      Unlock month
+                    </motion.button>
+                  ) : (
+                    <div className="space-y-2">
+                      <label className="block text-[11px] font-bold uppercase tracking-widest text-amber-100/80">Unlock reason (required)</label>
+                      <input
+                        className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-amber-500/50 transition-all text-sm"
+                        value={unlockReason}
+                        onChange={(e) => setUnlockReason(e.target.value)}
+                        placeholder="Backdated entry / correction reason..."
+                      />
+                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                        <motion.button
+                          type="button"
+                          whileHover={{ scale: 1.02 }}
+                          whileTap={{ scale: 0.98 }}
+                          onClick={handleUnlockMonth}
+                          disabled={monthLockSubmitting}
+                          className="bg-gradient-to-r from-amber-500 to-orange-500 text-white p-3 rounded-xl font-bold text-sm uppercase tracking-wide disabled:opacity-50"
+                        >
+                          {monthLockSubmitting ? 'Processing…' : 'Confirm unlock'}
+                        </motion.button>
+                        <motion.button
+                          type="button"
+                          whileHover={{ scale: 1.02 }}
+                          whileTap={{ scale: 0.98 }}
+                          onClick={() => { setUnlockReasonStepVisible(false); setUnlockReason(''); }}
+                          disabled={monthLockSubmitting}
+                          className="bg-[#252525] border border-white/10 text-white p-3 rounded-xl font-bold text-sm uppercase tracking-wide disabled:opacity-50"
+                        >
+                          Cancel
+                        </motion.button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="mt-3 space-y-2">
+                  <p className="text-xs text-amber-100/80">
+                    <span className="font-bold text-white">{formatMonthLabel(monthLockMonth)}</span> હાલ ખુલ્લો છે — જરૂર હોય તો lock લગાવો.
+                  </p>
+                  <motion.button
+                    type="button"
+                    whileHover={{ scale: 1.02 }}
+                    whileTap={{ scale: 0.98 }}
+                    onClick={handleLockMonth}
+                    disabled={monthLockSubmitting}
+                    className="w-full bg-[#252525] border border-white/10 text-white p-3 rounded-xl font-bold text-sm uppercase tracking-wide disabled:opacity-50"
+                  >
+                    {monthLockSubmitting ? 'Processing…' : 'Lock month'}
+                  </motion.button>
+                </div>
+              )}
+
+              <div className="mt-4">
+                <p className="text-[11px] font-bold uppercase tracking-widest text-amber-300">Recent unlock audit</p>
+                <div className="mt-2 space-y-1 text-xs text-amber-100/90">
+                  {unlockAuditLogs.length === 0 && <p className="text-amber-100/70">No unlock logs found.</p>}
+                  {unlockAuditLogs.map((entry) => (
+                    <p key={entry.id}>
+                      {entry.month || '-'} | {entry.unlocked_by || '-'} | {formatDisplayDate(entry.unlocked_at)} | {entry.reason || '-'}
+                    </p>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-3 rounded-2xl border border-fuchsia-500/20 bg-fuchsia-500/10 p-4">
+              <p className="text-[11px] font-bold uppercase tracking-widest text-fuchsia-200">Physical stock adjustment</p>
+              <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                <input
+                  type="date"
+                  className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-fuchsia-500/50 transition-all text-sm"
+                  value={adjustmentForm.date}
+                  onChange={(e) => setAdjustmentForm((prev) => ({ ...prev, date: e.target.value }))}
+                />
+                <div className="sm:col-span-2">
+                  <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-500">Item name *</label>
+                  <ItemNameAutocompleteInput
+                    accent="fuchsia"
+                    catalogItems={catalogItems}
+                    placeholder="માસ્ટર લિસ્ટમાંથી શોધો / પસંદ કરો…"
+                    value={adjustmentForm.itemName}
+                    excludedNameKeys={[]}
+                    onChange={(nextValue) => setAdjustmentForm((prev) => ({ ...prev, itemName: nextValue }))}
+                    onSelectItem={(item) => setAdjustmentForm((prev) => ({ ...prev, itemName: item.name }))}
+                  />
+                </div>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-fuchsia-500/50 transition-all text-sm"
+                  placeholder="Quantity (KG)"
+                  value={adjustmentForm.quantity}
+                  onChange={(e) => setAdjustmentForm((prev) => ({ ...prev, quantity: e.target.value }))}
+                />
+                <select
+                  className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-fuchsia-500/50 transition-all text-sm"
+                  value={adjustmentForm.direction}
+                  onChange={(e) => setAdjustmentForm((prev) => ({ ...prev, direction: e.target.value }))}
+                >
+                  <option value="OUT">Minus (OUT)</option>
+                  <option value="IN">Plus (IN)</option>
+                </select>
+                <select
+                  className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-fuchsia-500/50 transition-all text-sm"
+                  value={adjustmentForm.reason}
+                  onChange={(e) => setAdjustmentForm((prev) => ({ ...prev, reason: e.target.value }))}
+                >
+                  <option value="Shrinkage">Shrinkage</option>
+                  <option value="Damage">Damage</option>
+                  <option value="Missing">Missing</option>
+                  <option value="Found / Correction">Found / Correction</option>
+                </select>
+                <input
+                  className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-fuchsia-500/50 transition-all text-sm sm:col-span-2 lg:col-span-3"
+                  placeholder="Remark"
+                  value={adjustmentForm.remark}
+                  onChange={(e) => setAdjustmentForm((prev) => ({ ...prev, remark: e.target.value }))}
+                />
+              </div>
+              <ItemsListSearchHint />
+              <motion.button
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
+                onClick={handlePhysicalAdjustmentSubmit}
+                disabled={adjustmentSubmitting}
+                className="mt-3 bg-gradient-to-r from-fuchsia-500 to-violet-600 text-white px-5 py-3 rounded-xl font-bold text-sm uppercase tracking-wide shadow-lg shadow-fuchsia-500/20 disabled:opacity-50"
+              >
+                {adjustmentSubmitting ? 'Saving...' : 'Save adjustment entry'}
+              </motion.button>
             </div>
 
             <div className="mt-5 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
@@ -2297,6 +2931,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
                 {reports.map((report, index) => {
                   const preparedReport = hydrateReport(report);
                   const uiTheme = getReportUiTheme();
+                  const isMonthOnlyCard = preparedReport.stockViewMode === 'month_movements_only';
                   return (
                     <motion.div key={preparedReport.id} variants={fadeInUp} initial="initial" animate="animate" exit="exit"
                       transition={{ delay: index * 0.05 }} whileHover={{ y: -5, transition: { duration: 0.2 } }}
@@ -2331,7 +2966,9 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
                             <p className="font-black text-white text-base">{formatMetric(preparedReport.summary.totalRows)}</p>
                           </div>
                           <div className={`bg-gradient-to-br ${uiTheme.soft} p-3 rounded-xl border ${uiTheme.border} text-center`}>
-                            <p className={`text-[10px] uppercase font-bold ${uiTheme.muted}`}>Income (KG)</p>
+                            <p className={`text-[10px] uppercase font-bold ${uiTheme.muted}`}>
+                              {isMonthOnlyCard ? 'Income (IN)' : 'Income (KG)'}
+                            </p>
                             <p className={`font-black text-base ${uiTheme.text}`}>{formatMetric(preparedReport.summary.totalIncome)}</p>
                           </div>
                           <div className="bg-[#252525] p-3 rounded-xl border border-white/5 text-center">
@@ -2385,7 +3022,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
       )}
 
       {isPurchases && (
-        <PurchaseAdminPanel user={user} catalogItems={catalogItems} />
+        <PurchaseAdminPanel user={user} catalogItems={catalogItems} onLedgerChanged={bumpLedgerData} />
       )}
 
       {/* Request Preview Modal */}
@@ -2508,7 +3145,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
                 return (
                   <div className="mt-6 sm:mt-10 grid grid-cols-2 border-4 border-black p-3 sm:p-5 font-black text-center uppercase text-xs sm:text-sm tracking-tighter">
                     <div className="border-r border-gray-200">ITEMS: {filledItems.length}</div>
-                    <div>TOTAL KG: {totalKg}</div>
+                    <div>TOTAL KG: {formatMetric(totalKg)}</div>
                   </div>
                 );
               })()}
@@ -3077,7 +3714,7 @@ const createDefaultPurchaseForm = () => ({
   rows: createRowsFromItems([], 5),
 });
 
-function PurchaseAdminPanel({ user, catalogItems }) {
+function PurchaseAdminPanel({ user, catalogItems, onLedgerChanged }) {
   const [purchaseForm, setPurchaseForm] = useState(createDefaultPurchaseForm);
   const [purchases, setPurchases] = useState([]);
   const [purchaseLoading, setPurchaseLoading] = useState(true);
@@ -3267,6 +3904,7 @@ function PurchaseAdminPanel({ user, catalogItems }) {
       ]);
       setPurchaseForm(createDefaultPurchaseForm());
       if (isShop) refreshSavedShopNames();
+      onLedgerChanged?.();
       alert(`Purchase entry saved! ✅${stockSyncWarning}`);
     } catch (error) {
       alert(`Purchase Error: ${error.message}`);
@@ -3294,6 +3932,7 @@ function PurchaseAdminPanel({ user, catalogItems }) {
       await updateDoc(doc(db, 'purchases', purchase.id), { is_deleted: true });
       await setSourceTransactionsDeleted('purchase', purchase.id, true);
       setPurchases((prev) => prev.filter((item) => item.id !== purchase.id));
+      onLedgerChanged?.();
     } catch (error) {
       alert(`Delete Error: ${error.message}`);
     }
@@ -3648,7 +4287,7 @@ function PurchaseAdminPanel({ user, catalogItems }) {
                   <div className="rounded-xl border border-white/5 bg-[#252525] p-3 text-xs text-gray-400 space-y-1">
                     {(purchase.items || []).slice(0, 3).map((item, index) => (
                       <p key={`${purchase.id}-${index}`} className="truncate">
-                        <span className="font-bold text-white">{item.itemName}</span> - {item.kg || 0} KG
+                        <span className="font-bold text-white">{item.itemName}</span> - {formatMetric(item.kg || 0)} KG
                       </p>
                     ))}
                     {(purchase.items || []).length > 3 && (
@@ -5181,7 +5820,7 @@ function UserDashboard({ user, onBack = null, catalogItems }) {
             </div>
             <div>
           <p className="text-[10px] text-orange-400 font-bold uppercase">Total KG</p>
-              <p className="font-black text-orange-400 text-xl sm:text-2xl">{totals.totalKg}</p>
+              <p className="font-black text-orange-400 text-xl sm:text-2xl">{formatMetric(totals.totalKg)}</p>
             </div>
             <div>
               <p className="text-[10px] text-gray-500 font-bold uppercase">Global ID</p>
@@ -5209,7 +5848,7 @@ function UserDashboard({ user, onBack = null, catalogItems }) {
                       <span className="text-[10px] text-gray-500 uppercase font-bold">{item.unit}</span>
                       {normalizeQuantityUnit(item.unit) === UNIT_DABBA && (
                         <span className="ml-2 text-[10px] text-gray-400 font-bold">
-                          (= {convertItemQtyToKg(item.qty, item.unit)} KG)
+                          (= {formatMetric(convertItemQtyToKg(item.qty, item.unit))} KG)
                         </span>
                       )}
                     </td>

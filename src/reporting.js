@@ -95,10 +95,16 @@ const getIsoString = (value) => {
   return date ? date.toISOString() : '';
 };
 
+const indianNumberFormatter = new Intl.NumberFormat('en-IN', {
+  minimumFractionDigits: 0,
+  maximumFractionDigits: 2,
+});
+
+/** Display numbers with Indian-style grouping (e.g. 1,000 / 10,000 / 1,00,000). */
 export const formatMetric = (value) => {
   const numeric = safeNumber(value);
-  if (Number.isInteger(numeric)) return String(numeric);
-  return numeric.toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1');
+  if (!Number.isFinite(numeric)) return indianNumberFormatter.format(0);
+  return indianNumberFormatter.format(numeric);
 };
 
 export const formatMonthLabel = (monthValue) => {
@@ -338,6 +344,8 @@ const getOpeningStockByItemFromHistory = ({
       .map((entry) => normalizeText(entry.itemName)),
   );
 
+  const snapshotBackedKeys = new Set();
+
   itemsInWindow.forEach((itemKey) => {
     const fromSnapshot = monthlyLookup.get(`${previousMonth}__${itemKey}`);
     if (fromSnapshot) {
@@ -345,6 +353,7 @@ const getOpeningStockByItemFromHistory = ({
         kg: roundMetric(fromSnapshot.closingStock),
         displayName: fromSnapshot.itemName,
       });
+      snapshotBackedKeys.add(itemKey);
     }
   });
 
@@ -353,7 +362,7 @@ const getOpeningStockByItemFromHistory = ({
     .forEach((entry) => {
       const key = normalizeText(entry.itemName);
       if (!key) return;
-      if (openingByItem.has(key)) return;
+      if (snapshotBackedKeys.has(key)) return;
       const prev = openingByItem.get(key) || { kg: 0, displayName: entry.itemName };
       openingByItem.set(key, {
         kg: roundMetric(prev.kg + getSignedTransactionQuantity(entry)),
@@ -392,6 +401,71 @@ export const buildMonthlyClosingSnapshots = ({
   });
 
   return Array.from(monthClosingsByKey.values());
+};
+
+export const getMonthBounds = (monthValue) => ({
+  startDate: `${monthValue}-01`,
+  endDate: getLastDateOfMonth(monthValue),
+});
+
+export const isLockedPastMonth = (monthValue, selectedDate = '') => {
+  if (!/^\d{4}-\d{2}$/.test(monthValue || '')) return false;
+  const selectedMonth = getMonthValueFromDate(selectedDate || new Date());
+  return !!selectedMonth && monthValue < selectedMonth;
+};
+
+export const buildSummaryReportFromSnapshots = ({
+  snapshots = [],
+  month = '',
+  selectedDate = '',
+  createdBy = 'Admin',
+  scope = 'all',
+  center = '',
+  reportPeriod = 'monthly',
+  stockViewMode = 'full_balance',
+}) => {
+  const normalizedMonth = getNormalizedMonthValue(month || selectedDate || new Date());
+  const monthLabel = formatMonthLabel(normalizedMonth);
+  const normalizedScope = scope === 'center' ? 'center' : 'all';
+  const normalizedCenter = (center || '').toString().trim();
+  const isMonthOnly = stockViewMode === 'month_movements_only';
+  const rows = snapshots
+    .filter((entry) => !entry?.is_deleted)
+    .map((entry) => {
+      const opening = safeNumber(entry.opening_balance ?? entry.openingBalance);
+      const inward = safeNumber(entry.total_inward ?? entry.totalInward);
+      const outward = safeNumber(entry.total_outward ?? entry.totalOutward);
+      const closing = safeNumber(entry.closing_balance ?? entry.closingBalance ?? entry.closing_qty);
+      const itemName = (entry.item_name || entry.itemName || entry.item_id || '-').toString().trim() || '-';
+      return {
+        itemName,
+        monthLabel,
+        income: roundMetric(isMonthOnly ? inward : opening + inward),
+        outgoing: roundMetric(outward),
+        totalStock: roundMetric(closing),
+      };
+    })
+    .sort((left, right) => left.itemName.localeCompare(right.itemName));
+
+  return hydrateReport({
+    type: 'monthly-stock-report',
+    source: 'monthly_stock_snapshots',
+    month: normalizedMonth,
+    monthLabel,
+    selectedDate: ensureDateInMonth(normalizedMonth, selectedDate),
+    scope: normalizedScope,
+    center: normalizedCenter,
+    centerLabel: normalizedScope === 'center' && normalizedCenter ? normalizedCenter : 'All Centers / Full Report',
+    rangeLabel: getRangeLabel(ensureDateInMonth(normalizedMonth, selectedDate), normalizedMonth, reportPeriod),
+    reportPeriod: 'monthly',
+    title: deriveStockReportTitle({ reportPeriod: 'monthly' }),
+    createdBy,
+    generatedAt: new Date(),
+    generatedAtIso: new Date().toISOString(),
+    summary: summarizeRows(rows),
+    rows,
+    stockViewMode: isMonthOnly ? 'month_movements_only' : 'full_balance',
+  });
 };
 
 const buildLegacyRows = (report, monthLabel) => {
@@ -469,6 +543,7 @@ export const hydrateReport = (report) => {
     center,
     centerLabel,
     rangeLabel,
+    stockViewMode: report.stockViewMode === 'month_movements_only' ? 'month_movements_only' : 'full_balance',
     generatedAtIso:
       report.generatedAtIso || getIsoString(report.generatedAt) || getIsoString(report.generatedOn) || new Date().toISOString(),
     createdBy: report.createdBy || 'Admin',
@@ -507,6 +582,7 @@ export const buildSummaryReport = ({
   scope = 'all',
   center = '',
   reportPeriod = 'monthly',
+  stockViewMode = 'full_balance',
 }) => {
   const normalizedReportPeriod = reportPeriod === 'yearly' ? 'yearly' : 'monthly';
   const normalizedMonth = getNormalizedMonthValue(month || selectedDate || new Date());
@@ -549,11 +625,14 @@ export const buildSummaryReport = ({
         purchases,
         rangeStartDate,
       );
-  openingByItem.forEach(({ kg, displayName }, normKey) => {
-    void normKey;
-    if (safeNumber(kg) === 0) return;
-    addMovement(rowMap, displayName, monthLabel, 'income', kg);
-  });
+  const isMonthMovementsOnly = stockViewMode === 'month_movements_only';
+  if (!isMonthMovementsOnly) {
+    openingByItem.forEach(({ kg, displayName }, normKey) => {
+      void normKey;
+      if (safeNumber(kg) === 0) return;
+      addMovement(rowMap, displayName, monthLabel, 'income', kg);
+    });
+  }
 
   const dateInRange = (value) =>
     normalizedReportPeriod === 'yearly'
@@ -612,7 +691,30 @@ export const buildSummaryReport = ({
       });
   }
 
-  const rows = Array.from(rowMap.values())
+  let finalRowMap = rowMap;
+  if (isMonthMovementsOnly) {
+    const merged = new Map();
+    const allKeys = new Set([...rowMap.keys(), ...openingByItem.keys()]);
+    allKeys.forEach((key) => {
+      const op = openingByItem.get(key);
+      const openingKg = op ? roundMetric(safeNumber(op.kg)) : 0;
+      const row = rowMap.get(key);
+      const displayName = (row?.itemName || op?.displayName || key || '-').toString().trim() || '-';
+      const periodIn = row ? safeNumber(row.income) : 0;
+      const periodOut = row ? safeNumber(row.outgoing) : 0;
+      const totalStock = roundMetric(openingKg + periodIn - periodOut);
+      merged.set(key, {
+        itemName: displayName,
+        monthLabel,
+        income: roundMetric(periodIn),
+        outgoing: roundMetric(periodOut),
+        totalStock,
+      });
+    });
+    finalRowMap = merged;
+  }
+
+  const rows = Array.from(finalRowMap.values())
     .filter((row) => safeNumber(row.income) !== 0 || safeNumber(row.outgoing) !== 0 || safeNumber(row.totalStock) !== 0)
     .sort((left, right) => left.itemName.localeCompare(right.itemName));
 
@@ -637,6 +739,7 @@ export const buildSummaryReport = ({
     generatedAtIso: new Date().toISOString(),
     summary: summarizeRows(rows),
     rows,
+    stockViewMode: isMonthMovementsOnly ? 'month_movements_only' : 'full_balance',
   });
 };
 
