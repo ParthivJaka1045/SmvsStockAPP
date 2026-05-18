@@ -18,6 +18,24 @@ import {
 } from 'firebase/firestore'; 
 import { centerData } from './data';
 import {
+  fetchCenters,
+  findCenterByName,
+  mergeCenterLists,
+  saveCenter,
+  softDeleteCenter,
+} from './centers';
+import {
+  buildUnitDropdownOptions,
+  decodeItemUnitSelectValue,
+  encodeItemUnitSelectValue,
+  fetchGlobalUnits,
+  STANDARD_UNIT_OPTIONS,
+} from './globalUnits';
+import GlobalUnitsPanel from './components/GlobalUnitsPanel';
+import PhysicalStockCheckerPanel from './components/PhysicalStockCheckerPanel';
+import NonListedCentersPanel from './components/NonListedCentersPanel';
+import { entryNeedsCenterResolution } from './components/NonListedCentersPanel';
+import {
   buildItemNameKey,
   DEFAULT_ITEM_UNITS,
   ensureCatalogItems,
@@ -29,16 +47,40 @@ import {
   matchesSearchText,
   normalizeItemName,
 } from './itemCatalog';
+import {
+  UNIT_KG,
+  UNIT_GRM,
+  UNIT_DABBO,
+  resolveCatalogItemUnit,
+  GHEE_TEL_BULK_KG,
+  CONVERSION_BASE_UNITS,
+  buildCatalogUnitFields,
+  clampQtyByCategory,
+  conversionInputToKgFactor,
+  convertQtyToKg,
+  formatUnitConversionHint,
+  getDefaultUnitForCategory,
+  getUnitShortLabel,
+  getUnitToKgFactor,
+  isColorCategory,
+  isGheeTelBulkUnit,
+  isGheeTelCategory,
+  isGramUnit,
+  isStandardUnit,
+  normalizeQuantityUnit,
+  normalizeUnitForLine,
+} from './itemUnits';
 import emailjs from 'emailjs-com'; 
 import {
   buildMonthlyClosingSnapshots,
-  buildSummaryReportFromSnapshots,
   buildSummaryReport,
   formatDisplayDate,
   formatMetric,
   formatMonthLabel,
   getMonthBounds,
   isLockedPastMonth,
+  resolveReportStockViewMode,
+  isCurrentCalendarMonth,
   getRangeLabel,
   getReportFileName,
   hydrateReport,
@@ -199,6 +241,7 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [catalogItems, setCatalogItems] = useState(getFallbackCatalogItems);
+  const [centersList, setCentersList] = useState(() => mergeCenterLists(centerData, []));
   const directOrderId = initialRoute.directOrderId;
   const directSendOrderId = initialRoute.directSendOrderId;
   const directReportId = initialRoute.directReportId;
@@ -227,6 +270,19 @@ function App() {
   useEffect(() => {
     refreshCatalog();
   }, []);
+
+  const refreshCenters = useCallback(async () => {
+    try {
+      setCentersList(await fetchCenters());
+    } catch (error) {
+      console.warn('Centers fetch failed:', error);
+      setCentersList(mergeCenterLists(centerData, []));
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshCenters();
+  }, [refreshCenters]);
 
   const handleLogin = async (e) => {
     e.preventDefault();
@@ -407,8 +463,16 @@ function App() {
         )}
       </AnimatePresence>
 
-      {view === 'dashboard' && <UserHub user={user} catalogItems={catalogItems} />}
-      {view === 'admin' && <AdminDashboard user={user} catalogItems={catalogItems} refreshCatalog={refreshCatalog} />}
+      {view === 'dashboard' && <UserHub user={user} catalogItems={catalogItems} centersList={centersList} />}
+      {view === 'admin' && (
+        <AdminDashboard
+          user={user}
+          catalogItems={catalogItems}
+          refreshCatalog={refreshCatalog}
+          centersList={centersList}
+          refreshCenters={refreshCenters}
+        />
+      )}
     </div>
   );
 }
@@ -429,23 +493,27 @@ const getResolvedCenterValue = (selectedCenter, otherCenter = '') =>
   selectedCenter === 'Other' ? otherCenter.trim() : (selectedCenter || '').trim();
 
 /** Maps stored center string to dropdown + optional "Other" text (admin edit). */
-const deriveEditableCenterFields = (storedCenter) => {
+const deriveEditableCenterFields = (storedCenter, centers = centerData) => {
   const raw = (storedCenter || '').trim();
   if (!raw) return { select: '', other: '' };
-  const exact = centerData.find((c) => c.center === raw);
+  const exact = centers.find((c) => c.center === raw);
   if (exact) return { select: exact.center, other: '' };
-  const ci = centerData.find((c) => c.center.toLowerCase() === raw.toLowerCase());
+  const ci = centers.find((c) => c.center.toLowerCase() === raw.toLowerCase());
   if (ci) return { select: ci.center, other: '' };
   return { select: 'Other', other: raw };
 };
 
 /** Saved center is not on master list (Other / typo) — show admin warning on cards. */
-const isNonListedCenterValue = (storedCenter) => {
+const isNonListedCenterValue = (storedCenter, centers = centerData) => {
   const raw = (storedCenter || '').trim();
   if (!raw) return false;
-  if (centerData.some((c) => c.center === raw)) return false;
-  return !centerData.some((c) => c.center.toLowerCase() === raw.toLowerCase());
+  if (centers.some((c) => c.center === raw)) return false;
+  return !centers.some((c) => c.center.toLowerCase() === raw.toLowerCase());
 };
+
+/** Show badge when center came from Other or is still off-list (persists after admin adds center). */
+const shouldShowNonListedCenterBadge = (storedCenter, centersList, fromOtherFlag = false) =>
+  entryNeedsCenterResolution(storedCenter, centersList, fromOtherFlag);
 
 function NonListedCenterBadge() {
   return (
@@ -462,12 +530,6 @@ function NonListedCenterBadge() {
 const getCenterScopeLabel = (scope, center) =>
   scope === 'center' && center ? center : 'All Centers / Full Report';
 
-const UNIT_KG = 'કિલો';
-const UNIT_GRM = 'ગ્રામ';
-const UNIT_DABBA = 'ડબ્બા';
-const TEL_DABBA_KG = 13;
-const GHEE_TEL_CATEGORY = normalizeItemName('ઘી-તેલ');
-const COLOR_CATEGORY = normalizeItemName('કલર');
 const DRYFRUIT_CATEGORY = normalizeItemName('ડ્રાયફ્રુટ');
 const MASALA_CATEGORY = normalizeItemName('મસાલા');
 const MONTH_CLOSE_GRACE_DAYS = 5;
@@ -475,47 +537,33 @@ const ENABLE_INITIAL_STOCK_BACKFILL = true;
 const INITIAL_BACKFILL_MONTHS = 4;
 
 const normalizeCategoryKey = (value) => normalizeItemName(value);
-const isGheeTelCategory = (category) => normalizeCategoryKey(category) === GHEE_TEL_CATEGORY;
-const isColorCategory = (category) => normalizeCategoryKey(category) === COLOR_CATEGORY;
 const isDryfruitCategory = (category) => normalizeCategoryKey(category) === DRYFRUIT_CATEGORY;
 const isMasalaCategory = (category) => normalizeCategoryKey(category) === MASALA_CATEGORY;
 
-const normalizeQuantityUnit = (value) => (
-  normalizeItemName(value) === normalizeItemName(UNIT_GRM)
-    ? UNIT_GRM
-    : (normalizeItemName(value) === normalizeItemName(UNIT_DABBA) ? UNIT_DABBA : UNIT_KG)
+const findCatalogItemByName = (catalogItems, name) => (
+  catalogItems.find((entry) => entry.nameKey === buildItemNameKey(name))
+  || catalogItems.find((entry) => normalizeItemName(entry.name) === normalizeItemName(name))
 );
 
-const getAllowedUnitsByCategory = (category, fallbackUnit = UNIT_KG) => {
-  if (isGheeTelCategory(category)) return [UNIT_DABBA];
-  if (isColorCategory(category)) return [UNIT_GRM];
-  // All other categories: KG compulsory
-  return [UNIT_KG];
+const convertItemQtyToKg = (qty, unit, catalogItems = [], line = null) => {
+  const catalogItem = line?.name ? findCatalogItemByName(catalogItems, line.name) : null;
+  return convertQtyToKg(qty, unit, catalogItem || line);
 };
 
-const normalizeUnitForCategory = (category, unit, fallbackUnit = UNIT_KG) => {
-  const allowed = getAllowedUnitsByCategory(category, fallbackUnit);
-  return allowed.includes(unit) ? unit : allowed[0];
-};
-
-const convertItemQtyToKg = (qty, unit) => {
-  const numericQty = parseFloat(qty) || 0;
-  if (normalizeQuantityUnit(unit) === UNIT_DABBA) return numericQty * TEL_DABBA_KG;
-  if (normalizeQuantityUnit(unit) === UNIT_GRM) return numericQty / 1000;
-  return numericQty;
+const buildRequestCartLine = (itemName, category, unit, qty, catalogItems) => {
+  const catalogItem = findCatalogItemByName(catalogItems, itemName);
+  const normalizedUnit = normalizeUnitForLine(category, unit, catalogItem);
+  const normalizedQty = clampQtyByCategory(category, qty);
+  const factor = getUnitToKgFactor(normalizedUnit, catalogItem);
+  const line = { name: itemName, category, unit: normalizedUnit, qty: normalizedQty };
+  if (factor !== 1) line.unitToKgFactor = factor;
+  return line;
 };
 
 const roundKg2 = (value) => {
   const numeric = parseFloat(value);
   if (!Number.isFinite(numeric)) return 0;
   return Math.round((numeric + Number.EPSILON) * 100) / 100;
-};
-
-const clampQtyByCategory = (category, qty) => {
-  const numericQty = parseFloat(qty);
-  if (!Number.isFinite(numericQty)) return qty;
-  if (isGheeTelCategory(category)) return Math.max(0, Math.trunc(numericQty));
-  return numericQty;
 };
 
 const canSubmitStockEntryDate = (entryDate) => {
@@ -539,12 +587,12 @@ const canSubmitStockEntryDate = (entryDate) => {
   return today.getDate() <= MONTH_CLOSE_GRACE_DAYS;
 };
 
-const calculateTotals = (items) => {
+const calculateTotals = (items, catalogItems = []) => {
   let totalQty = 0;
   let totalKg = 0;
   items.forEach((item) => {
     totalQty += parseFloat(item.qty) || 0;
-    totalKg += convertItemQtyToKg(item.qty, item.unit);
+    totalKg += convertItemQtyToKg(item.qty, item.unit, catalogItems, item);
   });
   return {
     totalItems: items.length,
@@ -561,17 +609,109 @@ const calculateKgTotals = (items) => ({
 const createEmptyItemRow = (id) => ({
   id,
   itemName: '',
+  qty: '',
+  unit: '',
   kg: '',
 });
 
 const getNextRowId = (rows = []) => Math.max(0, ...rows.map((row) => row.id || 0)) + 1;
 
-const createRowsFromItems = (items = [], minRows = 1) => {
-  const filledRows = items.map((item, index) => ({
-    id: index + 1,
-    itemName: item.itemName || item.name || '',
-    kg: item.kg || item.qty || '',
-  }));
+const syncStockRowQtyKg = (row, catalogItems) => {
+  const catalogItem = findCatalogItemByName(catalogItems, row.itemName);
+  const unit = (row.unit || resolveCatalogItemUnit(catalogItem || {})).toString().trim();
+  const qtyRaw = row.qty !== undefined && row.qty !== '' ? row.qty : row.kg;
+  if (qtyRaw === '' || qtyRaw == null) {
+    return { ...row, unit: row.itemName?.trim() ? unit : '', qty: '', kg: '' };
+  }
+  const meta = {
+    name: row.itemName,
+    unit,
+    unitToKgFactor: catalogItem?.unitToKgFactor ?? row.unitToKgFactor,
+  };
+  const kg = roundKg2(convertItemQtyToKg(qtyRaw, unit, catalogItems, meta));
+  return { ...row, unit, qty: String(qtyRaw), kg: String(kg) };
+};
+
+const patchStockRow = (rows, id, patch, catalogItems) => rows.map((row) => {
+  if (row.id !== id) return row;
+  let next = { ...row, ...patch };
+  if (patch.itemName !== undefined) {
+    const name = patch.itemName.trim();
+    if (!name) {
+      return { ...row, itemName: '', qty: '', unit: '', kg: '' };
+    }
+    const catalogItem = findCatalogItemByName(catalogItems, name);
+    if (catalogItem) {
+      next.unit = resolveCatalogItemUnit(catalogItem);
+      next.unitToKgFactor = catalogItem.unitToKgFactor;
+    }
+  }
+  if (patch.itemName !== undefined || patch.qty !== undefined || patch.unit !== undefined) {
+    next = syncStockRowQtyKg(next, catalogItems);
+  }
+  return next;
+});
+
+function CatalogStockQtyInput({ row, catalogItems, accent = 'blue', onQtyChange }) {
+  const catalogItem = findCatalogItemByName(catalogItems, row.itemName);
+  const unit = (row.unit || (row.itemName?.trim() ? resolveCatalogItemUnit(catalogItem || {}) : '')).toString();
+  const factor = unit ? getUnitToKgFactor(unit, catalogItem) : 1;
+  const showKgHint = factor !== 1 && row.qty;
+  const focusBorder = {
+    blue: 'focus:border-blue-500/50',
+    violet: 'focus:border-violet-500/50',
+    fuchsia: 'focus:border-fuchsia-500/50',
+  }[accent] || 'focus:border-blue-500/50';
+
+  return (
+    <div className="flex flex-col items-stretch gap-0.5 min-w-[5.5rem]">
+      <div className="flex items-center gap-1">
+        <input
+          type="number"
+          min="0"
+          className={`flex-1 min-w-0 p-2 bg-[#252525] border border-white/5 rounded-lg text-white outline-none ${focusBorder} text-sm text-center transition-all`}
+          placeholder="0"
+          value={row.qty ?? ''}
+          onChange={(e) => onQtyChange(e.target.value)}
+        />
+        <span
+          className="text-[10px] font-bold text-amber-300/90 shrink-0 w-12 text-center select-none"
+          title={unit || 'આઇટમ પસંદ કરો'}
+        >
+          {unit || '—'}
+        </span>
+      </div>
+      {showKgHint && (
+        <span className="text-[9px] text-gray-500 text-center leading-tight">
+          = {formatMetric(row.kg)} {UNIT_KG}
+        </span>
+      )}
+    </div>
+  );
+}
+
+const createRowsFromItems = (items = [], minRows = 1, catalogItems = []) => {
+  const filledRows = items.map((item, index) => {
+    const name = item.itemName || item.name || '';
+    const catalogItem = findCatalogItemByName(catalogItems, name);
+    const unit = item.unit || resolveCatalogItemUnit(catalogItem || item);
+    const kgStored = parseFloat(item.kg);
+    let qty = item.qty != null && item.qty !== '' ? item.qty : '';
+    if (qty === '' && Number.isFinite(kgStored) && kgStored > 0) {
+      const factor = getUnitToKgFactor(unit, catalogItem);
+      qty = factor !== 1 ? roundKg2(kgStored / factor) : kgStored;
+    } else if (qty === '' && item.qty == null) {
+      qty = item.kg || '';
+    }
+    const base = {
+      id: index + 1,
+      itemName: name,
+      qty: qty !== '' && qty != null ? String(qty) : '',
+      unit,
+      kg: item.kg != null ? String(item.kg) : '',
+    };
+    return syncStockRowQtyKg(base, catalogItems);
+  });
 
   const totalRows = Math.max(minRows, filledRows.length || 0);
   const rows = [...filledRows];
@@ -600,11 +740,19 @@ const mergeCatalogItemsWithExisting = (catalogItems = [], existingItems = []) =>
   return ensureCatalogItems([...catalogItems, ...extras]);
 };
 
-const createCatalogItemPayload = ({ name, category, unit, is_active = true }) => ({
+const createCatalogItemPayload = ({
+  name,
+  category,
+  unit,
+  unitToKgFactor = null,
+  isCustomUnit = false,
+  globalUnitId = null,
+  is_active = true,
+}) => ({
   name: name.trim(),
   nameKey: buildItemNameKey(name),
   category: category.trim(),
-  unit: (unit || 'કિલો').toString().trim() || 'કિલો',
+  ...buildCatalogUnitFields({ unit, unitToKgFactor, isCustomUnit, globalUnitId }),
   is_active,
   updatedAt: new Date(),
 });
@@ -658,7 +806,7 @@ const makeMonthlyClosingDocId = (monthValue, itemKey) =>
 const makeStockSnapshotDocId = (monthValue, itemKey, centerKey = 'all') =>
   `${encodeURIComponent((monthValue || '').toString())}__${encodeURIComponent((centerKey || 'all').toString())}__${encodeURIComponent((itemKey || '').toString())}`;
 
-const buildStockTransactionsFromDocuments = ({ orders = [], sendOrders = [], purchases = [] }) => {
+const buildStockTransactionsFromDocuments = ({ orders = [], sendOrders = [], purchases = [], catalogItems = [] }) => {
   const transactions = [];
 
   purchases
@@ -726,7 +874,7 @@ const buildStockTransactionsFromDocuments = ({ orders = [], sendOrders = [], pur
       const items = Array.isArray(order.items) ? order.items : [];
       items.forEach((item, lineIndex) => {
         const itemName = (item?.name || '').trim();
-        const quantity = toSafeTxQuantity(convertItemQtyToKg(item?.qty, item?.unit));
+        const quantity = toSafeTxQuantity(convertItemQtyToKg(item?.qty, item?.unit, catalogItems, item));
         if (!itemName || !txDate || !quantity) return;
         transactions.push({
           id: makeStockTransactionDocId('order', order.id, lineIndex, 'OUT'),
@@ -750,7 +898,7 @@ const buildStockTransactionsFromDocuments = ({ orders = [], sendOrders = [], pur
   return transactions;
 };
 
-async function syncStockHistoryFromPrimaryCollections() {
+async function syncStockHistoryFromPrimaryCollections(catalogItems = []) {
   const [ordersSnapshot, sendSnapshot, purchaseSnapshot, existingTxSnapshot] = await Promise.all([
     getDocs(collection(db, 'orders')),
     getDocs(collection(db, 'send-orders')),
@@ -765,6 +913,7 @@ async function syncStockHistoryFromPrimaryCollections() {
     orders: allOrders,
     sendOrders: allSendOrders,
     purchases: allPurchases,
+    catalogItems,
   });
 
   const activeIdSet = new Set(nextTransactions.map((entry) => entry.id));
@@ -977,19 +1126,49 @@ const createDefaultReportForm = () => {
     scope: 'all',
     center: '',
     centerOther: '',
-    /** full_balance: opening rolled into Income. month_movements_only: Income = period IN only; Total Stock = closing. */
-    stockViewMode: 'full_balance',
+    stockViewMode: resolveReportStockViewMode(month),
   };
 };
 
+const patchReportFormMonth = (prev, month) => ({
+  ...prev,
+  month,
+  fromMonth: prev.reportMode === 'range' ? prev.fromMonth : month,
+  toMonth: prev.reportMode === 'range' ? prev.toMonth : month,
+  stockViewMode:
+    prev.reportPeriod === 'monthly' && prev.reportMode === 'single'
+      ? resolveReportStockViewMode(month)
+      : 'full_balance',
+  selectedDate:
+    prev.reportPeriod === 'yearly'
+      ? getDateWithinYear(month, prev.selectedDate)
+      : getDateWithinMonth(month, prev.selectedDate),
+});
+
 const createDefaultAdjustmentForm = () => ({
+  id: null,
   date: new Date().toISOString().split('T')[0],
   itemName: '',
-  quantity: '',
+  qty: '',
+  unit: '',
   direction: 'OUT',
   reason: 'Shrinkage',
   remark: '',
 });
+
+const mapPhysicalAdjustmentDoc = (docSnap) => {
+  const data = docSnap.data();
+  return {
+    id: docSnap.id,
+    ...data,
+    transaction_date: data.transaction_date || '',
+    itemName: data.itemName || '',
+    quantity: parseFloat(data.quantity) || 0,
+    entry_qty: data.entry_qty != null ? data.entry_qty : data.quantity,
+    entry_unit: data.entry_unit || UNIT_KG,
+    transaction_type: data.transaction_type === 'IN' ? 'IN' : 'OUT',
+  };
+};
 
 function PreviewInfoCard({ label, value, accentClass = 'text-slate-900', className = '' }) {
   return (
@@ -1028,11 +1207,15 @@ function ReportPreviewContent({ report }) {
           <div>
             <h2 className="mt-0 text-3xl sm:text-4xl font-black text-slate-900 tracking-tight">{preparedReport.title}</h2>
             <p className="mt-2 text-[13px] sm:text-sm text-slate-600">
-              Stock movements for the selected range (income, outgoing, and balance in KG).
+              Stock movements for the selected range. All amounts in the table are in kilograms (KG), as indicated in the column headers.
             </p>
-            {isMonthOnlyView && (
+            {isMonthOnlyView ? (
               <p className="mt-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] font-bold text-amber-900">
-                મોડ: ફક્ત આ પિરિયડની IN/OUT — આવકમાં ખુલ્લી સ્ટોક નથી; Total Stock = ખુલ્લી + પિરિયડ IN − OUT (closing).
+                મોડ: ફક્ત આ મહિનાની IN/OUT; Net Stock = પિરિયડ IN − OUT (ગયા મહિનાનું closing સામેલ નથી).
+              </p>
+            ) : preparedReport.reportPeriod === 'monthly' && (
+              <p className="mt-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-[12px] font-bold text-blue-900">
+                મોડ: પૂર્ણ સ્ટોક — Income = ખુલ્લી + પિરિયડ IN (ગયા મહિનાની ભરતી સહિત).
               </p>
             )}
           </div>
@@ -1049,13 +1232,13 @@ function ReportPreviewContent({ report }) {
           <h3 className={`text-sm font-black uppercase tracking-widest ${uiTheme.text}`}>Stock table</h3>
         </div>
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[760px] text-sm">
+          <table className="w-full min-w-[640px] text-sm">
             <thead className="bg-slate-900 text-white">
               <tr>
                 <th className="px-4 py-3 text-left">Item Name</th>
                 <th className="px-4 py-3 text-center">{isMonthOnlyView ? 'Income (IN only)' : 'Income (KG)'}</th>
                 <th className="px-4 py-3 text-center">Outgoing (KG)</th>
-                <th className="px-4 py-3 text-center">Total Stock (KG)</th>
+                <th className="px-4 py-3 text-center">{isMonthOnlyView ? 'Net Stock (period) KG' : 'Total Stock (KG)'}</th>
               </tr>
             </thead>
             <tbody>
@@ -1087,7 +1270,10 @@ function ReportPreviewContent({ report }) {
           accentClass={uiTheme.text}
         />
         <ReportSummaryCard labelLines={['Outgoing', '(KG)']} value={formatMetric(preparedReport.summary.totalOutgoing)} />
-        <ReportSummaryCard labelLines={['Total Stock', '(KG)']} value={formatMetric(preparedReport.summary.totalStock)} />
+        <ReportSummaryCard
+          labelLines={isMonthOnlyView ? ['Net Stock', '(period KG)'] : ['Total Stock', '(KG)']}
+          value={formatMetric(preparedReport.summary.totalStock)}
+        />
       </div>
     </div>
   );
@@ -1192,8 +1378,224 @@ function ItemNameAutocompleteInput({
   );
 }
 
+/** Full-screen wait UI for slow PDF API / blob generation; appears only after a short delay. */
+function PdfDownloadWaitOverlay({ active, kind }) {
+  const [revealed, setRevealed] = useState(false);
+
+  useEffect(() => {
+    if (!active) {
+      setRevealed(false);
+      return undefined;
+    }
+    const id = window.setTimeout(() => setRevealed(true), 420);
+    return () => window.clearTimeout(id);
+  }, [active]);
+
+  const show = active && revealed;
+  const palette = (() => {
+    switch (kind) {
+      case 'send':
+        return {
+          ring: 'border-blue-500/25 border-t-blue-300',
+          icon: 'text-blue-300',
+          glow: 'from-blue-500/20',
+        };
+      case 'request':
+        return {
+          ring: 'border-orange-500/25 border-t-orange-300',
+          icon: 'text-orange-300',
+          glow: 'from-orange-500/20',
+        };
+      case 'purchase':
+        return {
+          ring: 'border-violet-500/25 border-t-fuchsia-300',
+          icon: 'text-fuchsia-300',
+          glow: 'from-violet-500/20',
+        };
+      case 'report':
+      default:
+        return {
+          ring: 'border-emerald-500/25 border-t-emerald-300',
+          icon: 'text-emerald-300',
+          glow: 'from-emerald-500/20',
+        };
+    }
+  })();
+
+  const title =
+    kind === 'report'
+      ? 'માસિક સ્ટોક રિપોર્ટ PDF'
+      : kind === 'send'
+        ? 'સેન્ડ ચલણ PDF'
+        : kind === 'purchase'
+          ? 'ખરીદી PDF'
+          : 'રિક્વેસ્ટ ચલણ PDF';
+
+  const sub =
+    'PDF બની રહ્યું છે — ડાઉનલોડ ડાયલોગ થોડી વારમાં આવશે. નેટવર્ક ધીમું હોય અથવા સર્વર દૂર હોય તો વધુ સમય લાગી શકે છે.';
+
+  return (
+    <AnimatePresence>
+      {show && (
+        <motion.div
+          key="pdf-wait-root"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.25 }}
+          className="fixed inset-0 z-[420] flex items-center justify-center bg-black/80 p-4 backdrop-blur-md"
+          role="status"
+          aria-live="polite"
+          aria-busy="true"
+        >
+          <motion.div
+            initial={{ scale: 0.94, opacity: 0, y: 16 }}
+            animate={{ scale: 1, opacity: 1, y: 0 }}
+            exit={{ scale: 0.96, opacity: 0, y: 10 }}
+            transition={{ type: 'spring', damping: 26, stiffness: 280 }}
+            className={`relative w-full max-w-md overflow-hidden rounded-[2rem] border border-white/10 bg-gradient-to-b from-[#16161f] to-[#0c0c12] p-10 shadow-2xl sm:max-w-lg`}
+          >
+            <div
+              className={`pointer-events-none absolute inset-0 bg-gradient-to-b ${palette.glow} to-transparent opacity-90`}
+            />
+            <div className="relative flex flex-col items-center text-center">
+              <div className="relative mb-9 flex h-28 w-28 items-center justify-center">
+                <div
+                  className={`absolute inset-0 rounded-full border-2 ${palette.ring} animate-spin`}
+                  style={{ animationDuration: '1.35s' }}
+                />
+                <div className="absolute inset-3 rounded-full border border-white/10 opacity-50 animate-pulse" />
+                <Loader2 className={`relative h-14 w-14 ${palette.icon} animate-pulse`} strokeWidth={2.2} />
+              </div>
+              <h3 className="text-xl font-black tracking-tight text-white sm:text-2xl">{title}</h3>
+              <p className="mt-4 max-w-sm text-sm leading-relaxed text-gray-400">{sub}</p>
+              <p className="mt-2 text-xs font-semibold text-gray-500">PDF is being prepared — please wait…</p>
+              <div className="mt-8 flex gap-1">
+                {[0, 1, 2].map((i) => (
+                  <motion.span
+                    key={i}
+                    className="h-1.5 w-8 rounded-full bg-white/20"
+                    animate={{ opacity: [0.35, 1, 0.35], scaleX: [0.85, 1, 0.85] }}
+                    transition={{ duration: 1.2, repeat: Infinity, delay: i * 0.15 }}
+                  />
+                ))}
+              </div>
+            </div>
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+}
+
+function CenterAdminPanel({ centersList, refreshCenters }) {
+  const [form, setForm] = useState({ id: null, center: '' });
+  const [saving, setSaving] = useState(false);
+
+  const resetForm = () => setForm({ id: null, center: '' });
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!form.center.trim()) {
+      alert('Center name લખો.');
+      return;
+    }
+    setSaving(true);
+    try {
+      await saveCenter(form);
+      await refreshCenters();
+      resetForm();
+      alert(form.id ? 'Center updated.' : 'Center added.');
+    } catch (err) {
+      alert(err.message || 'Center save failed.');
+    }
+    setSaving(false);
+  };
+
+  const handleEdit = (row) => {
+    setForm({
+      id: row.id || null,
+      center: row.center || '',
+    });
+  };
+
+  const handleDelete = async (row) => {
+    if (!row.id) {
+      alert('આ સેન્ટર બિલ્ટ-ઇન લિસ્ટમાં છે — ફક્ત તમે ઉમેરેલા સેન્ટર દૂર થઈ શકે.');
+      return;
+    }
+    if (!window.confirm(`"${row.center}" દૂર કરવું?`)) return;
+    setSaving(true);
+    try {
+      await softDeleteCenter(row.id);
+      await refreshCenters();
+      if (form.id === row.id) resetForm();
+    } catch (err) {
+      alert(err.message || 'Delete failed.');
+    }
+    setSaving(false);
+  };
+
+  return (
+    <div className="mt-6 rounded-2xl border border-cyan-500/20 bg-cyan-500/5 p-4 sm:p-5">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <p className="text-[11px] font-bold uppercase tracking-widest text-cyan-300">Center Manager</p>
+          <p className="mt-1 text-sm text-gray-300">સેન્ટર ઉમેરો — બધા ડ્રોપડાઉનમાં ગ્લોબલી દેખાશે.</p>
+        </div>
+        {form.id && (
+          <button type="button" onClick={resetForm} className="text-xs font-bold text-gray-400 hover:text-white">
+            નવું સેન્ટર
+          </button>
+        )}
+      </div>
+
+      <form onSubmit={handleSubmit} className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-[1fr_auto]">
+        <input
+          className="p-3 bg-[#252525] border border-white/10 rounded-xl text-white text-sm outline-none focus:border-cyan-500/50"
+          placeholder="Center name *"
+          value={form.center}
+          onChange={(e) => setForm((prev) => ({ ...prev, center: e.target.value }))}
+          required
+        />
+        <button
+          type="submit"
+          disabled={saving}
+          className="p-3 rounded-xl bg-gradient-to-r from-cyan-500 to-cyan-600 text-white text-sm font-bold disabled:opacity-50 whitespace-nowrap px-6"
+        >
+          {saving ? 'Saving…' : (form.id ? 'Update Center' : 'Add Center')}
+        </button>
+      </form>
+
+      <div className="mt-4 max-h-48 overflow-y-auto rounded-xl border border-white/10 custom-scroll">
+        <table className="w-full text-xs">
+          <thead className="bg-[#252525] text-gray-400 sticky top-0">
+            <tr>
+              <th className="p-2 text-left">Center</th>
+              <th className="p-2 text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {centersList.map((row) => (
+              <tr key={`${row.nameKey}-${row.id || 'seed'}`} className="border-t border-white/5">
+                <td className="p-2 font-bold text-white">{row.center}</td>
+                <td className="p-2 text-right space-x-1">
+                  <button type="button" onClick={() => handleEdit(row)} className="text-[10px] font-bold text-cyan-300 hover:text-white">Edit</button>
+                  {row.id && (
+                    <button type="button" onClick={() => handleDelete(row)} className="text-[10px] font-bold text-red-400 hover:text-red-200">Delete</button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 // --- ADMIN DASHBOARD ---
-function AdminDashboard({ user, catalogItems, refreshCatalog }) {
+function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refreshCenters }) {
   const [activeTab, setActiveTab] = useState('requests');
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -1231,6 +1633,17 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
   const [unlockAuditLogs, setUnlockAuditLogs] = useState([]);
   const [adjustmentForm, setAdjustmentForm] = useState(createDefaultAdjustmentForm);
   const [adjustmentSubmitting, setAdjustmentSubmitting] = useState(false);
+  const [adjustmentEntries, setAdjustmentEntries] = useState([]);
+  const [adjustmentListLoading, setAdjustmentListLoading] = useState(false);
+  const [adjustmentDeletingId, setAdjustmentDeletingId] = useState(null);
+  const [globalUnits, setGlobalUnits] = useState([]);
+
+  useEffect(() => {
+    fetchGlobalUnits()
+      .then(setGlobalUnits)
+      .catch(() => setGlobalUnits([]));
+  }, []);
+
   const [previousMonthClosingInfo, setPreviousMonthClosingInfo] = useState({
     month: '',
     currentMonth: '',
@@ -1250,6 +1663,36 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
     () => new Set(catalogItems.map((item) => item.nameKey)),
     [catalogItems],
   );
+
+  const adjustmentKgPreview = useMemo(() => {
+    if (!adjustmentForm.itemName?.trim() || adjustmentForm.qty === '') return '';
+    const catalogItem = findCatalogItemByName(catalogItems, adjustmentForm.itemName);
+    return roundKg2(convertItemQtyToKg(adjustmentForm.qty, adjustmentForm.unit, catalogItems, {
+      name: adjustmentForm.itemName,
+      unit: adjustmentForm.unit,
+      unitToKgFactor: catalogItem?.unitToKgFactor,
+    }));
+  }, [adjustmentForm.itemName, adjustmentForm.qty, adjustmentForm.unit, catalogItems]);
+
+  const fetchPhysicalAdjustments = useCallback(async () => {
+    setAdjustmentListLoading(true);
+    try {
+      const snapshot = await getDocs(collection(db, STOCK_TRANSACTIONS_COLLECTION));
+      const entries = snapshot.docs
+        .map(mapPhysicalAdjustmentDoc)
+        .filter((entry) => entry.sourceType === PHYSICAL_ADJUSTMENT_SOURCE_TYPE && !entry.is_deleted)
+        .sort((left, right) => {
+          const leftTime = left.updatedAt?.toDate?.() || left.created_at?.toDate?.() || 0;
+          const rightTime = right.updatedAt?.toDate?.() || right.created_at?.toDate?.() || 0;
+          return rightTime - leftTime;
+        });
+      setAdjustmentEntries(entries);
+    } catch (err) {
+      console.warn('Physical adjustments fetch failed:', err);
+      setAdjustmentEntries([]);
+    }
+    setAdjustmentListLoading(false);
+  }, []);
 
   const [ledgerDataNonce, setLedgerDataNonce] = useState(0);
   const bumpLedgerData = () => setLedgerDataNonce((n) => n + 1);
@@ -1422,14 +1865,58 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
     setMonthLockSubmitting(false);
   };
 
+  const handleAdjustmentSelectItem = (item) => {
+    setAdjustmentForm((prev) => ({
+      ...prev,
+      itemName: item.name,
+      unit: resolveCatalogItemUnit(item),
+      qty: normalizeItemName(prev.itemName) === item.nameKey ? prev.qty : '',
+    }));
+  };
+
+  const handleEditPhysicalAdjustment = (entry) => {
+    setAdjustmentForm({
+      id: entry.id,
+      date: entry.transaction_date || new Date().toISOString().split('T')[0],
+      itemName: entry.itemName || '',
+      qty: entry.entry_qty != null ? String(entry.entry_qty) : String(entry.quantity || ''),
+      unit: entry.entry_unit || UNIT_KG,
+      direction: entry.transaction_type === 'IN' ? 'IN' : 'OUT',
+      reason: entry.adjustment_reason || 'Shrinkage',
+      remark: entry.remark || '',
+    });
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const handleDeletePhysicalAdjustment = async (entry) => {
+    if (!window.confirm(`આ adjustment એન્ટ્રી કાઢી નાખવી? (${entry.itemName})`)) return;
+    setAdjustmentDeletingId(entry.id);
+    try {
+      await updateDoc(doc(db, STOCK_TRANSACTIONS_COLLECTION, entry.id), {
+        is_deleted: true,
+        updatedAt: new Date(),
+      });
+      if (adjustmentForm.id === entry.id) setAdjustmentForm(createDefaultAdjustmentForm());
+      await fetchPhysicalAdjustments();
+      bumpLedgerData();
+    } catch (err) {
+      alert(`Delete Error: ${err.message}`);
+    }
+    setAdjustmentDeletingId(null);
+  };
+
   const handlePhysicalAdjustmentSubmit = async () => {
     const normalizedDate = normalizeDateOnly(adjustmentForm.date);
     const itemName = (adjustmentForm.itemName || '').trim();
-    const quantity = toSafeTxQuantity(adjustmentForm.quantity);
+    const catalogItem = findCatalogItemByName(catalogItems, itemName);
+    const unit = (adjustmentForm.unit || resolveCatalogItemUnit(catalogItem || {})).toString().trim();
+    const quantityKg = toSafeTxQuantity(adjustmentKgPreview);
+    const entryQty = parseFloat(adjustmentForm.qty);
     const direction = adjustmentForm.direction === 'IN' ? 'IN' : 'OUT';
     if (!normalizedDate) return alert('Adjustment date is required.');
     if (!itemName) return alert('Item name is required.');
-    if (!quantity || quantity <= 0) return alert('Quantity must be greater than zero.');
+    if (!Number.isFinite(entryQty) || entryQty <= 0) return alert('માત્રા ૦ કરતાં વધારે લખો.');
+    if (!quantityKg || quantityKg <= 0) return alert('કિલો માત્રા માન્ય નથી.');
     if (!adjustmentForm.reason.trim()) return alert('Reason is required.');
     if (adjustmentSubmitting) return;
 
@@ -1437,36 +1924,52 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
       return alert(`Invalid item name: "${itemName}". Please select an item from the master list.`);
     }
 
+    const payload = {
+      sourceType: PHYSICAL_ADJUSTMENT_SOURCE_TYPE,
+      lineIndex: 0,
+      center_id: 'global',
+      centerName: 'All Centers / Full Report',
+      item_id: normalizeItemName(itemName),
+      itemName,
+      transaction_type: direction,
+      quantity: quantityKg,
+      entry_qty: entryQty,
+      entry_unit: unit,
+      transaction_date: normalizedDate,
+      adjustment_reason: adjustmentForm.reason.trim(),
+      remark: adjustmentForm.remark.trim(),
+      autoSynced: false,
+      is_deleted: false,
+      updatedAt: new Date(),
+    };
+
     setAdjustmentSubmitting(true);
     try {
-      const adjustmentRef = await addDoc(collection(db, STOCK_TRANSACTIONS_COLLECTION), {
-        sourceType: PHYSICAL_ADJUSTMENT_SOURCE_TYPE,
-        sourceId: '',
-        lineIndex: 0,
-        center_id: 'global',
-        centerName: 'All Centers / Full Report',
-        item_id: normalizeItemName(itemName),
-        itemName,
-        transaction_type: direction,
-        quantity,
-        transaction_date: normalizedDate,
-        adjustment_reason: adjustmentForm.reason.trim(),
-        remark: adjustmentForm.remark.trim(),
-        created_by: user?.username || 'Admin',
-        created_at: new Date(),
-        autoSynced: false,
-        is_deleted: false,
-        updatedAt: new Date(),
-      });
-      await updateDoc(doc(db, STOCK_TRANSACTIONS_COLLECTION, adjustmentRef.id), { sourceId: adjustmentRef.id });
+      if (adjustmentForm.id) {
+        await updateDoc(doc(db, STOCK_TRANSACTIONS_COLLECTION, adjustmentForm.id), payload);
+        alert('Physical adjustment updated successfully.');
+      } else {
+        const adjustmentRef = await addDoc(collection(db, STOCK_TRANSACTIONS_COLLECTION), {
+          ...payload,
+          sourceId: '',
+          created_by: user?.username || 'Admin',
+          created_at: new Date(),
+        });
+        await updateDoc(doc(db, STOCK_TRANSACTIONS_COLLECTION, adjustmentRef.id), { sourceId: adjustmentRef.id });
+        alert('Physical adjustment saved successfully.');
+      }
       setAdjustmentForm(createDefaultAdjustmentForm());
-      alert('Physical adjustment saved successfully.');
+      await fetchPhysicalAdjustments();
       bumpLedgerData();
     } catch (err) {
       alert(`Adjustment Error: ${err.message}`);
     }
     setAdjustmentSubmitting(false);
   };
+
+  useEffect(() => {
+    fetchPhysicalAdjustments();
+  }, [fetchPhysicalAdjustments, ledgerDataNonce]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1488,7 +1991,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
 
         if (rows.length === 0) {
           try {
-            rows = await syncStockHistoryFromPrimaryCollections();
+            rows = await syncStockHistoryFromPrimaryCollections(catalogItems);
           } catch (syncErr) {
             console.warn('stock-transactions sync skipped in closing widget:', syncErr);
           }
@@ -1663,18 +2166,21 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
     setMailModal({ order, type });
     const savedEmail = isValidEmail(order?.email) ? order.email.trim() : '';
     if (type === 'report') {
-      if (REPORT_DEFAULT_EMAILS.includes(savedEmail)) {
-        setSelectedReportEmail(savedEmail);
+      const report = hydrateReport(order);
+      const preferredEmail = savedEmail;
+      if (REPORT_DEFAULT_EMAILS.includes(preferredEmail)) {
+        setSelectedReportEmail(preferredEmail);
         setCustomEmail('');
-      } else if (savedEmail) {
+      } else if (isValidEmail(preferredEmail)) {
         setSelectedReportEmail('custom');
-        setCustomEmail(savedEmail);
+        setCustomEmail(preferredEmail);
       } else {
         setSelectedReportEmail(REPORT_DEFAULT_EMAILS[0]);
         setCustomEmail('');
       }
     } else {
-      setCustomEmail(savedEmail);
+      const preferredEmail = savedEmail;
+      setCustomEmail(preferredEmail);
       setSelectedReportEmail(REPORT_DEFAULT_EMAILS[0]);
     }
     setCustomEmailError('');
@@ -1845,7 +2351,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
     try {
       const effectiveCenter = getResolvedCenterValue(reportForm.center, reportForm.centerOther);
       const [stockTransactions, monthlySnapshot, snapshotSnapshot] = await Promise.all([
-        syncStockHistoryFromPrimaryCollections(),
+        syncStockHistoryFromPrimaryCollections(catalogItems),
         getDocs(collection(db, MONTHLY_CLOSING_STOCK_COLLECTION)),
         getDocs(collection(db, MONTHLY_STOCK_SNAPSHOTS_COLLECTION)),
       ]);
@@ -1868,28 +2374,13 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
         ),
       );
 
-      const shouldUseMonthlySnapshot =
-        reportForm.reportPeriod === 'monthly'
-        && reportForm.reportMode === 'single'
-        && isLockedPastMonth(reportForm.month, reportForm.selectedDate);
-      const monthSnapshots = monthlyStockSnapshots.filter(
-        (entry) => (entry.month || '').toString().trim() === reportForm.month
-          && entry.is_locked !== false
-          && !entry.is_deleted,
-      );
+      const effectiveStockViewMode =
+        reportForm.reportPeriod === 'monthly' && reportForm.reportMode === 'single'
+          ? reportForm.stockViewMode
+          : 'full_balance';
 
-      const draft = shouldUseMonthlySnapshot && monthSnapshots.length > 0
-        ? buildSummaryReportFromSnapshots({
-            snapshots: monthSnapshots,
-            month: reportForm.month,
-            selectedDate: reportForm.selectedDate,
-            createdBy: user?.username || 'Admin',
-            scope: reportForm.scope,
-            center: effectiveCenter,
-            reportPeriod: reportForm.reportPeriod,
-            stockViewMode: reportForm.stockViewMode,
-          })
-        : buildSummaryReport({
+      // Always build from live ledger so backdated stock (past month) appears in the report.
+      const draft = buildSummaryReport({
             orders,
             sendOrders,
             stockTransactions,
@@ -1902,10 +2393,10 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
             scope: reportForm.scope,
             center: effectiveCenter,
             reportPeriod: reportForm.reportPeriod,
-            stockViewMode: reportForm.stockViewMode,
+            stockViewMode: effectiveStockViewMode,
           });
 
-      if (!shouldUseMonthlySnapshot && reportForm.reportPeriod === 'monthly' && reportForm.reportMode === 'single') {
+      if (reportForm.reportPeriod === 'monthly' && reportForm.reportMode === 'single') {
         const { startDate, endDate } = getMonthBounds(reportForm.month);
         const monthTxRows = stockTransactions.filter((entry) => {
           const txDate = normalizeDateOnly(entry.transaction_date || entry.date || entry.created_at);
@@ -1936,7 +2427,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
             const periodIn = roundKg2(monthAgg.total_inward || 0);
             const periodOut = roundKg2(monthAgg.total_outward || 0);
             const closing = roundKg2(row.totalStock || 0);
-            const openingBalance = reportForm.stockViewMode === 'month_movements_only'
+            const openingBalance = effectiveStockViewMode === 'month_movements_only'
               ? roundKg2(closing - periodIn + periodOut)
               : roundKg2((parseFloat(row.income) || 0) - periodIn);
             return setDoc(
@@ -1967,8 +2458,17 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
         return;
       }
 
+      const unitByKey = new Map(
+        catalogItems.map((c) => [c.nameKey, (c.unit || 'કિલો').toString().trim()]),
+      );
+      const rowsWithUnits = draft.rows.map((row) => ({
+        ...row,
+        displayUnit: unitByKey.get(normalizeItemName(row.itemName)) || 'કિલો',
+      }));
+
       const payload = {
         ...draft,
+        rows: rowsWithUnits,
         generatedAt: new Date(),
         generatedAtIso: new Date().toISOString(),
       };
@@ -1988,7 +2488,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
     setReportPdfLoading(report.id);
     try {
       const hydrated = hydrateReport(report);
-      await saveBlobFromProducer(() => generateSummaryReportPDFBlob(hydrated), getReportFileName(hydrated));
+      await saveBlobFromProducer(() => generateSummaryReportPDFBlob(hydrated, { catalogItems }), getReportFileName(hydrated));
     } catch (err) {
       alert('Download Error: ' + err.message);
     }
@@ -1999,7 +2499,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
     setReportPdfLoading(report.id);
     try {
       const hydrated = hydrateReport(report);
-      const blob = await generateSummaryReportPDFBlob(hydrated);
+      const blob = await generateSummaryReportPDFBlob(hydrated, { catalogItems });
       const file = new File([blob], getReportFileName(hydrated), { type: 'application/pdf' });
       if (navigator.canShare && navigator.canShare({ files: [file] })) {
         await navigator.share({
@@ -2064,6 +2564,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
         order={editOrder}
         onBack={() => { setEditOrder(null); fetchOrders(); }}
         catalogItems={catalogItems}
+        centersList={centersList}
       />
     );
   }
@@ -2074,6 +2575,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
         order={editSendOrder}
         onBack={() => { setEditSendOrder(null); fetchSendOrders(); }}
         catalogItems={catalogItems}
+        centersList={centersList}
       />
     );
   }
@@ -2083,6 +2585,8 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
   const isReports = activeTab === 'reports';
   const isPurchases = activeTab === 'purchases';
   const isItems = activeTab === 'items';
+  const pdfOverlayKind = reportPdfLoading ? 'report' : sendPdfLoading ? 'send' : pdfLoading ? 'request' : null;
+  const pdfOverlayActive = pdfOverlayKind !== null;
 
   return (
     <>
@@ -2198,7 +2702,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
                         <div className="min-w-0 flex-1">
                           <h3 className="font-bold text-white uppercase text-sm sm:text-base group-hover:text-orange-400 transition-colors">{order.center}</h3>
                           <span className="text-xs text-orange-500 font-bold">#CHALAN: {order.chalanNo}</span>
-                          {isNonListedCenterValue(order.center) && <NonListedCenterBadge />}
+                          {shouldShowNonListedCenterBadge(order.center, centersList, order.centerFromOther) && <NonListedCenterBadge />}
                         </div>
                         <div className="shrink-0 text-xs text-gray-500 font-medium bg-white/5 px-2 py-1 rounded-lg">{order.date.split('-').reverse().join('-')}</div>
                       </div>
@@ -2323,7 +2827,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
                           <div className="min-w-0 flex-1">
                             <h3 className="font-bold text-white uppercase text-sm sm:text-base group-hover:text-blue-400 transition-colors">{order.fromCenter}</h3>
                             <span className="text-xs text-blue-500 font-bold">#CHALAN: {order.chalanNo}</span>
-                            {isNonListedCenterValue(order.fromCenter) && <NonListedCenterBadge />}
+                            {shouldShowNonListedCenterBadge(order.fromCenter, centersList, order.fromCenterFromOther) && <NonListedCenterBadge />}
                           </div>
                           <div className="shrink-0 text-xs text-gray-500 font-medium bg-white/5 px-2 py-1 rounded-lg">{(order.date || '').split('-').reverse().join('-')}</div>
                         </div>
@@ -2471,6 +2975,10 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
                         reportMode: nextMode,
                         fromMonth: nextMode === 'range' ? (prev.fromMonth || prev.month) : prev.month,
                         toMonth: nextMode === 'range' ? (prev.toMonth || prev.month) : prev.month,
+                        stockViewMode:
+                          nextMode === 'single'
+                            ? resolveReportStockViewMode(prev.month)
+                            : 'full_balance',
                         selectedDate:
                           nextMode === 'range'
                             ? getLastDateForMonth(prev.toMonth || prev.month)
@@ -2484,10 +2992,14 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
                 </div>
               )}
 
+              {reportForm.reportPeriod === 'monthly' && reportForm.reportMode === 'single' && (
               <div className="sm:col-span-2 lg:col-span-4">
                 <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">
                   Stock columns (Income)
                 </label>
+                <p className="mb-2 text-[11px] text-violet-200/90">
+                  ડિફોલ્ટ ઓટો: {isCurrentCalendarMonth(reportForm.month) ? 'ચાલુ મહિનો → Month IN only' : 'ગયા મહિનો → Full balance'} — નીચેથી બદલી શકાય.
+                </p>
                 <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
                   <label className="flex cursor-pointer items-start gap-2 rounded-xl border border-white/10 bg-[#252525] px-3 py-2.5 text-sm text-white hover:border-emerald-500/40 sm:flex-1 sm:min-w-[200px]">
                     <input
@@ -2500,7 +3012,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
                     <span>
                       <span className="font-bold">Full balance</span>
                       <span className="mt-0.5 block text-[11px] font-normal text-gray-400">
-                        Income = ખુલ્લી સ્ટોક + પિરિયડ IN (ડિફોલ્ટ)
+                        Income = ખુલ્લી + પિરિયડ IN; Total Stock = પૂર્ણ સ્ટોક (ગયા મહિના માટે)
                       </span>
                     </span>
                   </label>
@@ -2515,12 +3027,13 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
                     <span>
                       <span className="font-bold">Month IN only</span>
                       <span className="mt-0.5 block text-[11px] font-normal text-gray-400">
-                        ફક્ત આ પિરિયડની IN જ Income; Total Stock = closing (ખુલ્લી + IN − OUT)
+                        Income = ફક્ત IN; Net Stock = IN − OUT (ગયા મહિનાનું closing નહીં)
                       </span>
                     </span>
                   </label>
                 </div>
               </div>
+              )}
 
               {reportForm.scope === 'center' && (
                 <div>
@@ -2531,7 +3044,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
                     onChange={e => setReportForm(prev => ({ ...prev, center: e.target.value, centerOther: e.target.value === 'Other' ? prev.centerOther : '' }))}
                   >
                     <option value="">- Center Select Karo -</option>
-                    {centerData.map((center) => (
+                    {centersList.map((center) => (
                       <option key={center.center} value={center.center}>{center.center}</option>
                     ))}
                   </select>
@@ -2558,19 +3071,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
                   type="month"
                   className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-emerald-500/50 transition-all text-sm"
                   value={reportForm.month}
-                  onChange={e => {
-                    const month = e.target.value;
-                    setReportForm((prev) => ({
-                      ...prev,
-                      month,
-                      fromMonth: prev.reportMode === 'range' ? prev.fromMonth : month,
-                      toMonth: prev.reportMode === 'range' ? prev.toMonth : month,
-                      selectedDate:
-                        prev.reportPeriod === 'yearly'
-                          ? getDateWithinYear(month, prev.selectedDate)
-                          : getDateWithinMonth(month, prev.selectedDate),
-                    }));
-                  }}
+                  onChange={e => setReportForm((prev) => patchReportFormMonth(prev, e.target.value))}
                 />
               </div>
 
@@ -2849,19 +3350,40 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
                     placeholder="માસ્ટર લિસ્ટમાંથી શોધો / પસંદ કરો…"
                     value={adjustmentForm.itemName}
                     excludedNameKeys={[]}
-                    onChange={(nextValue) => setAdjustmentForm((prev) => ({ ...prev, itemName: nextValue }))}
-                    onSelectItem={(item) => setAdjustmentForm((prev) => ({ ...prev, itemName: item.name }))}
+                    onChange={(nextValue) => setAdjustmentForm((prev) => ({
+                      ...prev,
+                      itemName: nextValue,
+                      unit: nextValue.trim() ? prev.unit : '',
+                      qty: '',
+                    }))}
+                    onSelectItem={handleAdjustmentSelectItem}
                   />
                 </div>
-                <input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-fuchsia-500/50 transition-all text-sm"
-                  placeholder="Quantity (KG)"
-                  value={adjustmentForm.quantity}
-                  onChange={(e) => setAdjustmentForm((prev) => ({ ...prev, quantity: e.target.value }))}
-                />
+                <div>
+                  <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-500">માત્રા *</label>
+                  <CatalogStockQtyInput
+                    row={{
+                      itemName: adjustmentForm.itemName,
+                      qty: adjustmentForm.qty,
+                      unit: adjustmentForm.unit,
+                      kg: adjustmentKgPreview !== '' ? String(adjustmentKgPreview) : '',
+                    }}
+                    catalogItems={catalogItems}
+                    accent="fuchsia"
+                    onQtyChange={(value) => setAdjustmentForm((prev) => ({ ...prev, qty: value }))}
+                  />
+                </div>
+                <div>
+                  <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-500">કિલો (સ્ટોક — લૉક)</label>
+                  <input
+                    readOnly
+                    tabIndex={-1}
+                    className="w-full p-3 bg-[#1a1a1a] border border-white/10 rounded-xl text-white font-black text-sm text-center outline-none cursor-not-allowed"
+                    placeholder="—"
+                    value={adjustmentKgPreview !== '' ? formatMetric(adjustmentKgPreview) : ''}
+                  />
+                  <p className="mt-1 text-[9px] text-gray-500 text-center">રિપોર્ટમાં હમેશા કિલો જાય</p>
+                </div>
                 <select
                   className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-fuchsia-500/50 transition-all text-sm"
                   value={adjustmentForm.direction}
@@ -2888,16 +3410,92 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
                 />
               </div>
               <ItemsListSearchHint />
-              <motion.button
-                whileHover={{ scale: 1.02 }}
-                whileTap={{ scale: 0.98 }}
-                onClick={handlePhysicalAdjustmentSubmit}
-                disabled={adjustmentSubmitting}
-                className="mt-3 bg-gradient-to-r from-fuchsia-500 to-violet-600 text-white px-5 py-3 rounded-xl font-bold text-sm uppercase tracking-wide shadow-lg shadow-fuchsia-500/20 disabled:opacity-50"
-              >
-                {adjustmentSubmitting ? 'Saving...' : 'Save adjustment entry'}
-              </motion.button>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <motion.button
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                  onClick={handlePhysicalAdjustmentSubmit}
+                  disabled={adjustmentSubmitting}
+                  className="bg-gradient-to-r from-fuchsia-500 to-violet-600 text-white px-5 py-3 rounded-xl font-bold text-sm uppercase tracking-wide shadow-lg shadow-fuchsia-500/20 disabled:opacity-50"
+                >
+                  {adjustmentSubmitting ? 'Saving...' : (adjustmentForm.id ? 'Update entry' : 'Save adjustment entry')}
+                </motion.button>
+                {adjustmentForm.id && (
+                  <button
+                    type="button"
+                    onClick={() => setAdjustmentForm(createDefaultAdjustmentForm())}
+                    className="rounded-xl border border-white/10 bg-white/5 px-5 py-3 text-sm font-bold uppercase text-gray-300 hover:bg-white/10"
+                  >
+                    Cancel edit
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={fetchPhysicalAdjustments}
+                  disabled={adjustmentListLoading}
+                  className="rounded-xl border border-fuchsia-500/20 bg-fuchsia-500/10 px-4 py-3 text-xs font-bold uppercase text-fuchsia-200 hover:bg-fuchsia-500/20 disabled:opacity-50 inline-flex items-center gap-1"
+                >
+                  <RefreshCw size={14} className={adjustmentListLoading ? 'animate-spin' : ''} />
+                  Refresh
+                </button>
+              </div>
+
+              <div className="mt-4 rounded-xl border border-white/10 bg-[#151515] overflow-hidden">
+                <div className="px-3 py-2 border-b border-white/10 flex justify-between items-center">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-gray-500">Adjustment entries</p>
+                  <span className="text-[10px] text-fuchsia-300 font-bold">{adjustmentEntries.length}</span>
+                </div>
+                {adjustmentListLoading ? (
+                  <p className="p-4 text-center text-sm text-gray-500">Loading…</p>
+                ) : adjustmentEntries.length === 0 ? (
+                  <p className="p-4 text-center text-sm text-gray-500">કોઈ એન્ટ્રી નથી.</p>
+                ) : (
+                  <div className="max-h-52 overflow-y-auto custom-scroll">
+                    <table className="w-full text-xs">
+                      <thead className="bg-[#252525] sticky top-0">
+                        <tr>
+                          <th className="p-2 text-left text-gray-500 font-bold uppercase">Date</th>
+                          <th className="p-2 text-left text-gray-500 font-bold uppercase">Item</th>
+                          <th className="p-2 text-center text-gray-500 font-bold uppercase">Qty</th>
+                          <th className="p-2 text-center text-gray-500 font-bold uppercase">KG</th>
+                          <th className="p-2 text-center text-gray-500 font-bold uppercase">±</th>
+                          <th className="p-2 w-16" />
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {adjustmentEntries.map((entry) => (
+                          <tr key={entry.id} className={`border-t border-white/5 ${adjustmentForm.id === entry.id ? 'bg-fuchsia-500/10' : ''}`}>
+                            <td className="p-2 text-gray-400 whitespace-nowrap">{formatDisplayDate(entry.transaction_date)}</td>
+                            <td className="p-2 font-medium text-white">{entry.itemName}</td>
+                            <td className="p-2 text-center text-gray-300">
+                              {formatMetric(entry.entry_qty)} <span className="text-[9px] text-gray-500">{entry.entry_unit}</span>
+                            </td>
+                            <td className="p-2 text-center font-bold text-fuchsia-300">{formatMetric(entry.quantity)}</td>
+                            <td className="p-2 text-center">
+                              <span className={entry.transaction_type === 'IN' ? 'text-green-400 font-bold' : 'text-red-400 font-bold'}>
+                                {entry.transaction_type}
+                              </span>
+                            </td>
+                            <td className="p-2">
+                              <div className="flex justify-end gap-1">
+                                <button type="button" onClick={() => handleEditPhysicalAdjustment(entry)} className="p-1.5 rounded-lg text-blue-400 hover:bg-blue-500/10" title="Edit">
+                                  <Edit3 size={14} />
+                                </button>
+                                <button type="button" onClick={() => handleDeletePhysicalAdjustment(entry)} disabled={adjustmentDeletingId === entry.id} className="p-1.5 rounded-lg text-red-400 hover:bg-red-500/10 disabled:opacity-50" title="Delete">
+                                  {adjustmentDeletingId === entry.id ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
             </div>
+
+            <CenterAdminPanel centersList={centersList} refreshCenters={refreshCenters} />
 
             <div className="mt-5 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
               <p className="text-xs text-gray-500">
@@ -2915,6 +3513,36 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
               </motion.button>
             </div>
           </motion.div>
+
+          <NonListedCentersPanel
+            centersList={centersList}
+            orders={orders}
+            sendOrders={sendOrders}
+            onEditRequest={(order) => {
+              setActiveTab('requests');
+              setEditOrder(order);
+            }}
+            onEditSend={(order) => {
+              setActiveTab('sends');
+              setEditSendOrder(order);
+            }}
+          />
+
+          <PhysicalStockCheckerPanel
+            catalogItems={catalogItems}
+            globalUnits={globalUnits}
+            ItemNameAutocompleteInput={ItemNameAutocompleteInput}
+          />
+
+          {!reportLoading && reports.length > 0 && (
+            <div className="mt-12 mb-4 flex items-center gap-4">
+              <div className="h-px flex-1 bg-white/10" />
+              <p className="shrink-0 text-[11px] font-bold uppercase tracking-widest text-gray-500">
+                સાચવેલા રિપોર્ટ
+              </p>
+              <div className="h-px flex-1 bg-white/10" />
+            </div>
+          )}
 
           {reportLoading && (
             <div className="flex justify-center py-20">
@@ -3101,7 +3729,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
             onClick={() => setPreviewSendOrder(null)}>
             <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.9, opacity: 0 }}
               onClick={e => e.stopPropagation()}
-              className="bg-white text-black w-full max-w-2xl max-h-[95vh] overflow-y-auto rounded-xl sm:rounded-2xl p-6 sm:p-10 relative shadow-2xl font-serif custom-scroll">
+              className="bg-white text-black w-full max-w-4xl max-h-[95vh] overflow-y-auto rounded-xl sm:rounded-2xl p-6 sm:p-10 relative shadow-2xl font-serif custom-scroll">
               <motion.button whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.9 }} onClick={() => setPreviewSendOrder(null)}
                 className="absolute top-3 right-3 sm:top-4 sm:right-4 bg-gray-100 p-2 rounded-full text-black hover:bg-gray-200 transition-colors">
                 <X size={20} />
@@ -3125,27 +3753,42 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
                     <tr>
                       <th className="border p-2 w-10 sm:w-12 text-center">No</th>
                       <th className="border p-2 text-left">Item Name</th>
+                      <th className="border p-2 w-16 sm:w-20 text-center">Qty</th>
                       <th className="border p-2 w-16 sm:w-20 text-center">KG</th>
+                      <th className="border p-2 w-16 sm:w-20 text-center">Unit</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {(previewSendOrder.items || []).filter(r => r.itemName && r.itemName.trim()).map((it, i) => (
-                      <tr key={i} className="border border-gray-300">
-                        <td className="border p-2 text-center text-gray-500 font-sans">{i+1}</td>
-                        <td className="border p-2 font-bold">{it.itemName}</td>
-                        <td className="border p-2 text-center font-bold text-orange-600">{it.kg || '-'}</td>
-                      </tr>
-                    ))}
+                    {(previewSendOrder.items || []).filter(r => r.itemName && r.itemName.trim()).map((it, i) => {
+                      const qtyVal = it.qty != null && it.qty !== '' ? it.qty : it.kg;
+                      const unitVal = it.unit || 'કિલો';
+                      const kgVal = convertItemQtyToKg(qtyVal, unitVal);
+                      return (
+                        <tr key={i} className="border border-gray-300">
+                          <td className="border p-2 text-center text-gray-500 font-sans">{i + 1}</td>
+                          <td className="border p-2 font-bold">{it.itemName}</td>
+                          <td className="border p-2 text-center font-bold">{formatMetric(qtyVal)}</td>
+                          <td className="border p-2 text-center font-bold text-orange-700">{formatMetric(kgVal)}</td>
+                          <td className="border p-2 text-center text-gray-400 text-[10px] uppercase font-sans font-bold">{unitVal}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
               {(() => {
                 const filledItems = (previewSendOrder.items || []).filter(r => r.itemName && r.itemName.trim());
-                const totalKg = roundKg2(filledItems.reduce((sum, r) => sum + (parseFloat(r.kg) || 0), 0));
+                const mapped = filledItems.map((it) => ({
+                  name: it.itemName,
+                  qty: it.qty != null && it.qty !== '' ? it.qty : it.kg,
+                  unit: it.unit || 'કિલો',
+                }));
+                const totals = calculateTotals(mapped);
                 return (
-                  <div className="mt-6 sm:mt-10 grid grid-cols-2 border-4 border-black p-3 sm:p-5 font-black text-center uppercase text-xs sm:text-sm tracking-tighter">
+                  <div className="mt-6 sm:mt-10 grid grid-cols-3 border-4 border-black p-3 sm:p-5 font-black text-center uppercase text-xs sm:text-sm tracking-tighter">
                     <div className="border-r border-gray-200">ITEMS: {filledItems.length}</div>
-                    <div>TOTAL KG: {formatMetric(totalKg)}</div>
+                    <div className="border-r border-gray-200">TOTAL QTY: {formatMetric(totals.totalQty)}</div>
+                    <div>TOTAL KG: {formatMetric(totals.totalKg)}</div>
                   </div>
                 );
               })()}
@@ -3204,18 +3847,19 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
               <div className="p-5">
                 {(() => {
                   const { order, type } = mailModal;
+                  const reportHydrated = type === 'report' ? hydrateReport(order) : null;
                   const targetLabel = type === 'request'
                     ? order.center
                     : type === 'send'
                       ? order.fromCenter
-                      : hydrateReport(order).monthLabel;
+                      : reportHydrated?.monthLabel;
 
                   return (
                     <div className="space-y-4">
                       <p className="text-gray-300 text-sm">
                         Send email for <span className="font-bold text-white">{targetLabel}</span>
                         {type === 'report' ? (
-                          <span className="text-blue-400 font-bold"> — {hydrateReport(order).rangeLabel}</span>
+                          <span className="text-blue-400 font-bold"> — {reportHydrated?.rangeLabel}</span>
                         ) : (
                           <span> — Chalan <span className="text-blue-400 font-bold">#{order.chalanNo}</span></span>
                         )}
@@ -3224,7 +3868,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
                       {type === 'report' ? (
                         <>
                           <div>
-                            <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Default Email</label>
+                            <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Email</label>
                             <select
                               className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-blue-500/70 transition-all text-sm"
                               value={selectedReportEmail}
@@ -3299,6 +3943,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
           </motion.div>
         )}
       </AnimatePresence>
+      <PdfDownloadWaitOverlay active={pdfOverlayActive} kind={pdfOverlayKind ?? 'report'} />
     </>
   );
 }
@@ -3306,11 +3951,17 @@ function AdminDashboard({ user, catalogItems, refreshCatalog }) {
 const createDefaultItemForm = () => ({
   name: '',
   category: '',
-  unit: DEFAULT_ITEM_UNITS[0],
+  unitMode: 'standard',
+  unit: UNIT_KG,
+  globalUnitId: '',
+  customUnitName: '',
+  conversionAmount: '',
+  conversionBase: UNIT_KG,
 });
 
 function ItemAdminPanel({ user, catalogItems, refreshCatalog }) {
   const [itemForm, setItemForm] = useState(createDefaultItemForm);
+  const [globalUnits, setGlobalUnits] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [deletingId, setDeletingId] = useState(null);
@@ -3365,10 +4016,65 @@ function ItemAdminPanel({ user, catalogItems, refreshCatalog }) {
     }
   }, []);
 
+  const refreshGlobalUnits = useCallback(async () => {
+    try {
+      setGlobalUnits(await fetchGlobalUnits());
+    } catch {
+      setGlobalUnits([]);
+    }
+  }, []);
+
   useEffect(() => {
     fetchInactiveItems();
     fetchCategoryOptions();
-  }, [fetchCategoryOptions, fetchInactiveItems]);
+    refreshGlobalUnits();
+  }, [fetchCategoryOptions, fetchInactiveItems, refreshGlobalUnits]);
+
+  const unitDropdownOptions = useMemo(
+    () => buildUnitDropdownOptions(globalUnits),
+    [globalUnits],
+  );
+
+  const unitSelectValue = useMemo(
+    () => encodeItemUnitSelectValue(itemForm),
+    [itemForm],
+  );
+
+  const needsPerItemKgOverride = itemForm.unitMode === 'global' || itemForm.unitMode === 'custom';
+
+  const handleUnitSelectChange = (rawValue) => {
+    const decoded = decodeItemUnitSelectValue(rawValue);
+    if (decoded.unitMode === 'global') {
+      const gu = globalUnits.find((row) => row.id === decoded.globalUnitId);
+      setItemForm((prev) => ({
+        ...prev,
+        unitMode: 'global',
+        globalUnitId: decoded.globalUnitId,
+        unit: gu?.name || prev.unit,
+        conversionAmount: gu?.defaultUnitToKg != null ? String(gu.defaultUnitToKg) : prev.conversionAmount,
+        conversionBase: UNIT_KG,
+      }));
+      return;
+    }
+    if (decoded.unitMode === 'custom') {
+      setItemForm((prev) => ({
+        ...prev,
+        unitMode: 'custom',
+        globalUnitId: '',
+        customUnitName: prev.customUnitName || '',
+        conversionAmount: prev.conversionAmount || '',
+      }));
+      return;
+    }
+    setItemForm((prev) => ({
+      ...prev,
+      unitMode: 'standard',
+      globalUnitId: '',
+      unit: decoded.unit || getDefaultUnitForCategory(prev.category),
+      conversionAmount: '',
+      customUnitName: '',
+    }));
+  };
 
   const resetForm = () => {
     setItemForm(createDefaultItemForm());
@@ -3376,7 +4082,37 @@ function ItemAdminPanel({ user, catalogItems, refreshCatalog }) {
   };
 
   const handleSubmit = async () => {
-    const payload = createCatalogItemPayload({ ...itemForm, unit: 'કિલો' });
+    let unit = UNIT_KG;
+    let unitToKgFactor = null;
+    let isCustomUnit = false;
+    let globalUnitId = null;
+
+    if (itemForm.unitMode === 'global') {
+      const selectedGlobal = globalUnits.find((row) => row.id === itemForm.globalUnitId);
+      if (!selectedGlobal) return alert('ગ્લોબલ એકમ પસંદ કરો.');
+      unit = selectedGlobal.name;
+      unitToKgFactor = conversionInputToKgFactor(itemForm.conversionAmount, itemForm.conversionBase);
+      if (unitToKgFactor == null) return alert('આ આઇટમ માટે ૧ એકમ = કેટલા kg લખો (ઉદા. ૧૩ અથવા ૧૫).');
+      isCustomUnit = true;
+      globalUnitId = selectedGlobal.id;
+    } else if (itemForm.unitMode === 'custom') {
+      unit = itemForm.customUnitName.trim();
+      if (!unit) return alert('કસ્ટમ એકમનું નામ લખો.');
+      unitToKgFactor = conversionInputToKgFactor(itemForm.conversionAmount, itemForm.conversionBase);
+      if (unitToKgFactor == null) return alert('૧ એકમ = કેટલા kg/g માં રૂપાંતર લખો.');
+      isCustomUnit = true;
+    } else {
+      unit = (itemForm.unit || getDefaultUnitForCategory(itemForm.category)).trim();
+    }
+
+    const payload = createCatalogItemPayload({
+      name: itemForm.name,
+      category: itemForm.category,
+      unit,
+      unitToKgFactor,
+      isCustomUnit,
+      globalUnitId,
+    });
     if (!payload.name) return alert('Item name is required.');
     if (!payload.category) return alert('Category is required.');
 
@@ -3404,10 +4140,18 @@ function ItemAdminPanel({ user, catalogItems, refreshCatalog }) {
 
   const handleEdit = (item) => {
     setEditingId(item.id);
+    const hasGlobal = Boolean(item.globalUnitId);
+    const isFreeformCustom = item.isCustomUnit === true && !hasGlobal
+      && (!isStandardUnit(item.unit) && item.unitToKgFactor);
     setItemForm({
       name: item.name,
       category: item.category,
-      unit: item.unit,
+      unitMode: hasGlobal ? 'global' : (isFreeformCustom ? 'custom' : 'standard'),
+      unit: hasGlobal || isFreeformCustom ? UNIT_KG : resolveCatalogItemUnit(item),
+      globalUnitId: item.globalUnitId || '',
+      customUnitName: isFreeformCustom ? item.unit : '',
+      conversionAmount: item.unitToKgFactor ? String(item.unitToKgFactor) : '',
+      conversionBase: UNIT_KG,
     });
   };
 
@@ -3527,7 +4271,11 @@ function ItemAdminPanel({ user, catalogItems, refreshCatalog }) {
             <input
               list="item-category-options"
               value={itemForm.category}
-              onChange={(e) => setItemForm((prev) => ({ ...prev, category: e.target.value }))}
+              onChange={(e) => setItemForm((prev) => ({
+                ...prev,
+                category: e.target.value,
+                unit: prev.unitMode === 'standard' ? getDefaultUnitForCategory(e.target.value) : prev.unit,
+              }))}
               placeholder="અનાજ / કઠોળ / મસાલા..."
               className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-amber-500/50 transition-all text-sm"
             />
@@ -3552,9 +4300,66 @@ function ItemAdminPanel({ user, catalogItems, refreshCatalog }) {
           </div>
           <div>
             <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Unit</label>
-            <div className="w-full rounded-xl border border-white/10 bg-[#202020] px-3 py-3 text-sm font-bold text-amber-300">
-              Kilogram (કિલો)
-            </div>
+            <select
+              value={unitSelectValue}
+              onChange={(e) => handleUnitSelectChange(e.target.value)}
+              className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-amber-500/50 text-sm"
+            >
+              <optgroup label="સ્ટાન્ડર્ડ એકમ">
+                {STANDARD_UNIT_OPTIONS.map((u) => (
+                  <option key={`std-${u}`} value={`std:${u}`}>{u}</option>
+                ))}
+              </optgroup>
+              {globalUnits.length > 0 && (
+                <optgroup label="ગ્લોબલ કસ્ટમ એકમ">
+                  {globalUnits.map((row) => (
+                    <option key={row.id} value={`global:${row.id}`}>
+                      {row.name}{row.defaultUnitToKg != null ? ` (default ${row.defaultUnitToKg} kg)` : ''}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+              <option value="custom:">— ફક્ત આ આઇટમ માટે નવું નામ —</option>
+            </select>
+            {needsPerItemKgOverride && (
+              <motion.div className="mt-2 space-y-2 rounded-xl border border-amber-500/25 bg-[#202020] p-3">
+                {itemForm.unitMode === 'custom' && (
+                  <input
+                    value={itemForm.customUnitName}
+                    onChange={(e) => setItemForm((prev) => ({ ...prev, customUnitName: e.target.value }))}
+                    placeholder="એકમનું નામ (ઉદા. ડબ્બો)"
+                    className="w-full p-2.5 bg-[#252525] border border-white/10 rounded-lg text-white text-sm outline-none focus:border-amber-500/50"
+                  />
+                )}
+                <div className="flex flex-wrap items-center gap-2 text-xs text-gray-400">
+                  <span className="font-bold text-amber-300">આ આઇટમ માટે ૧</span>
+                  <span>
+                    {itemForm.unitMode === 'global'
+                      ? (globalUnits.find((r) => r.id === itemForm.globalUnitId)?.name || 'એકમ')
+                      : (itemForm.customUnitName || 'એકમ')}
+                  </span>
+                  <span>=</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="any"
+                    value={itemForm.conversionAmount}
+                    onChange={(e) => setItemForm((prev) => ({ ...prev, conversionAmount: e.target.value }))}
+                    placeholder="13"
+                    className="w-20 p-2 bg-[#252525] border border-white/10 rounded-lg text-white text-sm outline-none focus:border-amber-500/50"
+                  />
+                  <span>{UNIT_KG}</span>
+                </div>
+                <p className="text-[10px] text-gray-500">
+                  ગ્લોબલ એકમ નીચે ઉમેરો · આઇટમ દીઠ kg બદલી શકાય (ઉદા. સૂર્યફૂલ તેલ ૧૩, ઘી ૧૫)
+                </p>
+              </motion.div>
+            )}
+            {itemForm.category && itemForm.unitMode === 'standard' && formatUnitConversionHint(itemForm.unit, { category: itemForm.category, unit: itemForm.unit }) && (
+              <p className="mt-1 text-[10px] text-amber-400/80">
+                {formatUnitConversionHint(itemForm.unit, { category: itemForm.category, unit: itemForm.unit })}
+              </p>
+            )}
           </div>
         </div>
 
@@ -3575,6 +4380,7 @@ function ItemAdminPanel({ user, catalogItems, refreshCatalog }) {
           </button>
         )}
         <p className="mt-3 text-xs text-gray-500">Logged in as {user?.username || 'Admin'}</p>
+        <GlobalUnitsPanel onUnitsChange={refreshGlobalUnits} />
       </motion.div>
 
       <motion.div initial={{ y: 10, opacity: 0 }} animate={{ y: 0, opacity: 1 }}
@@ -3611,6 +4417,7 @@ function ItemAdminPanel({ user, catalogItems, refreshCatalog }) {
                 </div>
                 <span className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-2 py-1 text-[10px] font-bold uppercase text-amber-300">
                   {item.unit}
+                  {item.unitToKgFactor ? ` · ૧=${item.unitToKgFactor}kg` : ''}
                 </span>
               </div>
               <div className="mt-4 flex gap-2">
@@ -3723,13 +4530,8 @@ function PurchaseAdminPanel({ user, catalogItems, onLedgerChanged }) {
   const [purchaseFilters, setPurchaseFilters] = useState({ date: '', source: '', shop: '' });
   const [savedShopNames, setSavedShopNames] = useState([]);
   const [previewPurchase, setPreviewPurchase] = useState(null);
+  const [editPurchase, setEditPurchase] = useState(null);
   const [purchasePdfLoading, setPurchasePdfLoading] = useState(null);
-  const [purchaseMailLoading, setPurchaseMailLoading] = useState(null);
-  const [purchaseMailModal, setPurchaseMailModal] = useState(null);
-  const [purchaseSelectedEmail, setPurchaseSelectedEmail] = useState(REPORT_DEFAULT_EMAILS[0]);
-  const [purchaseCustomEmail, setPurchaseCustomEmail] = useState('');
-  const [purchaseCustomEmailError, setPurchaseCustomEmailError] = useState('');
-  const [purchaseMailSending, setPurchaseMailSending] = useState(false);
 
   const fetchPurchases = async () => {
     setPurchaseLoading(true);
@@ -3761,9 +4563,17 @@ function PurchaseAdminPanel({ user, catalogItems, onLedgerChanged }) {
   }, [refreshSavedShopNames]);
 
   const updatePurchaseRow = (id, field, value) => {
+    const patch = field === 'kg' ? { qty: value } : { [field]: value };
     setPurchaseForm((prev) => ({
       ...prev,
-      rows: prev.rows.map((row) => (row.id === id ? { ...row, [field]: value } : row)),
+      rows: patchStockRow(prev.rows, id, patch, catalogItems),
+    }));
+  };
+
+  const selectPurchaseRowItem = (id, item) => {
+    setPurchaseForm((prev) => ({
+      ...prev,
+      rows: patchStockRow(prev.rows, id, { itemName: item.name }, catalogItems),
     }));
   };
 
@@ -3788,33 +4598,6 @@ function PurchaseAdminPanel({ user, catalogItems, onLedgerChanged }) {
   const catalogNameKeys = new Set(catalogItems.map((item) => item.nameKey));
 
   const clearPurchaseFilters = () => setPurchaseFilters({ date: '', source: '', shop: '' });
-
-  const openPurchaseMailModal = (purchase) => {
-    setPurchaseMailModal(purchase);
-    const savedEmail = isValidEmail(purchase?.email) ? purchase.email.trim() : '';
-
-    if (REPORT_DEFAULT_EMAILS.includes(savedEmail)) {
-      setPurchaseSelectedEmail(savedEmail);
-      setPurchaseCustomEmail('');
-    } else if (savedEmail) {
-      setPurchaseSelectedEmail('custom');
-      setPurchaseCustomEmail(savedEmail);
-    } else {
-      setPurchaseSelectedEmail(REPORT_DEFAULT_EMAILS[0]);
-      setPurchaseCustomEmail('');
-    }
-
-    setPurchaseCustomEmailError('');
-  };
-
-  const closePurchaseMailModal = () => {
-    setPurchaseMailModal(null);
-    setPurchaseSelectedEmail(REPORT_DEFAULT_EMAILS[0]);
-    setPurchaseCustomEmail('');
-    setPurchaseCustomEmailError('');
-    setPurchaseMailSending(false);
-    setPurchaseMailLoading(null);
-  };
 
   const handlePurchaseSubmit = async () => {
     if (!purchaseForm.purchaseSource) return alert('પ્રકાર પસંદ કરો (દુકાન અથવા કોઠાર સ્ટોક).');
@@ -3854,9 +4637,11 @@ function PurchaseAdminPanel({ user, catalogItems, onLedgerChanged }) {
         date: primaryDate,
         items: filledRows.map((row) => ({
           itemName: row.itemName.trim(),
+          qty: row.qty,
+          unit: row.unit,
           kg: row.kg,
         })),
-        totalKg: filledRows.reduce((sum, row) => sum + (parseFloat(row.kg) || 0), 0),
+        totalKg: roundKg2(filledRows.reduce((sum, row) => sum + (parseFloat(row.kg) || 0), 0)),
         timestamp: new Date(),
         submittedBy: user.username,
         globalStockSynced: false,
@@ -3972,57 +4757,6 @@ function PurchaseAdminPanel({ user, catalogItems, onLedgerChanged }) {
     setPurchasePdfLoading(null);
   };
 
-  const handlePurchaseMailSend = async () => {
-    if (!purchaseMailModal) return;
-
-    const emailToUse = purchaseSelectedEmail === 'custom'
-      ? purchaseCustomEmail.trim()
-      : purchaseSelectedEmail;
-
-    if (!isValidEmail(emailToUse)) {
-      setPurchaseCustomEmailError('Please enter a valid email address.');
-      return;
-    }
-
-    setPurchaseMailSending(true);
-    setPurchaseMailLoading(purchaseMailModal.id);
-    try {
-      await sendEmailWithConfig(REPORT_MAIL_CONFIG, {
-        email: emailToUse,
-        cc_email: DEFAULT_CC_EMAIL,
-        bcc_email: DEFAULT_BCC_EMAIL,
-        from_name: 'Purchased Material',
-        report_title: 'Purchase Report',
-        month: getPurchaseResolvedSource(purchaseMailModal) === PURCHASE_SOURCE_KOTHAR_STOCK
-          ? 'મુખ્ય કોઠાર સ્ટોક'
-          : '-',
-        chalan_no: getPurchaseResolvedSource(purchaseMailModal) === PURCHASE_SOURCE_KOTHAR_STOCK
-          ? '-'
-          : (purchaseMailModal.billNo || '-'),
-        date: formatDisplayDate(purchaseMailModal.billDate || purchaseMailModal.date),
-        range: formatDisplayDate(purchaseMailModal.billDate || purchaseMailModal.date),
-        receiver: getPurchaseResolvedSource(purchaseMailModal) === PURCHASE_SOURCE_KOTHAR_STOCK
-          ? 'સ્વામિનારાયણ ધામ મુખ્ય કોઠાર સ્ટોક'
-          : (purchaseMailModal.shopName || '-'),
-        generated_on: formatDisplayDate(purchaseMailModal.billDate || purchaseMailModal.date),
-        total_rows: formatMetric((purchaseMailModal.items || []).length),
-        total_stock: formatMetric(purchaseMailModal.totalKg),
-        pdf_link: buildPublicRecordLink('purchaseId', purchaseMailModal.id),
-      });
-
-      await updateDoc(doc(db, 'purchases', purchaseMailModal.id), { email: emailToUse });
-      setPurchases((prev) => prev.map((item) => (
-        item.id === purchaseMailModal.id ? { ...item, email: emailToUse } : item
-      )));
-      closePurchaseMailModal();
-      alert('Email Sent! ✅');
-    } catch (error) {
-      alert(`Mail Error: ${error.message}`);
-      setPurchaseMailSending(false);
-      setPurchaseMailLoading(null);
-    }
-  };
-
   const filteredPurchases = purchases.filter((purchase) => {
     const displayDate = purchase.date || purchase.billDate || purchase.entryDate;
     const dateMatch = purchaseFilters.date ? displayDate === purchaseFilters.date : true;
@@ -4031,6 +4765,25 @@ function PurchaseAdminPanel({ user, catalogItems, onLedgerChanged }) {
     const shopMatch = purchaseFilters.shop ? matchesSearchText(purchase.shopName, purchaseFilters.shop) : true;
     return dateMatch && sourceMatch && shopMatch;
   });
+
+  if (editPurchase) {
+    return (
+      <EditPurchaseScreen
+        purchase={editPurchase}
+        catalogItems={catalogItems}
+        savedShopNames={savedShopNames}
+        onBack={() => {
+          setEditPurchase(null);
+          fetchPurchases();
+        }}
+        onUpdated={(updated) => {
+          setPurchases((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
+          setEditPurchase(null);
+          onLedgerChanged?.();
+        }}
+      />
+    );
+  }
 
   return (
     <>
@@ -4136,7 +4889,7 @@ function PurchaseAdminPanel({ user, catalogItems, onLedgerChanged }) {
                 <tr>
                   <th className="p-3 text-left text-gray-500 font-bold text-xs uppercase w-10">No</th>
                   <th className="p-3 text-left text-gray-500 font-bold text-xs uppercase">Item Name</th>
-                  <th className="p-3 text-center text-gray-500 font-bold text-xs uppercase w-24">KG</th>
+                  <th className="p-3 text-center text-gray-500 font-bold text-xs uppercase w-32">માત્રા</th>
                   <th className="p-3 w-10" />
                 </tr>
               </thead>
@@ -4155,17 +4908,15 @@ function PurchaseAdminPanel({ user, catalogItems, onLedgerChanged }) {
                           .map((entry) => normalizeItemName(entry.itemName))
                           .filter(Boolean)}
                         onChange={(nextValue) => updatePurchaseRow(row.id, 'itemName', nextValue)}
-                        onSelectItem={(item) => updatePurchaseRow(row.id, 'itemName', item.name)}
+                        onSelectItem={(item) => selectPurchaseRowItem(row.id, item)}
                       />
                     </td>
                     <td className="p-2">
-                      <input
-                        type="number"
-                        min="0"
-                        className="w-full p-2 bg-[#252525] border border-white/5 rounded-lg text-white outline-none focus:border-violet-500/50 text-sm text-center transition-all"
-                        placeholder="0"
-                        value={row.kg}
-                        onChange={(e) => updatePurchaseRow(row.id, 'kg', e.target.value)}
+                      <CatalogStockQtyInput
+                        row={row}
+                        catalogItems={catalogItems}
+                        accent="violet"
+                        onQtyChange={(value) => updatePurchaseRow(row.id, 'qty', value)}
                       />
                     </td>
                     <td className="p-2 text-center">
@@ -4299,13 +5050,13 @@ function PurchaseAdminPanel({ user, catalogItems, onLedgerChanged }) {
                       className="bg-[#252525] hover:bg-[#2d2d2d] text-white p-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all border border-white/5">
                       <Eye size={14} /> Preview
                     </motion.button>
+                    <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={() => setEditPurchase(purchase)}
+                      className="bg-[#252525] hover:bg-[#2d2d2d] text-white p-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all border border-white/5">
+                      <Edit3 size={14} /> Edit
+                    </motion.button>
                     <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} disabled={purchasePdfLoading === purchase.id} onClick={() => handleSharePurchase(purchase)}
                       className="bg-[#252525] hover:bg-[#2d2d2d] text-white p-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all border border-white/5 disabled:opacity-50">
                       {purchasePdfLoading === purchase.id ? <Loader2 size={14} className="animate-spin" /> : <Share2 size={14} />} Share
-                    </motion.button>
-                    <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} disabled={purchaseMailLoading === purchase.id} onClick={() => openPurchaseMailModal(purchase)}
-                      className="bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 p-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all border border-blue-500/20 disabled:opacity-50">
-                      {purchaseMailLoading === purchase.id ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />} Mail
                     </motion.button>
                     <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} disabled={purchasePdfLoading === purchase.id} onClick={() => handleDownloadPurchase(purchase)}
                       className="bg-gradient-to-r from-violet-500 to-fuchsia-600 text-white p-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-all shadow-lg shadow-violet-500/20 disabled:opacity-50">
@@ -4344,7 +5095,7 @@ function PurchaseAdminPanel({ user, catalogItems, onLedgerChanged }) {
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.95, opacity: 0 }}
               onClick={(e) => e.stopPropagation()}
-              className="bg-white text-black w-full max-w-3xl max-h-[95vh] overflow-y-auto rounded-xl sm:rounded-2xl p-6 sm:p-8 relative shadow-2xl"
+              className="bg-white text-black w-full max-w-4xl max-h-[95vh] overflow-y-auto rounded-xl sm:rounded-2xl p-6 sm:p-8 relative shadow-2xl font-serif"
             >
               <motion.button whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.9 }} onClick={() => setPreviewPurchase(null)}
                 className="absolute top-3 right-3 sm:top-4 sm:right-4 bg-gray-100 p-2 rounded-full text-black hover:bg-gray-200 transition-colors z-10">
@@ -4376,134 +5127,373 @@ function PurchaseAdminPanel({ user, catalogItems, onLedgerChanged }) {
                     <tr>
                       <th className="border p-2 w-12 text-center">No</th>
                       <th className="border p-2 text-left">Item Name</th>
+                      <th className="border p-2 w-20 text-center">Qty</th>
                       <th className="border p-2 w-20 text-center">KG</th>
+                      <th className="border p-2 w-20 text-center">Unit</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {(previewPurchase.items || []).map((item, index) => (
-                      <tr key={`${previewPurchase.id}-${index}`} className="even:bg-gray-50">
-                        <td className="border p-2 text-center text-gray-500">{index + 1}</td>
-                        <td className="border p-2 font-bold">{item.itemName}</td>
-                        <td className="border p-2 text-center font-bold text-violet-700">{formatMetric(item.kg)}</td>
-                      </tr>
-                    ))}
+                    {(previewPurchase.items || []).map((item, index) => {
+                      const qtyVal = item.qty != null && item.qty !== '' ? item.qty : item.kg;
+                      const unitVal = item.unit || 'કિલો';
+                      const kgVal = convertItemQtyToKg(qtyVal, unitVal);
+                      return (
+                        <tr key={`${previewPurchase.id}-${index}`} className="even:bg-gray-50">
+                          <td className="border p-2 text-center text-gray-500">{index + 1}</td>
+                          <td className="border p-2 font-bold">{item.itemName}</td>
+                          <td className="border p-2 text-center font-bold">{formatMetric(qtyVal)}</td>
+                          <td className="border p-2 text-center font-bold text-violet-700">{formatMetric(kgVal)}</td>
+                          <td className="border p-2 text-center text-gray-400 text-[10px] uppercase font-sans font-bold">{unitVal}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
-              <div className="mt-6 sm:mt-10 grid grid-cols-2 border-4 border-black p-3 sm:p-5 font-black text-center uppercase text-xs sm:text-sm tracking-tighter">
+              {(() => {
+                const mapped = (previewPurchase.items || []).map((it) => ({
+                  name: it.itemName,
+                  qty: it.qty != null && it.qty !== '' ? it.qty : it.kg,
+                  unit: it.unit || 'કિલો',
+                }));
+                const t = calculateTotals(mapped);
+                return (
+              <div className="mt-6 sm:mt-10 grid grid-cols-3 border-4 border-black p-3 sm:p-5 font-black text-center uppercase text-xs sm:text-sm tracking-tighter">
                 <div className="border-r border-gray-200">NUMBER OF ITEMS: {(previewPurchase.items || []).length}</div>
-                <div>TOTAL KG: {formatMetric(calculateKgTotals(previewPurchase.items || []).totalKg)}</div>
+                <div className="border-r border-gray-200">TOTAL QTY: {formatMetric(t.totalQty)}</div>
+                <div>TOTAL KG: {formatMetric(t.totalKg)}</div>
               </div>
+                );
+              })()}
             </motion.div>
           </motion.div>
         )}
       </AnimatePresence>
-
-      <AnimatePresence>
-        {purchaseMailModal && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[300] flex items-center justify-center p-4"
-            onClick={closePurchaseMailModal}
-          >
-            <motion.div
-              initial={{ scale: 0.9, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.9, opacity: 0 }}
-              onClick={(e) => e.stopPropagation()}
-              className="bg-gradient-to-b from-[#1e1e1e] to-[#181818] border border-white/10 rounded-2xl sm:rounded-3xl w-full max-w-sm shadow-2xl overflow-hidden"
-            >
-              <div className="p-5 border-b border-white/5 flex items-center justify-between bg-gradient-to-r from-[#252525] to-[#1e1e1e]">
-                <div className="flex items-center gap-2 text-blue-400 font-bold text-sm uppercase tracking-widest">
-                  <Send size={16} /> Send Mail
-                </div>
-                <motion.button whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.9 }} onClick={closePurchaseMailModal}
-                  className="bg-white/5 hover:bg-white/10 p-1.5 rounded-lg text-gray-400 hover:text-white transition-colors">
-                  <X size={16} />
-                </motion.button>
-              </div>
-
-              <div className="p-5 space-y-4">
-                <p className="text-gray-300 text-sm">
-                  {getPurchaseResolvedSource(purchaseMailModal) === PURCHASE_SOURCE_KOTHAR_STOCK ? (
-                    <>
-                      મુખ્ય કોઠાર સ્ટોક એન્ટ્રી —
-                      <span className="font-bold text-white">{formatDisplayDate(purchaseMailModal.date)}</span>
-                    </>
-                  ) : (
-                    <>
-                      Send purchase PDF link for <span className="font-bold text-white">{purchaseMailModal.shopName}</span>
-                      <span className="text-blue-400 font-bold"> — Bill #{purchaseMailModal.billNo}</span>
-                    </>
-                  )}
-                </p>
-
-                <div>
-                  <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Default Email</label>
-                  <select
-                    className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-blue-500/70 transition-all text-sm"
-                    value={purchaseSelectedEmail}
-                    onChange={(e) => {
-                      setPurchaseSelectedEmail(e.target.value);
-                      setPurchaseCustomEmailError('');
-                    }}
-                  >
-                    {REPORT_DEFAULT_EMAILS.map((email) => (
-                      <option key={email} value={email}>{email}</option>
-                    ))}
-                    <option value="custom">Custom Email</option>
-                  </select>
-                </div>
-
-                {purchaseSelectedEmail === 'custom' && (
-                  <div>
-                    <div className="relative">
-                      <Mail className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" size={16} />
-                      <input
-                        type="email"
-                        placeholder="example@email.com"
-                        className={`w-full p-3 pl-9 bg-[#252525] border rounded-xl text-white outline-none focus:border-blue-500/70 transition-all text-sm placeholder-gray-500 ${purchaseCustomEmailError ? 'border-red-500/60' : 'border-white/10'}`}
-                        value={purchaseCustomEmail}
-                        onChange={(e) => { setPurchaseCustomEmail(e.target.value); setPurchaseCustomEmailError(''); }}
-                        autoFocus
-                      />
-                    </div>
-                    {purchaseCustomEmailError && <p className="text-red-400 text-xs mt-1.5 pl-1">{purchaseCustomEmailError}</p>}
-                  </div>
-                )}
-
-                <div className="rounded-xl border border-white/10 bg-white/5 p-3 text-xs text-gray-400">
-                  CC: {DEFAULT_CC_EMAIL}<br />
-                  BCC: {DEFAULT_BCC_EMAIL}
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                  <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
-                    onClick={closePurchaseMailModal}
-                    className="bg-white/5 hover:bg-white/10 text-gray-300 py-3 rounded-xl text-sm font-bold flex items-center justify-center gap-2 border border-white/10">
-                    <X size={16} /> Cancel
-                  </motion.button>
-                  <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
-                    disabled={purchaseMailSending}
-                    onClick={handlePurchaseMailSend}
-                    className="bg-gradient-to-r from-blue-500 to-blue-600 text-white py-3 rounded-xl text-sm font-bold flex items-center justify-center gap-2 shadow-lg shadow-blue-500/20 disabled:opacity-50">
-                    {purchaseMailSending ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />} Send Mail
-                  </motion.button>
-                </div>
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      <PdfDownloadWaitOverlay active={purchasePdfLoading !== null} kind="purchase" />
     </>
   );
 }
 
+// --- EDIT PURCHASE SCREEN ---
+const buildPurchaseFormFromRecord = (purchase, catalogItems) => ({
+  purchaseSource: getPurchaseResolvedSource(purchase),
+  shopName: purchase.shopName || '',
+  billNo: purchase.billNo || '',
+  billDate: purchase.billDate || purchase.date || new Date().toISOString().split('T')[0],
+  entryDate: purchase.entryDate || purchase.date || new Date().toISOString().split('T')[0],
+  rows: createRowsFromItems(
+    (purchase.items || []).map((item) => ({
+      itemName: item.itemName,
+      qty: item.qty,
+      unit: item.unit,
+      kg: item.kg,
+    })),
+    Math.max((purchase.items || []).length, 5),
+    catalogItems,
+  ),
+});
+
+function EditPurchaseScreen({ purchase, onBack, catalogItems, savedShopNames, onUpdated }) {
+  const [form, setForm] = useState(() => buildPurchaseFormFromRecord(purchase, catalogItems));
+  const [loading, setLoading] = useState(false);
+  const catalogNameKeys = new Set(catalogItems.map((item) => item.nameKey));
+  const filledRows = form.rows.filter((row) => row.itemName.trim());
+
+  const updateRow = (id, field, value) => {
+    const patch = field === 'kg' ? { qty: value } : { [field]: value };
+    setForm((prev) => ({
+      ...prev,
+      rows: patchStockRow(prev.rows, id, patch, catalogItems),
+    }));
+  };
+
+  const selectRowItem = (id, item) => {
+    setForm((prev) => ({
+      ...prev,
+      rows: patchStockRow(prev.rows, id, { itemName: item.name }, catalogItems),
+    }));
+  };
+
+  const addRow = () => {
+    setForm((prev) => ({
+      ...prev,
+      rows: [...prev.rows, createEmptyItemRow(getNextRowId(prev.rows))],
+    }));
+  };
+
+  const removeRow = (id) => {
+    setForm((prev) => ({
+      ...prev,
+      rows: prev.rows.length > 1 ? prev.rows.filter((row) => row.id !== id) : prev.rows,
+    }));
+  };
+
+  const handleUpdate = async () => {
+    if (!form.purchaseSource) return alert('પ્રકાર પસંદ કરો (દુકાન અથવા કોઠાર સ્ટોક).');
+    if (form.purchaseSource === PURCHASE_SOURCE_SHOP) {
+      if (!form.shopName.trim()) return alert('દુકાનનું નામ લખો.');
+      if (!form.billNo.trim()) return alert('બિલ નંબર લખો.');
+      if (!form.billDate) return alert('બિલ તારીખ પસંદ કરો.');
+    } else if (form.purchaseSource === PURCHASE_SOURCE_KOTHAR_STOCK) {
+      if (!form.entryDate) return alert('તારીખ પસંદ કરો.');
+    }
+    if (filledRows.length === 0) return alert('Add at least one purchased item.');
+    const invalidItem = filledRows.find((row) => !catalogNameKeys.has(normalizeItemName(row.itemName)));
+    if (invalidItem) {
+      return alert(`Invalid item name: "${invalidItem.itemName}". Please select an item from the master list.`);
+    }
+
+    const isShop = form.purchaseSource === PURCHASE_SOURCE_SHOP;
+    const primaryDate = isShop ? form.billDate : form.entryDate;
+    if (!canSubmitStockEntryDate(primaryDate)) {
+      const backfillNote = ENABLE_INITIAL_STOCK_BACKFILL
+        ? ` (initial mode: last ${INITIAL_BACKFILL_MONTHS} months allowed)`
+        : ` (previous month only till day ${MONTH_CLOSE_GRACE_DAYS})`;
+      alert(`This month is closed for stock entry${backfillNote}.`);
+      return;
+    }
+
+    setLoading(true);
+    try {
+      if (purchase.globalStockSynced === true) {
+        try {
+          await applyGlobalStockKgDelta(purchase.items || [], -1);
+        } catch (stockErr) {
+          console.error('global-stock revert:', stockErr);
+          alert(`સ્ટોકમાંથી KG ઘટાડવામાં ભૂલ — એન્ટ્રી અપડેટ રોકાઈ.\n${stockErr.message}`);
+          setLoading(false);
+          return;
+        }
+      }
+
+      await setSourceTransactionsDeleted('purchase', purchase.id, true);
+
+      const payload = {
+        purchaseSource: form.purchaseSource,
+        center: purchase.center || '',
+        shopName: isShop ? form.shopName.trim() : '',
+        billNo: isShop ? form.billNo.trim() : '',
+        billDate: isShop ? form.billDate : '',
+        entryDate: isShop ? '' : form.entryDate,
+        date: primaryDate,
+        items: filledRows.map((row) => ({
+          itemName: row.itemName.trim(),
+          qty: row.qty,
+          unit: row.unit,
+          kg: row.kg,
+        })),
+        totalKg: roundKg2(filledRows.reduce((sum, row) => sum + (parseFloat(row.kg) || 0), 0)),
+        updatedAt: new Date(),
+      };
+
+      await updateDoc(doc(db, 'purchases', purchase.id), payload);
+
+      await Promise.all(
+        payload.items.map((item, lineIndex) =>
+          setDoc(
+            doc(db, STOCK_TRANSACTIONS_COLLECTION, makeStockTransactionDocId('purchase', purchase.id, lineIndex, 'IN')),
+            {
+              sourceType: 'purchase',
+              sourceId: purchase.id,
+              lineIndex,
+              center_id: 'global',
+              centerName: 'All Centers / Full Report',
+              item_id: normalizeItemName(item.itemName),
+              itemName: item.itemName,
+              transaction_type: 'IN',
+              quantity: toSafeTxQuantity(item.kg),
+              transaction_date: normalizeDateOnly(payload.date),
+              created_at: purchase.timestamp || new Date(),
+              autoSynced: true,
+              is_deleted: false,
+              updatedAt: new Date(),
+            },
+            { merge: true },
+          ),
+        ),
+      );
+
+      if (isShop) await ensurePurchaseShopNameSaved(form.shopName.trim());
+
+      let globalStockSyncedOk = false;
+      try {
+        await applyGlobalStockKgDelta(payload.items, 1);
+        await updateDoc(doc(db, 'purchases', purchase.id), { globalStockSynced: true });
+        globalStockSyncedOk = true;
+      } catch (stockErr) {
+        console.error('global-stock sync:', stockErr);
+        await updateDoc(doc(db, 'purchases', purchase.id), { globalStockSynced: false });
+        alert(`Purchase updated but stock sync failed: ${stockErr.message}`);
+      }
+
+      onUpdated({ ...purchase, ...payload, globalStockSynced: globalStockSyncedOk });
+      alert('Purchase updated! ✅');
+    } catch (error) {
+      alert(`Update Error: ${error.message}`);
+    }
+    setLoading(false);
+  };
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, x: 50 }}
+      animate={{ opacity: 1, x: 0 }}
+      exit={{ opacity: 0, x: -50 }}
+      className="max-w-3xl mx-auto p-3 sm:p-4 pb-8"
+    >
+      <motion.button whileHover={{ x: -5 }} onClick={onBack}
+        className="mb-4 flex items-center gap-2 text-violet-400 font-bold text-sm">
+        <ArrowLeft size={20} /> Cancel Edit
+      </motion.button>
+
+      <motion.div initial={{ y: -20, opacity: 0 }} animate={{ y: 0, opacity: 1 }}
+        className="bg-gradient-to-b from-[#1e1e1e] to-[#181818] p-4 sm:p-6 rounded-2xl sm:rounded-3xl border border-white/5 mb-4 shadow-xl">
+        <h2 className="text-lg sm:text-xl font-bold mb-4 text-transparent bg-clip-text bg-gradient-to-r from-violet-400 to-fuchsia-500 flex items-center gap-2">
+          <Edit3 size={22} /> Edit Purchase Entry
+        </h2>
+
+        <div className="grid grid-cols-1 gap-3">
+          <div className="sm:max-w-xl">
+            <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">પ્રકાર *</label>
+            <select
+              className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-violet-500/50 transition-all text-sm appearance-none cursor-pointer"
+              value={form.purchaseSource}
+              onChange={(e) => setForm((prev) => ({ ...prev, purchaseSource: e.target.value }))}
+            >
+              <option value="">- પ્રકાર પસંદ કરો -</option>
+              <option value={PURCHASE_SOURCE_SHOP}>દુકાન માંથી ખરીદેલ માલ</option>
+              <option value={PURCHASE_SOURCE_KOTHAR_STOCK}>સ્વામિનારાયણ ધામ મુખ્ય કોઠાર સ્ટોક</option>
+            </select>
+          </div>
+
+          {form.purchaseSource === PURCHASE_SOURCE_SHOP && (
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <div className="sm:col-span-2 lg:col-span-2">
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Shop Name *</label>
+                <input
+                  list="edit-purchase-shop-datalist"
+                  autoComplete="off"
+                  className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-violet-500/50 transition-all text-sm"
+                  value={form.shopName}
+                  onChange={(e) => setForm((prev) => ({ ...prev, shopName: e.target.value }))}
+                  placeholder="દુકાનનું નામ"
+                />
+                <datalist id="edit-purchase-shop-datalist">
+                  {savedShopNames.map((name) => (
+                    <option key={name} value={name} />
+                  ))}
+                </datalist>
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Bill Number *</label>
+                <input
+                  className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-violet-500/50 transition-all text-sm"
+                  value={form.billNo}
+                  onChange={(e) => setForm((prev) => ({ ...prev, billNo: e.target.value }))}
+                  placeholder="બિલ નંબર"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Bill Date *</label>
+                <input
+                  type="date"
+                  className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-violet-500/50 transition-all text-sm"
+                  value={form.billDate}
+                  onChange={(e) => setForm((prev) => ({ ...prev, billDate: e.target.value }))}
+                />
+              </div>
+            </div>
+          )}
+
+          {form.purchaseSource === PURCHASE_SOURCE_KOTHAR_STOCK && (
+            <div className="grid grid-cols-1 gap-3 sm:max-w-xs">
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">તારીખ *</label>
+                <input
+                  type="date"
+                  className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-violet-500/50 transition-all text-sm"
+                  value={form.entryDate}
+                  onChange={(e) => setForm((prev) => ({ ...prev, entryDate: e.target.value }))}
+                />
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="mt-5 rounded-2xl border border-white/10 bg-white/5 overflow-hidden">
+          <div className="p-4 border-b border-white/10 flex items-center justify-between">
+            <p className="text-[11px] font-bold uppercase tracking-widest text-gray-500">Purchased Items</p>
+            <span className="text-xs text-violet-300 font-bold">{filledRows.length} rows filled</span>
+          </div>
+          <ItemsListSearchHint />
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-[#151515]">
+                <tr>
+                  <th className="p-3 text-left text-gray-500 font-bold text-xs uppercase w-10">No</th>
+                  <th className="p-3 text-left text-gray-500 font-bold text-xs uppercase">Item Name</th>
+                  <th className="p-3 text-center text-gray-500 font-bold text-xs uppercase w-32">માત્રા</th>
+                  <th className="p-3 w-10" />
+                </tr>
+              </thead>
+              <tbody>
+                {form.rows.map((row, index) => (
+                  <tr key={row.id} className={`border-t border-white/5 ${row.itemName ? 'bg-violet-500/5' : ''}`}>
+                    <td className="p-2 text-gray-500 text-center text-xs font-mono">{index + 1}</td>
+                    <td className="p-2">
+                      <ItemNameAutocompleteInput
+                        accent="violet"
+                        catalogItems={catalogItems}
+                        placeholder={`Item ${index + 1}...`}
+                        value={row.itemName}
+                        excludedNameKeys={form.rows
+                          .filter((entry) => entry.id !== row.id)
+                          .map((entry) => normalizeItemName(entry.itemName))
+                          .filter(Boolean)}
+                        onChange={(nextValue) => updateRow(row.id, 'itemName', nextValue)}
+                        onSelectItem={(item) => selectRowItem(row.id, item)}
+                      />
+                    </td>
+                    <td className="p-2">
+                      <CatalogStockQtyInput
+                        row={row}
+                        catalogItems={catalogItems}
+                        accent="violet"
+                        onQtyChange={(value) => updateRow(row.id, 'qty', value)}
+                      />
+                    </td>
+                    <td className="p-2 text-center">
+                      <motion.button whileTap={{ scale: 0.9 }} onClick={() => removeRow(row.id)}
+                        className="text-red-400/40 hover:text-red-400 transition-colors p-1 rounded">
+                        <X size={14} />
+                      </motion.button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="p-3 border-t border-white/5">
+            <motion.button whileHover={{ scale: 1.01 }} whileTap={{ scale: 0.98 }} onClick={addRow}
+              className="w-full p-3 bg-[#252525] hover:bg-[#2d2d2d] border border-dashed border-white/10 hover:border-violet-500/30 rounded-xl text-gray-400 hover:text-violet-400 font-bold text-sm flex items-center justify-center gap-2 transition-all">
+              <Plus size={16} /> Blank Row Umero
+            </motion.button>
+          </div>
+        </div>
+
+        <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={handleUpdate}
+          disabled={loading}
+          className="mt-5 w-full bg-gradient-to-r from-violet-500 to-fuchsia-600 text-white p-4 rounded-xl font-bold shadow-xl shadow-violet-500/20 flex items-center justify-center gap-2 text-sm sm:text-base disabled:opacity-50">
+          {loading ? <Loader2 size={18} className="animate-spin" /> : <CheckCircle size={18} />} Update Purchase Entry
+        </motion.button>
+      </motion.div>
+    </motion.div>
+  );
+}
+
 // --- EDIT ORDER SCREEN ---
-function EditOrderScreen({ order, onBack, catalogItems }) {
-  const centerInitial = useMemo(() => deriveEditableCenterFields(order.center), [order.center]);
+function EditOrderScreen({ order, onBack, catalogItems, centersList = centerData }) {
+  const centerInitial = useMemo(() => deriveEditableCenterFields(order.center, centersList), [order.center, centersList]);
   const [centerSelect, setCenterSelect] = useState(centerInitial.select);
   const [centerOther, setCenterOther] = useState(centerInitial.other);
   const [cart, setCart] = useState(order.items || []);
@@ -4516,17 +5506,14 @@ function EditOrderScreen({ order, onBack, catalogItems }) {
 
   const updateQuantity = (itemName, category, unit, qty) => {
     const existing = cart.find(i => normalizeItemName(i.name) === normalizeItemName(itemName));
-    const normalizedUnit = normalizeUnitForCategory(category, unit, unit);
-    const normalizedQty = clampQtyByCategory(category, qty);
-    if (normalizedQty > 0) {
+    const line = buildRequestCartLine(itemName, category, unit, qty, mergedCatalogItems);
+    if (line.qty > 0) {
       if (existing) {
         setCart(cart.map((i) => (
-          normalizeItemName(i.name) === normalizeItemName(itemName)
-            ? { ...i, name: itemName, category, unit: normalizedUnit, qty: normalizedQty }
-            : i
+          normalizeItemName(i.name) === normalizeItemName(itemName) ? { ...i, ...line } : i
         )));
       } else {
-        setCart([...cart, { name: itemName, category, unit: normalizedUnit, qty: normalizedQty }]);
+        setCart([...cart, line]);
       }
     } else { setCart(cart.filter(i => normalizeItemName(i.name) !== normalizeItemName(itemName))); }
   };
@@ -4538,8 +5525,13 @@ function EditOrderScreen({ order, onBack, catalogItems }) {
     const effectiveCenter = getResolvedCenterValue(centerSelect, centerOther);
     setLoading(true);
     try {
-      const { totalKg } = calculateTotals(cart);
-      await updateDoc(doc(db, "orders", order.id), { center: effectiveCenter, items: cart, totalKg });
+      const { totalKg } = calculateTotals(cart, mergedCatalogItems);
+      await updateDoc(doc(db, "orders", order.id), {
+        center: effectiveCenter,
+        centerFromOther: centerSelect === 'Other',
+        items: cart,
+        totalKg,
+      });
       alert("Updated Successfully! ✅");
       onBack();
     } catch (e) { alert("Error: " + e.message); }
@@ -4583,7 +5575,7 @@ function EditOrderScreen({ order, onBack, catalogItems }) {
             }}
           >
             <option value="">- Center Select Karo -</option>
-            {centerData.map((c) => (
+            {centersList.map((c) => (
               <option key={c.center} value={c.center}>{c.center}</option>
             ))}
           </select>
@@ -4681,17 +5673,25 @@ function EditOrderScreen({ order, onBack, catalogItems }) {
                     <div className="p-3 bg-[#151515] grid gap-2">
                       {isGheeTelCategory(category) && (
                         <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] font-bold text-amber-100">
-                          ૧ ડબ્બો = ૧૩ કિલોગ્રામ થશે, માટે આપે નીચેના બોક્સમાં ડબ્બાની સંખ્યા લખવી.
+                          ૧ ડબ્બો = ૧૩ કિલો થશે, માટે નીચેના બોક્સમાં ડબ્બાની સંખ્યા લખવી.
                         </div>
                       )}
                       {isColorCategory(category) && (
                         <div className="rounded-xl border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 text-[11px] font-bold text-emerald-100">
-                          નીચેની કોલમમાં બધી કિંમત ગ્રામમાં જ ઉમેરાશે, તેથી જો કિલોગ્રામમાં મંગાવવું હોય તો તેને ગ્રામમાં ફેરવીને જ દાખલ કરવું.
+                          કલર માટે બધી જ માત્રા ગ્રામમાં જ દાખલ કરવી. કિલોમાં મંગાવવું હોય તો પહેલા ગ્રામમાં ફેરવીને લખો.
                         </div>
                       )}
                       {items.map((item, itemIndex) => {
                         const inCart = cart.find(c => normalizeItemName(c.name) === item.nameKey);
-                        const telKg = isGheeTelCategory(category) ? ((parseFloat(inCart?.qty) || 0) * TEL_DABBA_KG) : 0;
+                        const lineUnit = inCart?.unit || resolveCatalogItemUnit(item);
+                        const unitLabel = getUnitShortLabel(lineUnit, item);
+                        const showSteppers = isColorCategory(category) || isGheeTelCategory(category)
+                          || isGramUnit(lineUnit) || isGheeTelBulkUnit(lineUnit)
+                          || (item.unitToKgFactor && item.unitToKgFactor !== 1);
+                        const showKgPreview = isGheeTelBulkUnit(lineUnit)
+                          || (item.unitToKgFactor && item.unitToKgFactor !== 1)
+                          || (inCart?.unitToKgFactor && inCart.unitToKgFactor !== 1);
+                        const secondaryKg = convertItemQtyToKg(inCart?.qty, lineUnit, mergedCatalogItems, { name: item.name, ...inCart });
                         return (
                           <motion.div 
                             key={item.name}
@@ -4702,7 +5702,7 @@ function EditOrderScreen({ order, onBack, catalogItems }) {
                           >
                             <span className="text-sm text-gray-300 font-medium flex-1">{item.name}</span>
                             <div className="flex items-center gap-2 sm:gap-3">
-                              {(isColorCategory(category) || isGheeTelCategory(category)) && inCart && (
+                              {showSteppers && inCart && (
                                 <motion.button
                                   initial={{ scale: 0 }}
                                   animate={{ scale: 1 }}
@@ -4721,9 +5721,9 @@ function EditOrderScreen({ order, onBack, catalogItems }) {
                                 onChange={(e) => updateQuantity(item.name, category, inCart?.unit || item.unit, e.target.value)} 
                               />
                               <span className="text-[10px] text-gray-500 font-bold w-9 text-center uppercase">
-                                {isGheeTelCategory(category) ? 'TIN' : (isColorCategory(category) ? 'GM' : 'KG')}
+                                {unitLabel}
                               </span>
-                              {(isColorCategory(category) || isGheeTelCategory(category)) && (
+                              {showSteppers && (
                                 <motion.button
                                   whileTap={{ scale: 0.9 }}
                                   onClick={() => updateQuantity(item.name, category, inCart?.unit || item.unit, (parseFloat(inCart?.qty) || 0) + 1)}
@@ -4732,16 +5732,16 @@ function EditOrderScreen({ order, onBack, catalogItems }) {
                                   <Plus size={14} />
                                 </motion.button>
                               )}
-                              {isGheeTelCategory(category) && (
+                              {showKgPreview && (
                                 <div className="hidden sm:flex items-center gap-2">
                                   <input
                                     readOnly
                                     tabIndex={-1}
-                                    value={inCart ? String(telKg) : ''}
+                                    value={inCart ? String(roundKg2(secondaryKg)) : ''}
                                     placeholder="0"
                                     className="w-20 p-2 bg-[#1f1f1f] border border-white/10 rounded-lg text-center text-white font-black text-sm outline-none"
                                   />
-                                  <span className="text-[10px] text-gray-500 font-bold uppercase">KG</span>
+                                  <span className="text-[10px] text-gray-500 font-bold">{UNIT_KG}</span>
                                 </div>
                               )}
                             </div>
@@ -4782,17 +5782,23 @@ function EditOrderScreen({ order, onBack, catalogItems }) {
 }
 
 // --- EDIT SEND ORDER SCREEN ---
-function EditSendOrderScreen({ order, onBack, catalogItems }) {
-  const fromCenterInitial = useMemo(() => deriveEditableCenterFields(order.fromCenter), [order.fromCenter]);
+function EditSendOrderScreen({ order, onBack, catalogItems, centersList = centerData }) {
+  const fromCenterInitial = useMemo(() => deriveEditableCenterFields(order.fromCenter, centersList), [order.fromCenter, centersList]);
   const [fromCenterSelect, setFromCenterSelect] = useState(fromCenterInitial.select);
   const [fromCenterOther, setFromCenterOther] = useState(fromCenterInitial.other);
   const mergedCatalogItems = mergeCatalogItemsWithExisting(catalogItems, order.items || []);
-  const [rows, setRows] = useState(createRowsFromItems(order.items || [], 5));
+  const [rows, setRows] = useState(() => createRowsFromItems(order.items || [], 5, mergedCatalogItems));
   const [loading, setLoading] = useState(false);
   const catalogNameKeys = new Set(mergedCatalogItems.map((item) => item.nameKey));
   const resolvedFromCenter = getResolvedCenterValue(fromCenterSelect, fromCenterOther);
 
-  const updateRow = (id, field, value) => setRows(prev => prev.map(r => r.id === id ? { ...r, [field]: value } : r));
+  const updateRow = (id, field, value) => {
+    const patch = field === 'kg' ? { qty: value } : { [field]: value };
+    setRows((prev) => patchStockRow(prev, id, patch, mergedCatalogItems));
+  };
+  const selectRowItem = (id, item) => {
+    setRows((prev) => patchStockRow(prev, id, { itemName: item.name }, mergedCatalogItems));
+  };
   const addRow = () => {
     setRows(prev => [...prev, createEmptyItemRow(getNextRowId(prev))]);
   };
@@ -4811,7 +5817,13 @@ function EditSendOrderScreen({ order, onBack, catalogItems }) {
       const totalKg = roundKg2(filledRows.reduce((sum, r) => sum + (parseFloat(r.kg) || 0), 0));
       await updateDoc(doc(db, 'send-orders', order.id), {
         fromCenter: effectiveFromCenter,
-        items: filledRows.map((row) => ({ itemName: row.itemName.trim(), kg: row.kg })),
+        fromCenterFromOther: fromCenterSelect === 'Other',
+        items: filledRows.map((row) => ({
+          itemName: row.itemName.trim(),
+          qty: row.qty,
+          unit: row.unit,
+          kg: row.kg,
+        })),
         totalKg,
       });
       alert('Updated Successfully! ✅');
@@ -4849,7 +5861,7 @@ function EditSendOrderScreen({ order, onBack, catalogItems }) {
             }}
           >
             <option value="">- Center Select Karo -</option>
-            {centerData.map((c) => (
+            {centersList.map((c) => (
               <option key={c.center} value={c.center}>{c.center}</option>
             ))}
           </select>
@@ -4904,14 +5916,13 @@ function EditSendOrderScreen({ order, onBack, catalogItems }) {
                   .map((entry) => normalizeItemName(entry.itemName))
                   .filter(Boolean)}
                 onChange={(nextValue) => updateRow(row.id, 'itemName', nextValue)}
-                onSelectItem={(item) => updateRow(row.id, 'itemName', item.name)}
+                onSelectItem={(item) => selectRowItem(row.id, item)}
               />
-              <input
-                type="number"
-                        placeholder="KG"
-                value={row.kg}
-                onChange={e => updateRow(row.id, 'kg', e.target.value)}
-                className="p-2.5 bg-[#252525] border border-white/10 rounded-xl text-white text-sm outline-none focus:border-blue-500/50 transition-all placeholder-gray-600 text-center"
+              <CatalogStockQtyInput
+                row={row}
+                catalogItems={mergedCatalogItems}
+                accent="blue"
+                onQtyChange={(value) => updateRow(row.id, 'qty', value)}
               />
               <motion.button whileTap={{ scale: 0.9 }} onClick={() => removeRow(row.id)}
                 className="p-2 bg-red-500/10 hover:bg-red-500/20 text-red-400 rounded-xl transition-all border border-red-500/20">
@@ -4947,11 +5958,11 @@ function EditSendOrderScreen({ order, onBack, catalogItems }) {
 }
 
 // --- USER HUB ---
-function UserHub({ user, catalogItems }) {
+function UserHub({ user, catalogItems, centersList = centerData }) {
   const [section, setSection] = useState(null);
 
-  if (section === 'request') return <UserDashboard user={user} onBack={() => setSection(null)} catalogItems={catalogItems} />;
-  if (section === 'send') return <SendDashboard user={user} onBack={() => setSection(null)} catalogItems={catalogItems} />;
+  if (section === 'request') return <UserDashboard user={user} onBack={() => setSection(null)} catalogItems={catalogItems} centersList={centersList} />;
+  if (section === 'send') return <SendDashboard user={user} onBack={() => setSection(null)} catalogItems={catalogItems} centersList={centersList} />;
 
   return (
     <motion.div
@@ -5032,7 +6043,7 @@ function UserHub({ user, catalogItems }) {
 }
 
 // --- SEND DASHBOARD ---
-function SendDashboard({ user, onBack, catalogItems }) {
+function SendDashboard({ user, onBack, catalogItems, centersList = centerData }) {
   const INITIAL_ROWS = 15;
   const [step, setStep] = useState('form');
   const [chalanLoading, setChalanLoading] = useState(true);
@@ -5047,7 +6058,7 @@ function SendDashboard({ user, onBack, catalogItems }) {
     globalId: '',
     email: '',
   });
-  const [rows, setRows] = useState(createRowsFromItems([], INITIAL_ROWS));
+  const [rows, setRows] = useState(() => createRowsFromItems([], INITIAL_ROWS, catalogItems));
   const [loading, setLoading] = useState(false);
   const catalogNameKeys = new Set(catalogItems.map((item) => item.nameKey));
 
@@ -5070,7 +6081,13 @@ function SendDashboard({ user, onBack, catalogItems }) {
     });
   }, []);
 
-  const updateRow = (id, field, value) => setRows(prev => prev.map(r => r.id === id ? { ...r, [field]: value } : r));
+  const updateRow = (id, field, value) => {
+    const patch = field === 'kg' ? { qty: value } : { [field]: value };
+    setRows((prev) => patchStockRow(prev, id, patch, catalogItems));
+  };
+  const selectRowItem = (id, item) => {
+    setRows((prev) => patchStockRow(prev, id, { itemName: item.name }, catalogItems));
+  };
   const addRow = () => {
     setRows(prev => [...prev, createEmptyItemRow(getNextRowId(prev))]);
   };
@@ -5099,6 +6116,7 @@ function SendDashboard({ user, onBack, catalogItems }) {
         chalanNo: formData.chalanNo,
         date: formData.date,
         fromCenter: effectiveCenter,
+        fromCenterFromOther: formData.fromCenter === 'Other',
         toCenter: 'Swaminarayan Dham Center',
         senderName: formData.senderName.trim(),
         mobileNumber: formData.mobileNumber.trim(),
@@ -5107,8 +6125,11 @@ function SendDashboard({ user, onBack, catalogItems }) {
         email: formData.email.trim(),
         items: filledRows.map((row) => ({
           itemName: row.itemName.trim(),
+          qty: row.qty,
+          unit: row.unit,
           kg: row.kg,
         })),
+        totalKg: roundKg2(filledRows.reduce((sum, row) => sum + (parseFloat(row.kg) || 0), 0)),
         timestamp: new Date(),
         submittedBy: user.username,
       };
@@ -5221,7 +6242,7 @@ function SendDashboard({ user, onBack, catalogItems }) {
                 <tr>
                   <th className="p-3 text-left text-gray-400 font-bold text-xs uppercase w-10">No</th>
                   <th className="p-3 text-left text-gray-400 font-bold text-xs uppercase">Item Name</th>
-                            <th className="p-3 text-center text-gray-400 font-bold text-xs uppercase w-20">KG</th>
+                            <th className="p-3 text-center text-gray-400 font-bold text-xs uppercase w-32">માત્રા</th>
                 </tr>
               </thead>
               <tbody>
@@ -5229,7 +6250,12 @@ function SendDashboard({ user, onBack, catalogItems }) {
                   <tr key={row.id} className="border-t border-white/5">
                     <td className="p-3 text-gray-500 text-center text-xs">{i + 1}</td>
                     <td className="p-3 font-medium text-white">{row.itemName}</td>
-                    <td className="p-3 text-center font-bold text-blue-400">{row.kg || '-'}</td>
+                    <td className="p-3 text-center font-bold text-blue-400">
+                      {row.qty || '-'} <span className="text-[10px] text-gray-500 font-bold">{row.unit}</span>
+                      {getUnitToKgFactor(row.unit, row) !== 1 && row.kg && (
+                        <span className="block text-[10px] text-gray-500">= {formatMetric(row.kg)} {UNIT_KG}</span>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -5275,7 +6301,7 @@ function SendDashboard({ user, onBack, catalogItems }) {
             <select required className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none text-sm appearance-none cursor-pointer"
               value={formData.fromCenter} onChange={e => setFormData(p => ({ ...p, fromCenter: e.target.value }))}>
               <option value="">- Center Select Karo -</option>
-              {centerData.map(c => <option key={c.center} value={c.center}>{c.center}</option>)}
+              {centersList.map(c => <option key={c.center} value={c.center}>{c.center}</option>)}
             </select>
           </div>
           {formData.fromCenter === 'Other' && (
@@ -5334,7 +6360,7 @@ function SendDashboard({ user, onBack, catalogItems }) {
               <tr>
                 <th className="p-3 text-left text-gray-500 font-bold text-xs uppercase w-10">No</th>
                 <th className="p-3 text-left text-gray-500 font-bold text-xs uppercase">Item Name</th>
-                <th className="p-3 text-center text-gray-500 font-bold text-xs uppercase w-20">KG</th>
+                <th className="p-3 text-center text-gray-500 font-bold text-xs uppercase w-32">માત્રા</th>
                 <th className="p-3 w-10"></th>
               </tr>
             </thead>
@@ -5353,14 +6379,15 @@ function SendDashboard({ user, onBack, catalogItems }) {
                         .map((entry) => normalizeItemName(entry.itemName))
                         .filter(Boolean)}
                       onChange={(nextValue) => updateRow(row.id, 'itemName', nextValue)}
-                      onSelectItem={(item) => updateRow(row.id, 'itemName', item.name)}
+                      onSelectItem={(item) => selectRowItem(row.id, item)}
                     />
                   </td>
                   <td className="p-2">
-                    <input type="number" min="0"
-                      className="w-full p-2 bg-[#252525] border border-white/5 rounded-lg text-white outline-none focus:border-blue-500/50 text-sm text-center transition-all"
-                      placeholder="0" value={row.kg}
-                      onChange={e => updateRow(row.id, 'kg', e.target.value)}
+                    <CatalogStockQtyInput
+                      row={row}
+                      catalogItems={catalogItems}
+                      accent="blue"
+                      onQtyChange={(value) => updateRow(row.id, 'qty', value)}
                     />
                   </td>
                   <td className="p-2 text-center">
@@ -5392,7 +6419,7 @@ function SendDashboard({ user, onBack, catalogItems }) {
 }
 
 // --- USER DASHBOARD ---
-function UserDashboard({ user, onBack = null, catalogItems }) {
+function UserDashboard({ user, onBack = null, catalogItems, centersList = centerData }) {
   const [formData, setFormData] = useState({
     chalanNo: '',
     date: new Date().toISOString().split('T')[0],
@@ -5437,17 +6464,14 @@ function UserDashboard({ user, onBack = null, catalogItems }) {
 
   const updateQuantity = (itemName, category, unit, qty) => {
     const existing = cart.find(i => normalizeItemName(i.name) === normalizeItemName(itemName));
-    const normalizedUnit = normalizeUnitForCategory(category, unit, unit);
-    const normalizedQty = clampQtyByCategory(category, qty);
-    if (normalizedQty > 0) {
+    const line = buildRequestCartLine(itemName, category, unit, qty, catalogItems);
+    if (line.qty > 0) {
       if (existing) {
         setCart(cart.map((i) => (
-          normalizeItemName(i.name) === normalizeItemName(itemName)
-            ? { ...i, name: itemName, category, unit: normalizedUnit, qty: normalizedQty }
-            : i
+          normalizeItemName(i.name) === normalizeItemName(itemName) ? { ...i, ...line } : i
         )));
       } else {
-        setCart([...cart, { name: itemName, category, unit: normalizedUnit, qty: normalizedQty }]);
+        setCart([...cart, line]);
       }
     } else { setCart(cart.filter(i => normalizeItemName(i.name) !== normalizeItemName(itemName))); }
   };
@@ -5455,10 +6479,11 @@ function UserDashboard({ user, onBack = null, catalogItems }) {
   const handleConfirmSubmit = async () => {
     setLoading(true);
     try {
-      const { totalKg } = calculateTotals(cart);
+      const { totalKg } = calculateTotals(cart, catalogItems);
       const payload = {
         ...formData,
         center: formData.center === 'Other' ? formData.centerOther.trim() : formData.center,
+        centerFromOther: formData.center === 'Other',
         senderName: formData.senderName.trim(),
         mobileNumber: formData.mobileNumber.trim(),
         post: formData.post.trim(),
@@ -5483,7 +6508,7 @@ function UserDashboard({ user, onBack = null, catalogItems }) {
               item_id: normalizeItemName(item.name),
               itemName: item.name,
               transaction_type: 'OUT',
-              quantity: toSafeTxQuantity(convertItemQtyToKg(item.qty, item.unit)),
+              quantity: toSafeTxQuantity(convertItemQtyToKg(item.qty, item.unit, catalogItems, item)),
               transaction_date: normalizeDateOnly(payload.date),
               created_at: payload.timestamp,
               autoSynced: true,
@@ -5558,7 +6583,7 @@ function UserDashboard({ user, onBack = null, catalogItems }) {
                 required
               >
                 <option value="">- Center Select Karo -</option>
-                {centerData.map(c => <option key={c.center} value={c.center}>{c.center}</option>)}
+                {centersList.map(c => <option key={c.center} value={c.center}>{c.center}</option>)}
               </select>
             </div>
             {formData.center === 'Other' && (
@@ -5684,17 +6709,25 @@ function UserDashboard({ user, onBack = null, catalogItems }) {
                     <div className="p-3 sm:p-4 bg-[#151515] grid gap-2 sm:gap-3">
                       {isGheeTelCategory(category) && (
                         <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] font-bold text-amber-100">
-                          ૧ ડબ્બો = ૧૩ કિલોગ્રામ થશે, માટે આપે નીચેના બોક્સમાં ડબ્બાની સંખ્યા લખવી.
+                          ૧ ડબ્બો = ૧૩ કિલો થશે, માટે નીચેના બોક્સમાં ડબ્બાની સંખ્યા લખવી.
                         </div>
                       )}
                       {isColorCategory(category) && (
                         <div className="rounded-xl border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 text-[11px] font-bold text-emerald-100">
-                          નીચેની કોલમમાં બધી કિંમત ગ્રામમાં જ ઉમેરાશે, તેથી જો કિલોગ્રામમાં મંગાવવું હોય તો તેને ગ્રામમાં ફેરવીને જ દાખલ કરવું.
+                          કલર માટે બધી જ માત્રા ગ્રામમાં જ દાખલ કરવી. કિલોમાં મંગાવવું હોય તો પહેલા ગ્રામમાં ફેરવીને લખો.
                         </div>
                       )}
                       {items.map((item, itemIndex) => {
                         const inCart = cart.find(c => normalizeItemName(c.name) === item.nameKey);
-                        const telKg = isGheeTelCategory(category) ? ((parseFloat(inCart?.qty) || 0) * TEL_DABBA_KG) : 0;
+                        const lineUnit = inCart?.unit || resolveCatalogItemUnit(item);
+                        const unitLabel = getUnitShortLabel(lineUnit, item);
+                        const showSteppers = isColorCategory(category) || isGheeTelCategory(category)
+                          || isGramUnit(lineUnit) || isGheeTelBulkUnit(lineUnit)
+                          || (item.unitToKgFactor && item.unitToKgFactor !== 1);
+                        const showKgPreview = isGheeTelBulkUnit(lineUnit)
+                          || (item.unitToKgFactor && item.unitToKgFactor !== 1)
+                          || (inCart?.unitToKgFactor && inCart.unitToKgFactor !== 1);
+                        const secondaryKg = convertItemQtyToKg(inCart?.qty, lineUnit, catalogItems, { name: item.name, ...inCart });
                         return (
                           <motion.div 
                             key={item.name}
@@ -5705,7 +6738,7 @@ function UserDashboard({ user, onBack = null, catalogItems }) {
                           >
                             <span className="text-sm text-gray-300 font-medium flex-1">{item.name}</span>
                             <div className="flex items-center gap-2 sm:gap-3">
-                              {(isColorCategory(category) || isGheeTelCategory(category)) && inCart && (
+                              {showSteppers && inCart && (
                                 <motion.button
                                   initial={{ scale: 0 }}
                                   animate={{ scale: 1 }}
@@ -5724,9 +6757,9 @@ function UserDashboard({ user, onBack = null, catalogItems }) {
                                 onChange={(e) => updateQuantity(item.name, category, inCart?.unit || item.unit, e.target.value)} 
                               />
                               <span className="text-[10px] text-gray-500 font-bold w-9 text-center uppercase">
-                                {isGheeTelCategory(category) ? 'TIN' : (isColorCategory(category) ? 'GM' : 'KG')}
+                                {unitLabel}
                               </span>
-                              {(isColorCategory(category) || isGheeTelCategory(category)) && (
+                              {showSteppers && (
                                 <motion.button
                                   whileTap={{ scale: 0.9 }}
                                   onClick={() => updateQuantity(item.name, category, inCart?.unit || item.unit, (parseFloat(inCart?.qty) || 0) + 1)}
@@ -5735,16 +6768,16 @@ function UserDashboard({ user, onBack = null, catalogItems }) {
                                   <Plus size={14} />
                                 </motion.button>
                               )}
-                              {isGheeTelCategory(category) && (
+                              {showKgPreview && (
                                 <div className="hidden sm:flex items-center gap-2">
                                   <input
                                     readOnly
                                     tabIndex={-1}
-                                    value={inCart ? String(telKg) : ''}
+                                    value={inCart ? String(roundKg2(secondaryKg)) : ''}
                                     placeholder="0"
                                     className="w-20 p-2 bg-[#1f1f1f] border border-white/10 rounded-lg text-center text-white font-black text-sm outline-none"
                                   />
-                                  <span className="text-[10px] text-gray-500 font-bold uppercase">KG</span>
+                                  <span className="text-[10px] text-gray-500 font-bold">{UNIT_KG}</span>
                                 </div>
                               )}
                             </div>
@@ -5791,7 +6824,7 @@ function UserDashboard({ user, onBack = null, catalogItems }) {
   }
 
   if (step === 'review') {
-    const totals = calculateTotals(cart);
+    const totals = calculateTotals(cart, catalogItems);
     return (
       <motion.div 
         initial={{ opacity: 0, x: 50 }}
@@ -5846,9 +6879,9 @@ function UserDashboard({ user, onBack = null, catalogItems }) {
                     <td className="p-3 sm:p-4 text-right font-black text-white">
                       {item.qty}{' '}
                       <span className="text-[10px] text-gray-500 uppercase font-bold">{item.unit}</span>
-                      {normalizeQuantityUnit(item.unit) === UNIT_DABBA && (
+                      {getUnitToKgFactor(item.unit, item) !== 1 && (
                         <span className="ml-2 text-[10px] text-gray-400 font-bold">
-                          (= {formatMetric(convertItemQtyToKg(item.qty, item.unit))} KG)
+                          (= {formatMetric(convertItemQtyToKg(item.qty, item.unit, catalogItems, item))} {UNIT_KG})
                         </span>
                       )}
                     </td>
@@ -5998,6 +7031,7 @@ function SingleOrderView({ orderId, onBack }) {
   }
 
   return (
+    <>
     <motion.div 
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
@@ -6042,6 +7076,8 @@ function SingleOrderView({ orderId, onBack }) {
         </div>
       </motion.div>
     </motion.div>
+    <PdfDownloadWaitOverlay active={pdfLoading} kind="request" />
+    </>
   );
 }
 
@@ -6092,6 +7128,7 @@ function SingleSendOrderView({ orderId, onBack }) {
   }
 
   return (
+    <>
     <motion.div
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
@@ -6150,6 +7187,8 @@ function SingleSendOrderView({ orderId, onBack }) {
         </div>
       </motion.div>
     </motion.div>
+    <PdfDownloadWaitOverlay active={pdfLoading} kind="send" />
+    </>
   );
 }
 
@@ -6208,6 +7247,7 @@ function SinglePurchaseView({ purchaseId, onBack }) {
   }
 
   return (
+    <>
     <motion.div
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
@@ -6284,6 +7324,8 @@ function SinglePurchaseView({ purchaseId, onBack }) {
         </div>
       </motion.div>
     </motion.div>
+    <PdfDownloadWaitOverlay active={pdfLoading} kind="purchase" />
+    </>
   );
 }
 
@@ -6365,6 +7407,7 @@ function SingleReportView({ reportId, onBack }) {
   }
 
   return (
+    <>
     <motion.div
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
@@ -6418,6 +7461,8 @@ function SingleReportView({ reportId, onBack }) {
         </motion.div>
       </div>
     </motion.div>
+    <PdfDownloadWaitOverlay active={pdfLoading || shareLoading} kind="report" />
+    </>
   );
 }
 

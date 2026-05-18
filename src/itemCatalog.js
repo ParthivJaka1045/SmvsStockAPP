@@ -3,7 +3,7 @@ import { categories } from './data';
 export const ITEM_COLLECTION = 'items';
 export const ITEM_CATEGORY_COLLECTION = 'item-categories';
 
-export const DEFAULT_ITEM_UNITS = ['કિલો', 'ગ્રામ', 'લીટર'];
+export const DEFAULT_ITEM_UNITS = ['કિલો', 'ગ્રામ', 'લીટર', 'ડબ્બો'];
 
 export const normalizeItemName = (value) => (
   (value || '')
@@ -14,6 +14,28 @@ export const normalizeItemName = (value) => (
 );
 
 export const buildItemNameKey = (value) => normalizeItemName(value);
+
+/** itemUnits સાથે circular import ન થાય — એક જ લોજિક અહીં. */
+const resolveCatalogItemUnitLocal = (item) => {
+  const unit = (item?.unit || '').toString().trim();
+  const category = (item?.category || 'અન્ય').toString().trim();
+  const catKey = normalizeItemName(category);
+  if (unit) {
+    const unitKey = normalizeItemName(unit);
+    if (
+      catKey === normalizeItemName('ઘી-તેલ')
+      && (
+        unitKey === normalizeItemName('ડબ્બા')
+        || unitKey === normalizeItemName('ડબ્બો')
+        || unitKey === normalizeItemName('ટીન')
+      )
+    ) return 'ડબ્બો';
+    return unit;
+  }
+  if (catKey === normalizeItemName('ઘી-તેલ')) return 'ડબ્બો';
+  if (catKey === normalizeItemName('કલર')) return 'ગ્રામ';
+  return 'કિલો';
+};
 
 const gujaratiToLatinMap = {
   'અ': 'a', 'આ': 'aa', 'ઇ': 'i', 'ઈ': 'ii', 'ઉ': 'u', 'ઊ': 'uu', 'ઋ': 'r', 'એ': 'e', 'ઐ': 'ai', 'ઓ': 'o', 'ઔ': 'au',
@@ -59,15 +81,24 @@ export const matchesSearchText = (text, query) => {
   );
 };
 
-export const createCatalogItem = (item, index = 0) => ({
-  id: item.id || `static-${index}-${buildItemNameKey(item.name) || 'item'}`,
-  name: (item.name || '').toString().trim(),
-  nameKey: buildItemNameKey(item.name),
-  category: (item.category || 'અન્ય').toString().trim(),
-  unit: (item.unit || 'કિલો').toString().trim(),
-  is_active: item.is_active !== false,
-  source: item.source || 'firebase',
-});
+export const createCatalogItem = (item, index = 0) => {
+  const unit = resolveCatalogItemUnitLocal(item);
+  const unitToKgFactor = item.unitToKgFactor != null && item.unitToKgFactor !== ''
+    ? parseFloat(item.unitToKgFactor)
+    : null;
+  return {
+    id: item.id || `static-${index}-${buildItemNameKey(item.name) || 'item'}`,
+    name: (item.name || '').toString().trim(),
+    nameKey: buildItemNameKey(item.name),
+    category: (item.category || 'અન્ય').toString().trim(),
+    unit,
+    globalUnitId: (item.globalUnitId || '').toString().trim() || null,
+    unitToKgFactor: Number.isFinite(unitToKgFactor) && unitToKgFactor > 0 ? unitToKgFactor : null,
+    isCustomUnit: item.isCustomUnit === true || Boolean((item.globalUnitId || '').toString().trim()),
+    is_active: item.is_active !== false,
+    source: item.source || 'firebase',
+  };
+};
 
 export const getStaticCatalogItems = () => (
   Object.entries(categories).flatMap(([category, items]) => (
@@ -139,4 +170,10 @@ export const getCatalogCategoryOptions = (items = []) => (
 export const ensureCatalogItems = (items = []) => {
   const prepared = items.map((item, index) => createCatalogItem(item, index)).filter((item) => item.name);
   return sortCatalogItems(dedupeCatalogItems(prepared));
+};
+
+export const findCatalogItemByName = (catalogItems, name) => {
+  const key = buildItemNameKey(name);
+  return catalogItems.find((item) => item.nameKey === key)
+    || catalogItems.find((item) => item.name.toLowerCase() === (name || '').toString().trim().toLowerCase());
 };

@@ -1,5 +1,8 @@
-const PDF_SERVICE_BASE_URL = 'https://pdf-api-qlc3.onrender.com/api/pdfs';
-
+const PDF_SERVICE_BASE_URL = (
+  typeof import.meta.env.VITE_PDF_SERVICE_BASE_URL === 'string' && import.meta.env.VITE_PDF_SERVICE_BASE_URL.trim()
+    ? import.meta.env.VITE_PDF_SERVICE_BASE_URL.trim()
+    : 'https://smvs-stock-api.onrender.com/api/pdfs'
+).replace(/\/+$/, '');
 const extractErrorMessage = async (response) => {
   const fallback = `PDF service error (${response.status})`;
   const contentType = response.headers.get('content-type') || '';
@@ -45,4 +48,8 @@ export const generateDispatchPDFBlob = (order) => postPdf('/dispatch', order);
 
 export const generatePurchasePDFBlob = (purchase) => postPdf('/purchase', purchase);
 
+/**
+ * Monthly/yearly stock report PDF — Java pdf-service (`POST .../monthly-report`), portrait A4.
+ * Optional `VITE_PDF_SERVICE_BASE_URL` overrides the default API root.
+ */
 export const generateSummaryReportPDFBlob = (report) => postPdf('/monthly-report', report);

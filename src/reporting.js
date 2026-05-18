@@ -1,9 +1,19 @@
 import { getFallbackCatalogItems } from './itemCatalog';
+import {
+  convertKgToUnitQty,
+  convertQtyToKg,
+  resolveCatalogItemUnit,
+  UNIT_KG,
+} from './itemUnits';
 
 const isLegacyStockReportTitle = (title) => /SMVS/i.test(title) || /MONTHLY STOCK REPORT/i.test(title);
 
-export const deriveStockReportTitle = (report) =>
-  (report?.reportPeriod === 'yearly' ? 'Yearly Report' : 'Monthly Report');
+export const deriveStockReportTitle = (report) => {
+  if (report?.reportPeriod === 'yearly') return 'Yearly Report';
+  if (report?.stockViewMode === 'month_movements_only') return 'Monthly Report (ચાલુ મહિનો)';
+  if (report?.stockViewMode === 'full_balance') return 'Monthly Report (પૂર્ણ સ્ટોક)';
+  return 'Monthly Report';
+};
 
 export const formatYearLabel = (monthValue) => {
   const year = (monthValue || '').toString().slice(0, 4);
@@ -261,13 +271,11 @@ const purchaseMatchesReportCenterScope = () => true;
 
 const getSendItemValue = (item) => safeNumber(item?.kg);
 
-const getRequestItemValue = (item) => {
-  const qty = safeNumber(item?.qty);
-  const unit = normalizeText(item?.unit);
-  if (unit === normalizeText('ડબ્બા')) return qty * 13;
-  if (unit === normalizeText('ગ્રામ')) return qty / 1000;
-  return qty;
-};
+const getRequestItemValue = (item) =>
+  convertQtyToKg(item?.qty, item?.unit, {
+    unit: item?.unit,
+    unitToKgFactor: item?.unitToKgFactor,
+  });
 
 const getPurchaseItemValue = (item) => safeNumber(item?.kg);
 
@@ -335,26 +343,28 @@ const getOpeningStockByItemFromHistory = ({
   const openingByItem = new Map();
   if (!rangeStartDate) return openingByItem;
   const startMonth = monthValueFromIsoDate(rangeStartDate);
-  const previousMonth = getPreviousMonthValue(startMonth);
-  const monthlyLookup = buildMonthlyClosingLookup(monthlyClosingStock);
+  const latestCloseByItem = new Map();
 
-  const itemsInWindow = new Set(
-    txRows
-      .filter((entry) => entry.dateIso >= rangeStartDate)
-      .map((entry) => normalizeText(entry.itemName)),
-  );
+  monthlyClosingStock
+    .filter((entry) => !entry?.is_deleted)
+    .forEach((entry) => {
+      const month = (entry.month || entry.monthValue || '').toString().trim();
+      if (!month || month >= startMonth) return;
+      const itemName = (entry.itemName || entry.item_id || '').toString().trim();
+      if (!itemName) return;
+      const key = normalizeText(itemName);
+      const prev = latestCloseByItem.get(key);
+      if (!prev || month > prev.month) {
+        latestCloseByItem.set(key, {
+          month,
+          kg: roundMetric(entry.closingStock ?? entry.closing_qty),
+          displayName: itemName,
+        });
+      }
+    });
 
-  const snapshotBackedKeys = new Set();
-
-  itemsInWindow.forEach((itemKey) => {
-    const fromSnapshot = monthlyLookup.get(`${previousMonth}__${itemKey}`);
-    if (fromSnapshot) {
-      openingByItem.set(itemKey, {
-        kg: roundMetric(fromSnapshot.closingStock),
-        displayName: fromSnapshot.itemName,
-      });
-      snapshotBackedKeys.add(itemKey);
-    }
+  latestCloseByItem.forEach((snap, key) => {
+    openingByItem.set(key, { kg: snap.kg, displayName: snap.displayName });
   });
 
   txRows
@@ -362,7 +372,11 @@ const getOpeningStockByItemFromHistory = ({
     .forEach((entry) => {
       const key = normalizeText(entry.itemName);
       if (!key) return;
-      if (snapshotBackedKeys.has(key)) return;
+      const snap = latestCloseByItem.get(key);
+      if (snap) {
+        const txMonth = monthValueFromIsoDate(entry.dateIso);
+        if (txMonth && txMonth <= snap.month) return;
+      }
       const prev = openingByItem.get(key) || { kg: 0, displayName: entry.itemName };
       openingByItem.set(key, {
         kg: roundMetric(prev.kg + getSignedTransactionQuantity(entry)),
@@ -371,6 +385,87 @@ const getOpeningStockByItemFromHistory = ({
     });
 
   return openingByItem;
+};
+
+export const getTodayIsoDate = () => getTodayDateValue();
+
+/**
+ * Live physical stock for one item through asOfDate (kg ledger).
+ * Formula: carry-forward (prev months) + month IN to date − month OUT to date.
+ */
+export const computeItemPhysicalBalance = ({
+  itemName = '',
+  asOfDate = '',
+  monthValue = '',
+  stockTransactions = [],
+  monthlyClosingStock = [],
+  catalogItem = null,
+  globalUnit = null,
+  scope = 'all',
+  center = '',
+}) => {
+  const trimmedName = (itemName || '').toString().trim();
+  const itemKey = normalizeText(trimmedName);
+  if (!itemKey) {
+    return {
+      itemName: '-',
+      openingKg: 0,
+      periodInKg: 0,
+      periodOutKg: 0,
+      balanceKg: 0,
+      balanceInUnit: 0,
+      unit: UNIT_KG,
+      asOfDate: asOfDate || getTodayDateValue(),
+      month: monthValue || getMonthValueFromDate(new Date()),
+    };
+  }
+
+  const month = getNormalizedMonthValue(monthValue || asOfDate || new Date());
+  const resolvedDate = ensureDateInMonth(month, asOfDate || getTodayDateValue());
+  const rangeStart = getMonthStartDate(month);
+  const normalizedScope = scope === 'center' ? 'center' : 'all';
+  const normalizedCenter = (center || '').toString().trim();
+
+  const allTx = normalizeHistoryTransactions(stockTransactions).filter((entry) =>
+    matchesCenterFilter(entry.centerName, normalizedScope, normalizedCenter),
+  );
+
+  const itemTx = allTx.filter((entry) => normalizeText(entry.itemName) === itemKey);
+
+  const openingMap = getOpeningStockByItemFromHistory({
+    txRows: allTx,
+    monthlyClosingStock,
+    rangeStartDate: rangeStart,
+  });
+  const openingKg = roundMetric(openingMap.get(itemKey)?.kg ?? 0);
+
+  let periodInKg = 0;
+  let periodOutKg = 0;
+  itemTx
+    .filter((entry) => entry.dateIso >= rangeStart && entry.dateIso <= resolvedDate)
+    .forEach((entry) => {
+      if (entry.transactionType === 'OUT') {
+        periodOutKg = roundMetric(periodOutKg + entry.quantity);
+      } else {
+        periodInKg = roundMetric(periodInKg + entry.quantity);
+      }
+    });
+
+  const balanceKg = roundMetric(openingKg + periodInKg - periodOutKg);
+  const unit = resolveCatalogItemUnit(catalogItem || { unit: UNIT_KG });
+  const balanceInUnit = convertKgToUnitQty(balanceKg, unit, catalogItem, globalUnit);
+
+  return {
+    itemName: openingMap.get(itemKey)?.displayName || trimmedName,
+    openingKg,
+    periodInKg,
+    periodOutKg,
+    balanceKg,
+    balanceInUnit,
+    unit,
+    asOfDate: resolvedDate,
+    month,
+  };
 };
 
 export const buildMonthlyClosingSnapshots = ({
@@ -414,6 +509,20 @@ export const isLockedPastMonth = (monthValue, selectedDate = '') => {
   return !!selectedMonth && monthValue < selectedMonth;
 };
 
+export const getCurrentMonthValue = () => getMonthValueFromDate(new Date());
+
+export const isCurrentCalendarMonth = (monthValue) => {
+  if (!/^\d{4}-\d{2}$/.test(monthValue || '')) return false;
+  return monthValue === getCurrentMonthValue();
+};
+
+/**
+ * Single-month reports: past/closed months = full opening+IN balance; current running month = period IN only.
+ */
+export const resolveReportStockViewMode = (monthValue) => (
+  isCurrentCalendarMonth(monthValue) ? 'month_movements_only' : 'full_balance'
+);
+
 export const buildSummaryReportFromSnapshots = ({
   snapshots = [],
   month = '',
@@ -442,7 +551,7 @@ export const buildSummaryReportFromSnapshots = ({
         monthLabel,
         income: roundMetric(isMonthOnly ? inward : opening + inward),
         outgoing: roundMetric(outward),
-        totalStock: roundMetric(closing),
+        totalStock: roundMetric(isMonthOnly ? inward - outward : closing),
       };
     })
     .sort((left, right) => left.itemName.localeCompare(right.itemName));
@@ -458,7 +567,7 @@ export const buildSummaryReportFromSnapshots = ({
     centerLabel: normalizedScope === 'center' && normalizedCenter ? normalizedCenter : 'All Centers / Full Report',
     rangeLabel: getRangeLabel(ensureDateInMonth(normalizedMonth, selectedDate), normalizedMonth, reportPeriod),
     reportPeriod: 'monthly',
-    title: deriveStockReportTitle({ reportPeriod: 'monthly' }),
+    title: deriveStockReportTitle({ reportPeriod: 'monthly', stockViewMode }),
     createdBy,
     generatedAt: new Date(),
     generatedAtIso: new Date().toISOString(),
@@ -513,6 +622,7 @@ export const hydrateReport = (report) => {
         totalStock: roundMetric(
           row.totalStock ?? (safeNumber(row.income) - safeNumber(row.outgoing)),
         ),
+        displayUnit: (row.displayUnit || row.unit || '').toString().trim() || undefined,
       }))
     : buildLegacyRows(report, monthLabel);
 
@@ -627,9 +737,7 @@ export const buildSummaryReport = ({
       );
   const isMonthMovementsOnly = stockViewMode === 'month_movements_only';
   if (!isMonthMovementsOnly) {
-    openingByItem.forEach(({ kg, displayName }, normKey) => {
-      void normKey;
-      if (safeNumber(kg) === 0) return;
+    openingByItem.forEach(({ kg, displayName }) => {
       addMovement(rowMap, displayName, monthLabel, 'income', kg);
     });
   }
@@ -694,21 +802,15 @@ export const buildSummaryReport = ({
   let finalRowMap = rowMap;
   if (isMonthMovementsOnly) {
     const merged = new Map();
-    const allKeys = new Set([...rowMap.keys(), ...openingByItem.keys()]);
-    allKeys.forEach((key) => {
-      const op = openingByItem.get(key);
-      const openingKg = op ? roundMetric(safeNumber(op.kg)) : 0;
-      const row = rowMap.get(key);
-      const displayName = (row?.itemName || op?.displayName || key || '-').toString().trim() || '-';
-      const periodIn = row ? safeNumber(row.income) : 0;
-      const periodOut = row ? safeNumber(row.outgoing) : 0;
-      const totalStock = roundMetric(openingKg + periodIn - periodOut);
+    rowMap.forEach((row, key) => {
+      const periodIn = safeNumber(row.income);
+      const periodOut = safeNumber(row.outgoing);
       merged.set(key, {
-        itemName: displayName,
+        itemName: (row.itemName || key || '-').toString().trim() || '-',
         monthLabel,
         income: roundMetric(periodIn),
         outgoing: roundMetric(periodOut),
-        totalStock,
+        totalStock: roundMetric(periodIn - periodOut),
       });
     });
     finalRowMap = merged;
@@ -733,7 +835,10 @@ export const buildSummaryReport = ({
         ? `From ${formatDisplayDate(rangeStartDate)} to ${formatDisplayDate(rangeEndDate)}`
         : getRangeLabel(normalizedSelectedDate, normalizedMonth, normalizedReportPeriod),
     reportPeriod: normalizedReportPeriod,
-    title: deriveStockReportTitle({ reportPeriod: normalizedReportPeriod }),
+    title: deriveStockReportTitle({
+      reportPeriod: normalizedReportPeriod,
+      stockViewMode: isMonthMovementsOnly ? 'month_movements_only' : 'full_balance',
+    }),
     createdBy,
     generatedAt: new Date(),
     generatedAtIso: new Date().toISOString(),
