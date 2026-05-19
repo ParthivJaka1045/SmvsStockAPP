@@ -1,0 +1,18 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: smvs-web
+    ports:
+      - "80:80"
+    restart: unless-stopped
+
+  pdf-service:
+    build:
+      context: ./pdf-service
+      dockerfile: Dockerfile
+    container_name: smvs-pdf-service
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
