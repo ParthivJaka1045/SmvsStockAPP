@@ -7054,7 +7054,7 @@ function UserDashboard({ user, onBack = null, catalogItems, centersList = center
                     <div className="p-3 sm:p-4 bg-[#151515] grid gap-2 sm:gap-3">
                       {isGheeTelCategory(category) && (
                         <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] font-bold text-amber-100">
-                          ૧ ડબ્બો = ૧૩ કિલો થશે, માટે નીચેના બોક્સમાં ડબ્બાની સંખ્યા લખવી.
+                          ૧ ડબ્બો = ૧૫ કિલો થશે, માટે નીચેના બોક્સમાં ડબ્બાની સંખ્યા લખવી.
                         </div>
                       )}
                       {isColorCategory(category) && (
