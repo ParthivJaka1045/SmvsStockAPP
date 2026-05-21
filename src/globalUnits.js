@@ -70,7 +70,8 @@ export const findGlobalUnitByName = (units, name) => {
     || units.find((u) => normalizeItemName(u.name) === normalizeItemName(name));
 };
 
-export const STANDARD_UNIT_OPTIONS = ['કિલો', 'ગ્રામ', 'લીટર', 'ડબ્બો'];
+/** ડબ્બો સ્ટાન્ડર્ડ યાદીમાં નથી — જરૂર હોય તો ગ્લોબલ કસ્ટમ યુનિટથી ઉમેરો. */
+export const STANDARD_UNIT_OPTIONS = ['કિલો', 'ગ્રામ', 'લીટર'];
 
 export const buildUnitDropdownOptions = (globalUnits = []) => {
   const globalNames = globalUnits.map((u) => u.name).filter(Boolean);

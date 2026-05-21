@@ -85,6 +85,7 @@ import {
   getReportFileName,
   hydrateReport,
 } from './reporting';
+import { fetchLockedMonthValues, isoDateToMonthValue, isMonthLocked } from './monthLocks';
 import {
   generateDispatchPDFBlob as generateSendPDFBlobReliable,
   generatePurchasePDFBlob,
@@ -241,6 +242,7 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [catalogItems, setCatalogItems] = useState(getFallbackCatalogItems);
+  const [hubGlobalUnits, setHubGlobalUnits] = useState([]);
   const [centersList, setCentersList] = useState(() => mergeCenterLists(centerData, []));
   const directOrderId = initialRoute.directOrderId;
   const directSendOrderId = initialRoute.directSendOrderId;
@@ -283,6 +285,12 @@ function App() {
   useEffect(() => {
     refreshCenters();
   }, [refreshCenters]);
+
+  useEffect(() => {
+    fetchGlobalUnits()
+      .then(setHubGlobalUnits)
+      .catch(() => setHubGlobalUnits([]));
+  }, []);
 
   const handleLogin = async (e) => {
     e.preventDefault();
@@ -463,7 +471,9 @@ function App() {
         )}
       </AnimatePresence>
 
-      {view === 'dashboard' && <UserHub user={user} catalogItems={catalogItems} centersList={centersList} />}
+      {view === 'dashboard' && (
+        <UserHub user={user} catalogItems={catalogItems} centersList={centersList} globalUnits={hubGlobalUnits} />
+      )}
       {view === 'admin' && (
         <AdminDashboard
           user={user}
@@ -545,18 +555,26 @@ const findCatalogItemByName = (catalogItems, name) => (
   || catalogItems.find((entry) => normalizeItemName(entry.name) === normalizeItemName(name))
 );
 
-const convertItemQtyToKg = (qty, unit, catalogItems = [], line = null) => {
-  const catalogItem = line?.name ? findCatalogItemByName(catalogItems, line.name) : null;
-  return convertQtyToKg(qty, unit, catalogItem || line);
+const convertItemQtyToKg = (qty, unit, catalogItems = [], line = null, globalUnits = []) => {
+  const lineName = (line?.name || line?.itemName || '').toString().trim();
+  const catalogItem = lineName ? findCatalogItemByName(catalogItems, lineName) : null;
+  const globalUnit = catalogItem?.globalUnitId && Array.isArray(globalUnits)
+    ? globalUnits.find((u) => u.id === catalogItem.globalUnitId) || null
+    : null;
+  return convertQtyToKg(qty, unit, catalogItem || line, globalUnit);
 };
 
-const buildRequestCartLine = (itemName, category, unit, qty, catalogItems) => {
+const buildRequestCartLine = (itemName, category, unit, qty, catalogItems, globalUnits = []) => {
   const catalogItem = findCatalogItemByName(catalogItems, itemName);
+  const globalUnit = catalogItem?.globalUnitId && Array.isArray(globalUnits)
+    ? globalUnits.find((u) => u.id === catalogItem.globalUnitId) || null
+    : null;
   const normalizedUnit = normalizeUnitForLine(category, unit, catalogItem);
   const normalizedQty = clampQtyByCategory(category, qty);
-  const factor = getUnitToKgFactor(normalizedUnit, catalogItem);
+  const factor = getUnitToKgFactor(normalizedUnit, catalogItem, globalUnit);
   const line = { name: itemName, category, unit: normalizedUnit, qty: normalizedQty };
   if (factor !== 1) line.unitToKgFactor = factor;
+  if (catalogItem?.globalUnitId) line.globalUnitId = catalogItem.globalUnitId;
   return line;
 };
 
@@ -587,12 +605,12 @@ const canSubmitStockEntryDate = (entryDate) => {
   return today.getDate() <= MONTH_CLOSE_GRACE_DAYS;
 };
 
-const calculateTotals = (items, catalogItems = []) => {
+const calculateTotals = (items, catalogItems = [], globalUnits = []) => {
   let totalQty = 0;
   let totalKg = 0;
   items.forEach((item) => {
     totalQty += parseFloat(item.qty) || 0;
-    totalKg += convertItemQtyToKg(item.qty, item.unit, catalogItems, item);
+    totalKg += convertItemQtyToKg(item.qty, item.unit, catalogItems, item, globalUnits);
   });
   return {
     totalItems: items.length,
@@ -616,7 +634,7 @@ const createEmptyItemRow = (id) => ({
 
 const getNextRowId = (rows = []) => Math.max(0, ...rows.map((row) => row.id || 0)) + 1;
 
-const syncStockRowQtyKg = (row, catalogItems) => {
+const syncStockRowQtyKg = (row, catalogItems, globalUnits = []) => {
   const catalogItem = findCatalogItemByName(catalogItems, row.itemName);
   const unit = (row.unit || resolveCatalogItemUnit(catalogItem || {})).toString().trim();
   const qtyRaw = row.qty !== undefined && row.qty !== '' ? row.qty : row.kg;
@@ -625,14 +643,15 @@ const syncStockRowQtyKg = (row, catalogItems) => {
   }
   const meta = {
     name: row.itemName,
+    itemName: row.itemName,
     unit,
     unitToKgFactor: catalogItem?.unitToKgFactor ?? row.unitToKgFactor,
   };
-  const kg = roundKg2(convertItemQtyToKg(qtyRaw, unit, catalogItems, meta));
+  const kg = roundKg2(convertItemQtyToKg(qtyRaw, unit, catalogItems, meta, globalUnits));
   return { ...row, unit, qty: String(qtyRaw), kg: String(kg) };
 };
 
-const patchStockRow = (rows, id, patch, catalogItems) => rows.map((row) => {
+const patchStockRow = (rows, id, patch, catalogItems, globalUnits = []) => rows.map((row) => {
   if (row.id !== id) return row;
   let next = { ...row, ...patch };
   if (patch.itemName !== undefined) {
@@ -647,20 +666,24 @@ const patchStockRow = (rows, id, patch, catalogItems) => rows.map((row) => {
     }
   }
   if (patch.itemName !== undefined || patch.qty !== undefined || patch.unit !== undefined) {
-    next = syncStockRowQtyKg(next, catalogItems);
+    next = syncStockRowQtyKg(next, catalogItems, globalUnits);
   }
   return next;
 });
 
-function CatalogStockQtyInput({ row, catalogItems, accent = 'blue', onQtyChange }) {
+function CatalogStockQtyInput({ row, catalogItems, globalUnits = [], accent = 'blue', onQtyChange }) {
   const catalogItem = findCatalogItemByName(catalogItems, row.itemName);
+  const globalUnit = catalogItem?.globalUnitId && Array.isArray(globalUnits)
+    ? globalUnits.find((u) => u.id === catalogItem.globalUnitId) || null
+    : null;
   const unit = (row.unit || (row.itemName?.trim() ? resolveCatalogItemUnit(catalogItem || {}) : '')).toString();
-  const factor = unit ? getUnitToKgFactor(unit, catalogItem) : 1;
+  const factor = unit ? getUnitToKgFactor(unit, catalogItem, globalUnit) : 1;
   const showKgHint = factor !== 1 && row.qty;
   const focusBorder = {
     blue: 'focus:border-blue-500/50',
     violet: 'focus:border-violet-500/50',
     fuchsia: 'focus:border-fuchsia-500/50',
+    pink: 'focus:border-pink-500/50',
   }[accent] || 'focus:border-blue-500/50';
 
   return (
@@ -690,7 +713,7 @@ function CatalogStockQtyInput({ row, catalogItems, accent = 'blue', onQtyChange 
   );
 }
 
-const createRowsFromItems = (items = [], minRows = 1, catalogItems = []) => {
+const createRowsFromItems = (items = [], minRows = 1, catalogItems = [], globalUnits = []) => {
   const filledRows = items.map((item, index) => {
     const name = item.itemName || item.name || '';
     const catalogItem = findCatalogItemByName(catalogItems, name);
@@ -698,7 +721,10 @@ const createRowsFromItems = (items = [], minRows = 1, catalogItems = []) => {
     const kgStored = parseFloat(item.kg);
     let qty = item.qty != null && item.qty !== '' ? item.qty : '';
     if (qty === '' && Number.isFinite(kgStored) && kgStored > 0) {
-      const factor = getUnitToKgFactor(unit, catalogItem);
+      const globalUnit = catalogItem?.globalUnitId && Array.isArray(globalUnits)
+      ? globalUnits.find((u) => u.id === catalogItem.globalUnitId) || null
+      : null;
+    const factor = getUnitToKgFactor(unit, catalogItem, globalUnit);
       qty = factor !== 1 ? roundKg2(kgStored / factor) : kgStored;
     } else if (qty === '' && item.qty == null) {
       qty = item.kg || '';
@@ -710,7 +736,7 @@ const createRowsFromItems = (items = [], minRows = 1, catalogItems = []) => {
       unit,
       kg: item.kg != null ? String(item.kg) : '',
     };
-    return syncStockRowQtyKg(base, catalogItems);
+    return syncStockRowQtyKg(base, catalogItems, globalUnits);
   });
 
   const totalRows = Math.max(minRows, filledRows.length || 0);
@@ -806,7 +832,7 @@ const makeMonthlyClosingDocId = (monthValue, itemKey) =>
 const makeStockSnapshotDocId = (monthValue, itemKey, centerKey = 'all') =>
   `${encodeURIComponent((monthValue || '').toString())}__${encodeURIComponent((centerKey || 'all').toString())}__${encodeURIComponent((itemKey || '').toString())}`;
 
-const buildStockTransactionsFromDocuments = ({ orders = [], sendOrders = [], purchases = [], catalogItems = [] }) => {
+const buildStockTransactionsFromDocuments = ({ orders = [], sendOrders = [], purchases = [], catalogItems = [], globalUnits = [] }) => {
   const transactions = [];
 
   purchases
@@ -874,7 +900,7 @@ const buildStockTransactionsFromDocuments = ({ orders = [], sendOrders = [], pur
       const items = Array.isArray(order.items) ? order.items : [];
       items.forEach((item, lineIndex) => {
         const itemName = (item?.name || '').trim();
-        const quantity = toSafeTxQuantity(convertItemQtyToKg(item?.qty, item?.unit, catalogItems, item));
+        const quantity = toSafeTxQuantity(convertItemQtyToKg(item?.qty, item?.unit, catalogItems, item, globalUnits));
         if (!itemName || !txDate || !quantity) return;
         transactions.push({
           id: makeStockTransactionDocId('order', order.id, lineIndex, 'OUT'),
@@ -898,7 +924,15 @@ const buildStockTransactionsFromDocuments = ({ orders = [], sendOrders = [], pur
   return transactions;
 };
 
-async function syncStockHistoryFromPrimaryCollections(catalogItems = []) {
+async function syncStockHistoryFromPrimaryCollections(catalogItems = [], globalUnits = null) {
+  let units = globalUnits;
+  if (!Array.isArray(units)) {
+    try {
+      units = await fetchGlobalUnits();
+    } catch {
+      units = [];
+    }
+  }
   const [ordersSnapshot, sendSnapshot, purchaseSnapshot, existingTxSnapshot] = await Promise.all([
     getDocs(collection(db, 'orders')),
     getDocs(collection(db, 'send-orders')),
@@ -914,6 +948,7 @@ async function syncStockHistoryFromPrimaryCollections(catalogItems = []) {
     sendOrders: allSendOrders,
     purchases: allPurchases,
     catalogItems,
+    globalUnits: units,
   });
 
   const activeIdSet = new Set(nextTransactions.map((entry) => entry.id));
@@ -1044,6 +1079,14 @@ async function applyGlobalStockKgDelta(items = [], deltaMultiplier = 1) {
 const getPurchaseResolvedSource = (purchase) => {
   if (purchase?.purchaseSource === PURCHASE_SOURCE_KOTHAR_STOCK) return PURCHASE_SOURCE_KOTHAR_STOCK;
   return PURCHASE_SOURCE_SHOP;
+};
+
+const getPurchaseLockMonthValue = (purchase) => {
+  const src = getPurchaseResolvedSource(purchase);
+  const raw = src === PURCHASE_SOURCE_KOTHAR_STOCK
+    ? (purchase?.date || purchase?.entryDate)
+    : (purchase?.billDate || purchase?.date);
+  return isoDateToMonthValue(normalizeDateOnly(raw));
 };
 
 const getPurchaseFileName = (purchase) => {
@@ -1205,19 +1248,9 @@ function ReportPreviewContent({ report }) {
       <div className={`rounded-3xl border ${uiTheme.border} bg-gradient-to-r ${uiTheme.soft} p-6 sm:p-8`}>
         <div className="flex flex-col gap-4">
           <div>
-            <h2 className="mt-0 text-3xl sm:text-4xl font-black text-slate-900 tracking-tight">{preparedReport.title}</h2>
-            <p className="mt-2 text-[13px] sm:text-sm text-slate-600">
-              Stock movements for the selected range. All amounts in the table are in kilograms (KG), as indicated in the column headers.
-            </p>
-            {isMonthOnlyView ? (
-              <p className="mt-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] font-bold text-amber-900">
-                મોડ: ફક્ત આ મહિનાની IN/OUT; Net Stock = પિરિયડ IN − OUT (ગયા મહિનાનું closing સામેલ નથી).
-              </p>
-            ) : preparedReport.reportPeriod === 'monthly' && (
-              <p className="mt-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-[12px] font-bold text-blue-900">
-                મોડ: પૂર્ણ સ્ટોક — Income = ખુલ્લી + પિરિયડ IN (ગયા મહિનાની ભરતી સહિત).
-              </p>
-            )}
+            <h2 className="mt-0 text-3xl sm:text-4xl font-black text-slate-900 tracking-tight">
+              SMVS {preparedReport.title}
+            </h2>
           </div>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
             <PreviewInfoCard label={periodLabel} value={preparedReport.monthLabel} />
@@ -1229,7 +1262,10 @@ function ReportPreviewContent({ report }) {
 
       <div className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
         <div className={`border-b ${uiTheme.border} bg-gradient-to-r ${uiTheme.soft} px-4 py-3`}>
-          <h3 className={`text-sm font-black uppercase tracking-widest ${uiTheme.text}`}>Stock table</h3>
+          <h3 className={`text-sm font-black uppercase tracking-widest ${uiTheme.text}`}>Stock table (આઇટમ વાઈઝ)</h3>
+          <p className="mt-1 text-[11px] text-slate-600">
+            નીચે દરેક આઇટમનો ક્લોઝિંગ/નેટ સ્ટોક — ટોટલ સારાંશ સાથે મેળ ખાય છે.
+          </p>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full min-w-[640px] text-sm">
@@ -1261,6 +1297,15 @@ function ReportPreviewContent({ report }) {
           </table>
         </div>
       </div>
+
+      {preparedReport.rows.length > 0 && (
+        <p className="text-[11px] text-slate-500 text-center">
+          આઇટમ વાઈઝ સ્ટોક કુલ: {formatMetric(
+            preparedReport.rows.reduce((s, r) => s + (parseFloat(r.totalStock) || 0), 0),
+          )}{' '}
+          {UNIT_KG} · સારાંશ ટોટલ: {formatMetric(preparedReport.summary.totalStock)} {UNIT_KG}
+        </p>
+      )}
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <ReportSummaryCard labelLines={['Items']} value={formatMetric(preparedReport.summary.totalRows)} />
@@ -1336,6 +1381,7 @@ function ItemNameAutocompleteInput({
     blue: 'focus:border-blue-500/50',
     violet: 'focus:border-violet-500/50',
     fuchsia: 'focus:border-fuchsia-500/50',
+    pink: 'focus:border-pink-500/50',
   }[accent] || 'focus:border-blue-500/50';
 
   return (
@@ -1488,7 +1534,264 @@ function PdfDownloadWaitOverlay({ active, kind }) {
   );
 }
 
-function CenterAdminPanel({ centersList, refreshCenters }) {
+/** Admin nav tab — original soft pill style (low contrast) */
+function AdminNavTab({
+  active,
+  activeClass,
+  hoverClass,
+  icon: Icon,
+  children,
+  count,
+  onClick,
+}) {
+  return (
+    <motion.button
+      type="button"
+      whileTap={{ scale: 0.97 }}
+      onClick={onClick}
+      className={`py-3 rounded-2xl font-bold text-sm uppercase tracking-wide flex items-center justify-center gap-2 transition-all border lg:col-span-2 ${
+        active
+          ? activeClass
+          : `bg-[#1e1e1e] text-gray-400 border-white/10 ${hoverClass}`
+      }`}
+    >
+      <Icon size={16} />
+      {children}
+      {count != null && count !== '' && (
+        <span className={`text-[10px] px-2 py-0.5 rounded-full font-black ${active ? 'bg-white/20' : 'bg-white/10'}`}>
+          {count}
+        </span>
+      )}
+    </motion.button>
+  );
+}
+
+/** Others tab + અંદરના બંને પેનલ — એક જ pink થીમ */
+const OTHERS_PINK = {
+  border: 'border-pink-500/20',
+  borderPanel: 'border-pink-500/20',
+  label: 'text-pink-300',
+  labelStrong: 'text-pink-200',
+  focus: 'focus:border-pink-500/50',
+  btn: 'from-pink-500 to-rose-600 shadow-pink-500/20',
+  softBtn: 'border-pink-500/20 bg-pink-500/10 text-pink-200 hover:bg-pink-500/20',
+  rowHi: 'bg-pink-500/10',
+  metric: 'text-pink-300',
+  surface: 'bg-pink-500/5',
+};
+
+function PhysicalStockAdjustmentPanel({
+  adjustmentForm,
+  setAdjustmentForm,
+  adjustmentTargetMonthLocked,
+  catalogItems,
+  globalUnits,
+  adjustmentKgPreview,
+  handleAdjustmentSelectItem,
+  handlePhysicalAdjustmentSubmit,
+  adjustmentSubmitting,
+  fetchPhysicalAdjustments,
+  adjustmentListLoading,
+  adjustmentEntries,
+  handleEditPhysicalAdjustment,
+  handleDeletePhysicalAdjustment,
+  adjustmentDeletingId,
+  lockedMonths,
+  getPhysicalEntryLockMonth,
+}) {
+  return (
+    <motion.div
+      initial={{ y: -12, opacity: 0 }}
+      animate={{ y: 0, opacity: 1 }}
+      className={`rounded-2xl sm:rounded-3xl border ${OTHERS_PINK.borderPanel} bg-gradient-to-b from-[#1e1e1e] to-[#181818] p-4 sm:p-6`}
+    >
+      <p className={`text-[11px] font-bold uppercase tracking-widest ${OTHERS_PINK.labelStrong}`}>Physical stock adjustment</p>
+      <p className="mt-1 text-xs text-gray-500">ફિઝિકલ ગણતરી સુધારો — રિપોર્ટમાં kg જાય.</p>
+      {adjustmentTargetMonthLocked && (
+        <p className="mt-2 rounded-xl border border-amber-500/35 bg-amber-500/10 px-3 py-2 text-xs font-bold text-amber-100">
+          આ તારીખનો મહિનો લોક છે — નવી/એડિટ એડજસ્ટમેન્ટ માટે લોક થયા પછીના મહિનાની તારીખ પસંદ કરો.
+        </p>
+      )}
+      <div className="mt-4 space-y-4">
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-[minmax(140px,180px)_1fr]">
+          <div>
+            <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-500">તારીખ *</label>
+            <input
+              type="date"
+              className="w-full p-2.5 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-pink-500/50 text-sm"
+              value={adjustmentForm.date}
+              onChange={(e) => setAdjustmentForm((prev) => ({ ...prev, date: e.target.value }))}
+            />
+          </div>
+          <div>
+            <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-500">Item name *</label>
+            <ItemNameAutocompleteInput
+              accent="pink"
+              catalogItems={catalogItems}
+              placeholder="માસ્ટર લિસ્ટમાંથી શોધો / પસંદ કરો…"
+              value={adjustmentForm.itemName}
+              excludedNameKeys={[]}
+              onChange={(nextValue) => setAdjustmentForm((prev) => ({
+                ...prev,
+                itemName: nextValue,
+                unit: nextValue.trim() ? prev.unit : '',
+                qty: '',
+              }))}
+              onSelectItem={handleAdjustmentSelectItem}
+            />
+          </div>
+        </div>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <div>
+            <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-500">માત્રા *</label>
+            <CatalogStockQtyInput
+              row={{
+                itemName: adjustmentForm.itemName,
+                qty: adjustmentForm.qty,
+                unit: adjustmentForm.unit,
+                kg: adjustmentKgPreview !== '' ? String(adjustmentKgPreview) : '',
+              }}
+              catalogItems={catalogItems}
+              globalUnits={globalUnits}
+                    accent="pink"
+                    onQtyChange={(value) => setAdjustmentForm((prev) => ({ ...prev, qty: value }))}
+                  />
+                </div>
+                <div>
+                  <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-500">કિલો (રિપોર્ટ)</label>
+            <input
+              readOnly
+              tabIndex={-1}
+              className="w-full p-2.5 bg-[#1a1a1a] border border-white/10 rounded-xl text-white font-black text-sm text-center outline-none cursor-not-allowed"
+              placeholder="—"
+              value={adjustmentKgPreview !== '' ? formatMetric(adjustmentKgPreview) : ''}
+            />
+          </div>
+          <div>
+            <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-500">દિશા</label>
+            <select
+                    className="w-full p-2.5 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-pink-500/50 text-sm"
+                    value={adjustmentForm.direction}
+              onChange={(e) => setAdjustmentForm((prev) => ({ ...prev, direction: e.target.value }))}
+            >
+              <option value="OUT">Minus (OUT)</option>
+              <option value="IN">Plus (IN)</option>
+            </select>
+          </div>
+          <div>
+            <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-500">કારણ</label>
+            <select
+                    className="w-full p-2.5 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-pink-500/50 text-sm"
+                    value={adjustmentForm.reason}
+              onChange={(e) => setAdjustmentForm((prev) => ({ ...prev, reason: e.target.value }))}
+            >
+              <option value="Shrinkage">Shrinkage</option>
+              <option value="Damage">Damage</option>
+              <option value="Missing">Missing</option>
+              <option value="Found / Correction">Found / Correction</option>
+            </select>
+          </div>
+        </div>
+        <div>
+          <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-500">Remark</label>
+          <input
+            className="w-full p-2.5 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-pink-500/50 text-sm"
+            placeholder="Optional note"
+            value={adjustmentForm.remark}
+            onChange={(e) => setAdjustmentForm((prev) => ({ ...prev, remark: e.target.value }))}
+          />
+        </div>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2">
+        <motion.button
+          whileHover={{ scale: 1.02 }}
+          whileTap={{ scale: 0.98 }}
+          onClick={handlePhysicalAdjustmentSubmit}
+          disabled={adjustmentSubmitting || adjustmentTargetMonthLocked}
+          className={`bg-gradient-to-r ${OTHERS_PINK.btn} text-white px-5 py-3 rounded-xl font-bold text-sm uppercase tracking-wide shadow-lg disabled:opacity-50`}
+        >
+          {adjustmentSubmitting ? 'Saving...' : (adjustmentForm.id ? 'Update entry' : 'Save adjustment entry')}
+        </motion.button>
+        {adjustmentForm.id && (
+          <button
+            type="button"
+            onClick={() => setAdjustmentForm(createDefaultAdjustmentForm())}
+            className="rounded-xl border border-white/10 bg-white/5 px-5 py-3 text-sm font-bold uppercase text-gray-300 hover:bg-white/10"
+          >
+            Cancel edit
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={fetchPhysicalAdjustments}
+          disabled={adjustmentListLoading}
+          className={`rounded-xl border px-4 py-3 text-xs font-bold uppercase disabled:opacity-50 inline-flex items-center gap-1 ${OTHERS_PINK.softBtn}`}
+        >
+          <RefreshCw size={14} className={adjustmentListLoading ? 'animate-spin' : ''} />
+          Refresh
+        </button>
+      </div>
+      <div className="mt-4 rounded-xl border border-white/10 bg-[#151515] overflow-hidden">
+        <div className="px-3 py-2 border-b border-white/10 flex justify-between items-center">
+          <p className="text-[10px] font-bold uppercase tracking-widest text-gray-500">Adjustment entries</p>
+          <span className={`text-[10px] font-bold ${OTHERS_PINK.metric}`}>{adjustmentEntries.length}</span>
+        </div>
+        {adjustmentListLoading ? (
+          <p className="p-4 text-center text-sm text-gray-500">Loading…</p>
+        ) : adjustmentEntries.length === 0 ? (
+          <p className="p-4 text-center text-sm text-gray-500">કોઈ એન્ટ્રી નથી.</p>
+        ) : (
+          <div className="max-h-[28rem] overflow-y-auto custom-scroll">
+            <table className="w-full text-xs">
+              <thead className="bg-[#252525] sticky top-0">
+                <tr>
+                  <th className="p-2 text-left text-gray-500 font-bold uppercase">Date</th>
+                  <th className="p-2 text-left text-gray-500 font-bold uppercase">Item</th>
+                  <th className="p-2 text-center text-gray-500 font-bold uppercase">Qty</th>
+                  <th className="p-2 text-center text-gray-500 font-bold uppercase">KG</th>
+                  <th className="p-2 text-center text-gray-500 font-bold uppercase">±</th>
+                  <th className="p-2 w-16" />
+                </tr>
+              </thead>
+              <tbody>
+                {adjustmentEntries.map((entry) => {
+                  const entryMonthLocked = isMonthLocked(getPhysicalEntryLockMonth(entry), lockedMonths);
+                  return (
+                    <tr key={entry.id} className={`border-t border-white/5 ${adjustmentForm.id === entry.id ? OTHERS_PINK.rowHi : ''}`}>
+                      <td className="p-2 text-gray-400 whitespace-nowrap">{formatDisplayDate(entry.transaction_date)}</td>
+                      <td className="p-2 font-medium text-white">{entry.itemName}</td>
+                      <td className="p-2 text-center text-gray-300">
+                        {formatMetric(entry.entry_qty)} <span className="text-[9px] text-gray-500">{entry.entry_unit}</span>
+                      </td>
+                      <td className={`p-2 text-center font-bold ${OTHERS_PINK.metric}`}>{formatMetric(entry.quantity)}</td>
+                      <td className="p-2 text-center">
+                        <span className={entry.transaction_type === 'IN' ? 'text-green-400 font-bold' : 'text-red-400 font-bold'}>
+                          {entry.transaction_type}
+                        </span>
+                      </td>
+                      <td className="p-2">
+                        <div className="flex justify-end gap-1">
+                          <button type="button" onClick={() => handleEditPhysicalAdjustment(entry)} disabled={entryMonthLocked} className="p-1.5 rounded-lg text-blue-400 hover:bg-blue-500/10 disabled:opacity-30 disabled:cursor-not-allowed" title={entryMonthLocked ? 'લોક થયેલો મહિનો' : 'Edit'}>
+                            <Edit3 size={14} />
+                          </button>
+                          <button type="button" onClick={() => handleDeletePhysicalAdjustment(entry)} disabled={adjustmentDeletingId === entry.id || entryMonthLocked} className="p-1.5 rounded-lg text-red-400 hover:bg-red-500/10 disabled:opacity-50" title={entryMonthLocked ? 'લોક થયેલો મહિનો' : 'Delete'}>
+                            {adjustmentDeletingId === entry.id ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </motion.div>
+  );
+}
+
+function CenterAdminPanel({ centersList, refreshCenters, embedded = false }) {
   const [form, setForm] = useState({ id: null, center: '' });
   const [saving, setSaving] = useState(false);
 
@@ -1537,10 +1840,10 @@ function CenterAdminPanel({ centersList, refreshCenters }) {
   };
 
   return (
-    <div className="mt-6 rounded-2xl border border-cyan-500/20 bg-cyan-500/5 p-4 sm:p-5">
+    <div className={`${embedded ? '' : 'mt-6 '}rounded-2xl border ${OTHERS_PINK.borderPanel} ${OTHERS_PINK.surface} p-4 sm:p-5`}>
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <p className="text-[11px] font-bold uppercase tracking-widest text-cyan-300">Center Manager</p>
+          <p className={`text-[11px] font-bold uppercase tracking-widest ${OTHERS_PINK.labelStrong}`}>Center Manager</p>
           <p className="mt-1 text-sm text-gray-300">સેન્ટર ઉમેરો — બધા ડ્રોપડાઉનમાં ગ્લોબલી દેખાશે.</p>
         </div>
         {form.id && (
@@ -1552,7 +1855,7 @@ function CenterAdminPanel({ centersList, refreshCenters }) {
 
       <form onSubmit={handleSubmit} className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-[1fr_auto]">
         <input
-          className="p-3 bg-[#252525] border border-white/10 rounded-xl text-white text-sm outline-none focus:border-cyan-500/50"
+          className={`p-3 bg-[#252525] border border-white/10 rounded-xl text-white text-sm outline-none ${OTHERS_PINK.focus}`}
           placeholder="Center name *"
           value={form.center}
           onChange={(e) => setForm((prev) => ({ ...prev, center: e.target.value }))}
@@ -1561,7 +1864,7 @@ function CenterAdminPanel({ centersList, refreshCenters }) {
         <button
           type="submit"
           disabled={saving}
-          className="p-3 rounded-xl bg-gradient-to-r from-cyan-500 to-cyan-600 text-white text-sm font-bold disabled:opacity-50 whitespace-nowrap px-6"
+          className={`p-3 rounded-xl bg-gradient-to-r ${OTHERS_PINK.btn} text-white text-sm font-bold disabled:opacity-50 whitespace-nowrap px-6`}
         >
           {saving ? 'Saving…' : (form.id ? 'Update Center' : 'Add Center')}
         </button>
@@ -1580,7 +1883,7 @@ function CenterAdminPanel({ centersList, refreshCenters }) {
               <tr key={`${row.nameKey}-${row.id || 'seed'}`} className="border-t border-white/5">
                 <td className="p-2 font-bold text-white">{row.center}</td>
                 <td className="p-2 text-right space-x-1">
-                  <button type="button" onClick={() => handleEdit(row)} className="text-[10px] font-bold text-cyan-300 hover:text-white">Edit</button>
+                  <button type="button" onClick={() => handleEdit(row)} className={`text-[10px] font-bold ${OTHERS_PINK.label} hover:text-white`}>Edit</button>
                   {row.id && (
                     <button type="button" onClick={() => handleDelete(row)} className="text-[10px] font-bold text-red-400 hover:text-red-200">Delete</button>
                   )}
@@ -1637,6 +1940,16 @@ function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refre
   const [adjustmentListLoading, setAdjustmentListLoading] = useState(false);
   const [adjustmentDeletingId, setAdjustmentDeletingId] = useState(null);
   const [globalUnits, setGlobalUnits] = useState([]);
+  const [lockedMonths, setLockedMonths] = useState(() => new Set());
+
+  const refreshLockedMonths = useCallback(async () => {
+    try {
+      setLockedMonths(await fetchLockedMonthValues(db));
+    } catch (err) {
+      console.warn('month locks fetch failed:', err);
+      setLockedMonths(new Set());
+    }
+  }, []);
 
   useEffect(() => {
     fetchGlobalUnits()
@@ -1644,6 +1957,20 @@ function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refre
       .catch(() => setGlobalUnits([]));
   }, []);
 
+  useEffect(() => {
+    refreshLockedMonths();
+  }, [refreshLockedMonths]);
+
+  const isDateMonthLocked = useCallback(
+    (value) => isMonthLocked(isoDateToMonthValue(normalizeDateOnly(value)), lockedMonths),
+    [lockedMonths],
+  );
+
+  const getPhysicalEntryLockMonth = useCallback((entry) => (
+    isoDateToMonthValue(normalizeDateOnly(entry?.transaction_date || entry?.date || entry?.created_at))
+  ), []);
+
+  const [ledgerIncludePriorClosing, setLedgerIncludePriorClosing] = useState(false);
   const [previousMonthClosingInfo, setPreviousMonthClosingInfo] = useState({
     month: '',
     currentMonth: '',
@@ -1671,8 +1998,13 @@ function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refre
       name: adjustmentForm.itemName,
       unit: adjustmentForm.unit,
       unitToKgFactor: catalogItem?.unitToKgFactor,
-    }));
-  }, [adjustmentForm.itemName, adjustmentForm.qty, adjustmentForm.unit, catalogItems]);
+    }, globalUnits));
+  }, [adjustmentForm.itemName, adjustmentForm.qty, adjustmentForm.unit, catalogItems, globalUnits]);
+
+  const adjustmentTargetMonthLocked = useMemo(
+    () => isDateMonthLocked(adjustmentForm.date),
+    [adjustmentForm.date, lockedMonths],
+  );
 
   const fetchPhysicalAdjustments = useCallback(async () => {
     setAdjustmentListLoading(true);
@@ -1826,6 +2158,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refre
         setReportMonthLock({ loading: false, is_locked: false });
       }
       await fetchUnlockAuditLogs();
+      await refreshLockedMonths();
       alert(`Month ${month} unlocked successfully.`);
     } catch (err) {
       alert(`Unlock Error: ${err.message}`);
@@ -1858,6 +2191,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refre
         setReportMonthLock({ loading: false, is_locked: true });
       }
       setUnlockReasonStepVisible(false);
+      await refreshLockedMonths();
       alert(`Month ${month} locked successfully.`);
     } catch (err) {
       alert(`Lock Error: ${err.message}`);
@@ -1875,6 +2209,9 @@ function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refre
   };
 
   const handleEditPhysicalAdjustment = (entry) => {
+    if (isMonthLocked(getPhysicalEntryLockMonth(entry), lockedMonths)) {
+      return alert('આ મહિનો લોક છે — ફિઝિકલ એડજસ્ટમેન્ટ ફક્ત પ્રિવ્યૂ માટે.');
+    }
     setAdjustmentForm({
       id: entry.id,
       date: entry.transaction_date || new Date().toISOString().split('T')[0],
@@ -1889,6 +2226,9 @@ function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refre
   };
 
   const handleDeletePhysicalAdjustment = async (entry) => {
+    if (isMonthLocked(getPhysicalEntryLockMonth(entry), lockedMonths)) {
+      return alert('આ મહિનો લોક છે — એન્ટ્રી કાઢી શકાતી નથી.');
+    }
     if (!window.confirm(`આ adjustment એન્ટ્રી કાઢી નાખવી? (${entry.itemName})`)) return;
     setAdjustmentDeletingId(entry.id);
     try {
@@ -1919,6 +2259,10 @@ function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refre
     if (!quantityKg || quantityKg <= 0) return alert('કિલો માત્રા માન્ય નથી.');
     if (!adjustmentForm.reason.trim()) return alert('Reason is required.');
     if (adjustmentSubmitting) return;
+
+    if (isDateMonthLocked(normalizedDate)) {
+      return alert('આ મહિનો લોક છે — લોક થયેલા મહિના માટે ફિઝિકલ એડજસ્ટમેન્ટ નહીં. નવા મહિનામાં તારીખ પસંદ કરો.');
+    }
 
     if (!adjustmentCatalogNameKeys.has(normalizeItemName(itemName))) {
       return alert(`Invalid item name: "${itemName}". Please select an item from the master list.`);
@@ -1991,7 +2335,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refre
 
         if (rows.length === 0) {
           try {
-            rows = await syncStockHistoryFromPrimaryCollections(catalogItems);
+            rows = await syncStockHistoryFromPrimaryCollections(catalogItems, globalUnits);
           } catch (syncErr) {
             console.warn('stock-transactions sync skipped in closing widget:', syncErr);
           }
@@ -2119,7 +2463,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refre
     })();
 
     return () => { cancelled = true; };
-  }, [reportForm.month, monthLockMonth, ledgerDataNonce, orders.length, sendOrders.length]);
+  }, [reportForm.month, monthLockMonth, ledgerDataNonce, orders.length, sendOrders.length, catalogItems, globalUnits]);
 
   const clearFilters = () => setFilters({ date: '', center: '', name: '' });
   const clearSendFilters = () => setSendFilters({ date: '', center: '', name: '' });
@@ -2275,6 +2619,9 @@ function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refre
   const handleSendMailReport = (report) => openMailModal(report, 'report');
 
   const handleDelete = async (order) => {
+    if (isDateMonthLocked(order?.date)) {
+      return alert('આ મહિનો લોક છે — રિક્વેસ્ટ કાઢી શકાતી નથી.');
+    }
     if (!window.confirm(`Delete order #${order.chalanNo} from ${order.center}?`)) return;
     try {
       await updateDoc(doc(db, "orders", order.id), { is_deleted: true });
@@ -2351,7 +2698,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refre
     try {
       const effectiveCenter = getResolvedCenterValue(reportForm.center, reportForm.centerOther);
       const [stockTransactions, monthlySnapshot, snapshotSnapshot] = await Promise.all([
-        syncStockHistoryFromPrimaryCollections(catalogItems),
+        syncStockHistoryFromPrimaryCollections(catalogItems, globalUnits),
         getDocs(collection(db, MONTHLY_CLOSING_STOCK_COLLECTION)),
         getDocs(collection(db, MONTHLY_STOCK_SNAPSHOTS_COLLECTION)),
       ]);
@@ -2394,6 +2741,8 @@ function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refre
             center: effectiveCenter,
             reportPeriod: reportForm.reportPeriod,
             stockViewMode: effectiveStockViewMode,
+            catalogItems,
+            globalUnits,
           });
 
       if (reportForm.reportPeriod === 'monthly' && reportForm.reportMode === 'single') {
@@ -2488,7 +2837,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refre
     setReportPdfLoading(report.id);
     try {
       const hydrated = hydrateReport(report);
-      await saveBlobFromProducer(() => generateSummaryReportPDFBlob(hydrated, { catalogItems }), getReportFileName(hydrated));
+      await saveBlobFromProducer(() => generateSummaryReportPDFBlob(hydrated), getReportFileName(hydrated));
     } catch (err) {
       alert('Download Error: ' + err.message);
     }
@@ -2499,7 +2848,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refre
     setReportPdfLoading(report.id);
     try {
       const hydrated = hydrateReport(report);
-      const blob = await generateSummaryReportPDFBlob(hydrated, { catalogItems });
+      const blob = await generateSummaryReportPDFBlob(hydrated);
       const file = new File([blob], getReportFileName(hydrated), { type: 'application/pdf' });
       if (navigator.canShare && navigator.canShare({ files: [file] })) {
         await navigator.share({
@@ -2534,6 +2883,9 @@ function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refre
   };
 
   const handleDeleteSend = async (order) => {
+    if (isDateMonthLocked(order?.date)) {
+      return alert('આ મહિનો લોક છે — સેન્ડ એન્ટ્રી કાઢી શકાતી નથી.');
+    }
     if (!window.confirm(`Delete send chalan #${order.chalanNo} from ${order.fromCenter}?`)) return;
     try {
       await updateDoc(doc(db, "send-orders", order.id), { is_deleted: true });
@@ -2565,6 +2917,8 @@ function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refre
         onBack={() => { setEditOrder(null); fetchOrders(); }}
         catalogItems={catalogItems}
         centersList={centersList}
+        globalUnits={globalUnits}
+        lockedMonths={lockedMonths}
       />
     );
   }
@@ -2576,15 +2930,23 @@ function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refre
         onBack={() => { setEditSendOrder(null); fetchSendOrders(); }}
         catalogItems={catalogItems}
         centersList={centersList}
+        globalUnits={globalUnits}
+        lockedMonths={lockedMonths}
       />
     );
   }
+
+  const selectAdminModule = (tab) => {
+    setActiveTab(tab);
+  };
 
   const isRequests = activeTab === 'requests';
   const isSends = activeTab === 'sends';
   const isReports = activeTab === 'reports';
   const isPurchases = activeTab === 'purchases';
   const isItems = activeTab === 'items';
+  const isOthers = activeTab === 'others';
+  const othersSetupCount = adjustmentEntries.length + centersList.length;
   const pdfOverlayKind = reportPdfLoading ? 'report' : sendPdfLoading ? 'send' : pdfLoading ? 'request' : null;
   const pdfOverlayActive = pdfOverlayKind !== null;
 
@@ -2595,47 +2957,67 @@ function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refre
       animate={{ opacity: 1 }}
       className="p-3 sm:p-6 max-w-7xl mx-auto pb-20"
     >
-      {/* Tab Switcher */}
+      {/* Tab switcher — ઉપર 3 + નીચે 3 (જૂની સાદી થીમ) */}
       <div className="grid grid-cols-1 gap-2 mb-6 sm:grid-cols-2 lg:grid-cols-6">
-        <motion.button
-          whileTap={{ scale: 0.97 }}
-          onClick={() => setActiveTab('requests')}
-          className={`py-3 rounded-2xl font-bold text-sm uppercase tracking-wide flex items-center justify-center gap-2 transition-all border lg:col-span-2 ${isRequests ? 'bg-gradient-to-r from-orange-500 to-orange-600 text-white border-transparent shadow-lg shadow-orange-500/20' : 'bg-[#1e1e1e] text-gray-400 border-white/10 hover:border-orange-500/30'}`}
+        <AdminNavTab
+          active={isRequests}
+          activeClass="bg-gradient-to-r from-orange-500 to-orange-600 text-white border-transparent shadow-lg shadow-orange-500/20"
+          hoverClass="hover:border-orange-500/30"
+          icon={ShoppingCart}
+          count={orders.length}
+          onClick={() => selectAdminModule('requests')}
         >
-          <ShoppingCart size={16} /> કોઠારમાંથી વસ્તુ મંગાવેલ હોય
-          <span className={`text-[10px] px-2 py-0.5 rounded-full font-black ${isRequests ? 'bg-white/20' : 'bg-white/10'}`}>{orders.length}</span>
-        </motion.button>
-        <motion.button
-          whileTap={{ scale: 0.97 }}
-          onClick={() => setActiveTab('sends')}
-          className={`py-3 rounded-2xl font-bold text-sm uppercase tracking-wide flex items-center justify-center gap-2 transition-all border lg:col-span-2 ${isSends ? 'bg-gradient-to-r from-blue-500 to-blue-600 text-white border-transparent shadow-lg shadow-blue-500/20' : 'bg-[#1e1e1e] text-gray-400 border-white/10 hover:border-blue-500/30'}`}
+          કોઠારમાંથી વસ્તુ મંગાવેલ હોય
+        </AdminNavTab>
+        <AdminNavTab
+          active={isSends}
+          activeClass="bg-gradient-to-r from-blue-500 to-blue-600 text-white border-transparent shadow-lg shadow-blue-500/20"
+          hoverClass="hover:border-blue-500/30"
+          icon={Send}
+          count={sendOrders.length}
+          onClick={() => selectAdminModule('sends')}
         >
-          <Send size={16} /> વસ્તુ મોકલેલ હોય
-          <span className={`text-[10px] px-2 py-0.5 rounded-full font-black ${isSends ? 'bg-white/20' : 'bg-white/10'}`}>{sendOrders.length}</span>
-        </motion.button>
-        <motion.button
-          whileTap={{ scale: 0.97 }}
-          onClick={() => setActiveTab('reports')}
-          className={`py-3 rounded-2xl font-bold text-sm uppercase tracking-wide flex items-center justify-center gap-2 transition-all border lg:col-span-2 ${isReports ? 'bg-gradient-to-r from-emerald-500 to-emerald-600 text-white border-transparent shadow-lg shadow-emerald-500/20' : 'bg-[#1e1e1e] text-gray-400 border-white/10 hover:border-emerald-500/30'}`}
+          વસ્તુ મોકલેલ હોય
+        </AdminNavTab>
+        <AdminNavTab
+          active={isReports}
+          activeClass="bg-gradient-to-r from-emerald-500 to-emerald-600 text-white border-transparent shadow-lg shadow-emerald-500/20"
+          hoverClass="hover:border-emerald-500/30"
+          icon={FileText}
+          count={reports.length}
+          onClick={() => selectAdminModule('reports')}
         >
-          <FileText size={16} /> Reports
-          <span className={`text-[10px] px-2 py-0.5 rounded-full font-black ${isReports ? 'bg-white/20' : 'bg-white/10'}`}>{reports.length}</span>
-        </motion.button>
-        <motion.button
-          whileTap={{ scale: 0.97 }}
-          onClick={() => setActiveTab('purchases')}
-          className={`py-3 rounded-2xl font-bold text-sm uppercase tracking-wide flex items-center justify-center gap-2 transition-all border lg:col-span-3 ${isPurchases ? 'bg-gradient-to-r from-violet-500 to-fuchsia-600 text-white border-transparent shadow-lg shadow-violet-500/20' : 'bg-[#1e1e1e] text-gray-400 border-white/10 hover:border-violet-500/30'}`}
+          Reports
+        </AdminNavTab>
+        <AdminNavTab
+          active={isPurchases}
+          activeClass="bg-gradient-to-r from-violet-500 to-fuchsia-600 text-white border-transparent shadow-lg shadow-violet-500/20"
+          hoverClass="hover:border-violet-500/30"
+          icon={Box}
+          onClick={() => selectAdminModule('purchases')}
         >
-          <Box size={16} /> Purchases
-        </motion.button>
-        <motion.button
-          whileTap={{ scale: 0.97 }}
-          onClick={() => setActiveTab('items')}
-          className={`py-3 rounded-2xl font-bold text-sm uppercase tracking-wide flex items-center justify-center gap-2 transition-all border lg:col-span-3 ${isItems ? 'bg-gradient-to-r from-amber-500 to-yellow-600 text-white border-transparent shadow-lg shadow-amber-500/20' : 'bg-[#1e1e1e] text-gray-400 border-white/10 hover:border-amber-500/30'}`}
+          Purchases
+        </AdminNavTab>
+        <AdminNavTab
+          active={isItems}
+          activeClass="bg-gradient-to-r from-amber-500 to-yellow-600 text-white border-transparent shadow-lg shadow-amber-500/20"
+          hoverClass="hover:border-amber-500/30"
+          icon={Package}
+          count={catalogItems.length}
+          onClick={() => selectAdminModule('items')}
         >
-          <Package size={16} /> Items
-          <span className={`text-[10px] px-2 py-0.5 rounded-full font-black ${isItems ? 'bg-white/20' : 'bg-white/10'}`}>{catalogItems.length}</span>
-        </motion.button>
+          Items
+        </AdminNavTab>
+        <AdminNavTab
+          active={isOthers}
+          activeClass="bg-gradient-to-r from-pink-500 to-rose-600 text-white border-transparent shadow-lg shadow-pink-500/20"
+          hoverClass="hover:border-pink-500/30"
+          icon={Sparkles}
+          count={othersSetupCount}
+          onClick={() => selectAdminModule('others')}
+        >
+          Others
+        </AdminNavTab>
       </div>
 
       {/* ===== REQUEST ENTRIES SECTION ===== */}
@@ -2693,7 +3075,9 @@ function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refre
             <motion.div variants={staggerContainer} initial="initial" animate="animate"
               className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 sm:gap-6">
               <AnimatePresence>
-                {filteredOrders.map((order, index) => (
+                {filteredOrders.map((order, index) => {
+                  const requestMonthLocked = isDateMonthLocked(order?.date);
+                  return (
                   <motion.div key={order.id} variants={fadeInUp} initial="initial" animate="animate" exit="exit"
                     transition={{ delay: index * 0.05 }} whileHover={{ y: -5, transition: { duration: 0.2 } }}
                     className="bg-gradient-to-b from-[#1e1e1e] to-[#181818] rounded-2xl sm:rounded-3xl border border-white/5 shadow-xl overflow-hidden hover:border-orange-500/30 transition-colors group">
@@ -2715,7 +3099,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refre
                         </div>
                         <div className="bg-gradient-to-br from-orange-500/10 to-orange-600/5 p-2 sm:p-3 rounded-xl border border-orange-500/20 text-center">
                           <p className="text-[10px] text-orange-400 uppercase font-bold">Total KG</p>
-                          <p className="font-black text-orange-400 text-sm sm:text-base">{formatMetric(calculateTotals(order.items).totalKg)}</p>
+                          <p className="font-black text-orange-400 text-sm sm:text-base">{formatMetric(calculateTotals(order.items, catalogItems, globalUnits).totalKg)}</p>
                         </div>
                       </div>
                       <div className="grid grid-cols-2 gap-2">
@@ -2723,8 +3107,9 @@ function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refre
                           className="bg-[#252525] hover:bg-[#2d2d2d] text-white p-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all border border-white/5">
                           <Eye size={14} /> Preview
                         </motion.button>
-                        <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={() => setEditOrder(order)}
-                          className="bg-[#252525] hover:bg-[#2d2d2d] text-white p-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all border border-white/5">
+                        <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} disabled={requestMonthLocked} onClick={() => setEditOrder(order)}
+                          title={requestMonthLocked ? 'મહિનો લોક — ફક્ત પ્રિવ્યૂ' : ''}
+                          className="bg-[#252525] hover:bg-[#2d2d2d] text-white p-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all border border-white/5 disabled:opacity-40 disabled:cursor-not-allowed">
                           <Edit3 size={14} /> Edit
                         </motion.button>
                         <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} disabled={pdfLoading === order.id} onClick={() => handleShare(order)}
@@ -2739,14 +3124,16 @@ function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refre
                           className="bg-gradient-to-r from-orange-500 to-orange-600 text-white p-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-all shadow-lg shadow-orange-500/20 disabled:opacity-50">
                           {pdfLoading === order.id ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />} Download
                         </motion.button>
-                        <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={() => handleDelete(order)}
-                          className="bg-red-500/10 hover:bg-red-500/20 text-red-400 p-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-all border border-red-500/20">
+                        <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} disabled={requestMonthLocked} onClick={() => handleDelete(order)}
+                          title={requestMonthLocked ? 'મહિનો લોક' : ''}
+                          className="bg-red-500/10 hover:bg-red-500/20 text-red-400 p-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-all border border-red-500/20 disabled:opacity-40 disabled:cursor-not-allowed">
                           <Trash2 size={14} /> Delete
                         </motion.button>
                       </div>
                     </div>
                   </motion.div>
-                ))}
+                );
+                })}
               </AnimatePresence>
             </motion.div>
           )}
@@ -2818,6 +3205,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refre
                 {filteredSendOrders.map((order, index) => {
                   const filledItems = (order.items || []).filter(r => r.itemName && r.itemName.trim());
                   const totalKg = roundKg2(filledItems.reduce((sum, r) => sum + (parseFloat(r.kg) || 0), 0));
+                  const sendMonthLocked = isDateMonthLocked(order?.date);
                   return (
                     <motion.div key={order.id} variants={fadeInUp} initial="initial" animate="animate" exit="exit"
                       transition={{ delay: index * 0.05 }} whileHover={{ y: -5, transition: { duration: 0.2 } }}
@@ -2848,8 +3236,9 @@ function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refre
                             className="bg-[#252525] hover:bg-[#2d2d2d] text-white p-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all border border-white/5">
                             <Eye size={14} /> Preview
                           </motion.button>
-                          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={() => setEditSendOrder(order)}
-                            className="bg-[#252525] hover:bg-[#2d2d2d] text-white p-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all border border-white/5">
+                          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} disabled={sendMonthLocked} onClick={() => setEditSendOrder(order)}
+                            title={sendMonthLocked ? 'મહિનો લોક — ફક્ત પ્રિવ્યૂ' : ''}
+                            className="bg-[#252525] hover:bg-[#2d2d2d] text-white p-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all border border-white/5 disabled:opacity-40 disabled:cursor-not-allowed">
                             <Edit3 size={14} /> Edit
                           </motion.button>
                           <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} disabled={sendPdfLoading === order.id} onClick={() => handleShareSend(order)}
@@ -2864,8 +3253,9 @@ function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refre
                             className="bg-gradient-to-r from-blue-500 to-blue-600 text-white p-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-all shadow-lg shadow-blue-500/20 disabled:opacity-50 col-span-2">
                             {sendPdfLoading === order.id ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />} Download
                           </motion.button>
-                          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={() => handleDeleteSend(order)}
-                            className="bg-red-500/10 hover:bg-red-500/20 text-red-400 p-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-all border border-red-500/20 col-span-2">
+                          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} disabled={sendMonthLocked} onClick={() => handleDeleteSend(order)}
+                            title={sendMonthLocked ? 'મહિનો લોક' : ''}
+                            className="bg-red-500/10 hover:bg-red-500/20 text-red-400 p-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-all border border-red-500/20 col-span-2 disabled:opacity-40 disabled:cursor-not-allowed">
                             <Trash2 size={14} /> Delete
                           </motion.button>
                         </div>
@@ -2998,7 +3388,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refre
                   Stock columns (Income)
                 </label>
                 <p className="mb-2 text-[11px] text-violet-200/90">
-                  ડિફોલ્ટ ઓટો: {isCurrentCalendarMonth(reportForm.month) ? 'ચાલુ મહિનો → Month IN only' : 'ગયા મહિનો → Full balance'} — નીચેથી બદલી શકાય.
+                  ડિફોલ્ટ ઓટો: {isCurrentCalendarMonth(reportForm.month) ? 'આ મહિનો → Month IN only' : 'ગયા મહિનો → Full balance'} — નીચેથી બદલી શકાય.
                 </p>
                 <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
                   <label className="flex cursor-pointer items-start gap-2 rounded-xl border border-white/10 bg-[#252525] px-3 py-2.5 text-sm text-white hover:border-emerald-500/40 sm:flex-1 sm:min-w-[200px]">
@@ -3139,7 +3529,21 @@ function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refre
 
             {reportForm.reportPeriod === 'monthly' && reportForm.reportMode === 'single' && (
             <div className="mt-3 rounded-2xl border border-blue-500/20 bg-blue-500/10 p-4">
-              <p className="text-[11px] font-bold uppercase tracking-widest text-blue-300">Month summary (ledger)</p>
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <p className="text-[11px] font-bold uppercase tracking-widest text-blue-300">Month summary (ledger)</p>
+                <label className="inline-flex cursor-pointer items-center gap-2 rounded-xl border border-blue-500/30 bg-[#252525]/80 px-3 py-2 text-xs text-blue-100">
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 rounded border-white/20 accent-blue-500"
+                    checked={ledgerIncludePriorClosing}
+                    onChange={(e) => setLedgerIncludePriorClosing(e.target.checked)}
+                  />
+                  <span>
+                    <span className="font-bold text-white">ગયા મહિનાની closing સાથે</span>
+                    <span className="block text-[10px] text-blue-200/80">ડિફોલ્ટ: ફક્ત આ મહિનાની IN/OUT</span>
+                  </span>
+                </label>
+              </div>
               {previousMonthClosingInfo.error && (
                 <p className="mt-2 text-xs text-red-300">{previousMonthClosingInfo.error}</p>
               )}
@@ -3178,19 +3582,36 @@ function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refre
               <div className="mt-5 border-t border-blue-500/20 pt-4">
                 <p className="text-center text-sm font-black text-white">
                   {previousMonthClosingInfo.currentMonth ? formatMonthLabel(previousMonthClosingInfo.currentMonth) : '-'}
+                  {ledgerIncludePriorClosing && previousMonthClosingInfo.month && (
+                    <span className="mt-1 block text-[10px] font-bold text-blue-200/90">
+                      + {formatMonthLabel(previousMonthClosingInfo.month)} closing ({formatMetric(previousMonthClosingInfo.totalClosingKg)} KG)
+                    </span>
+                  )}
                 </p>
+                {(() => {
+                  const priorClosing = previousMonthClosingInfo.totalClosingKg || 0;
+                  const periodIn = previousMonthClosingInfo.currentIncomingKg || 0;
+                  const periodOut = previousMonthClosingInfo.currentOutgoingKg || 0;
+                  const displayIncome = ledgerIncludePriorClosing ? periodIn + priorClosing : periodIn;
+                  const displayOutgoing = periodOut;
+                  const displayStock = reportMonthLock.is_locked
+                    ? previousMonthClosingInfo.currentMonthClosedStockKg
+                    : (ledgerIncludePriorClosing ? priorClosing + (periodIn - periodOut) : null);
+                  return (
                 <div className="mt-2 grid grid-cols-3 gap-2">
                   <div className="rounded-xl border border-white/10 bg-[#252525]/90 p-3 text-center">
-                    <p className="text-[10px] font-bold uppercase tracking-wider text-gray-500">Income</p>
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-gray-500">
+                      {ledgerIncludePriorClosing ? 'Income (with opening)' : 'Income'}
+                    </p>
                     <p className="mt-1 text-base font-black text-emerald-300 sm:text-lg">
-                      {previousMonthClosingInfo.loading ? '…' : `${formatMetric(previousMonthClosingInfo.currentIncomingKg)}`}
+                      {previousMonthClosingInfo.loading ? '…' : `${formatMetric(displayIncome)}`}
                     </p>
                     <p className="text-[10px] text-gray-500">KG</p>
                   </div>
                   <div className="rounded-xl border border-white/10 bg-[#252525]/90 p-3 text-center">
                     <p className="text-[10px] font-bold uppercase tracking-wider text-gray-500">Outgoing</p>
                     <p className="mt-1 text-base font-black text-orange-300 sm:text-lg">
-                      {previousMonthClosingInfo.loading ? '…' : `${formatMetric(previousMonthClosingInfo.currentOutgoingKg)}`}
+                      {previousMonthClosingInfo.loading ? '…' : `${formatMetric(displayOutgoing)}`}
                     </p>
                     <p className="text-[10px] text-gray-500">KG</p>
                   </div>
@@ -3199,11 +3620,13 @@ function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refre
                     <p className="mt-1 text-base font-black text-white sm:text-lg">
                       {previousMonthClosingInfo.loading
                         ? '…'
-                        : (reportMonthLock.is_locked ? formatMetric(previousMonthClosingInfo.currentMonthClosedStockKg) : '—')}
+                        : (displayStock != null ? formatMetric(displayStock) : '—')}
                     </p>
                     <p className="text-[10px] text-gray-500">KG</p>
                   </div>
                 </div>
+                  );
+                })()}
               </div>
             </div>
             )}
@@ -3333,170 +3756,6 @@ function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refre
               </div>
             </div>
 
-            <div className="mt-3 rounded-2xl border border-fuchsia-500/20 bg-fuchsia-500/10 p-4">
-              <p className="text-[11px] font-bold uppercase tracking-widest text-fuchsia-200">Physical stock adjustment</p>
-              <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                <input
-                  type="date"
-                  className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-fuchsia-500/50 transition-all text-sm"
-                  value={adjustmentForm.date}
-                  onChange={(e) => setAdjustmentForm((prev) => ({ ...prev, date: e.target.value }))}
-                />
-                <div className="sm:col-span-2">
-                  <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-500">Item name *</label>
-                  <ItemNameAutocompleteInput
-                    accent="fuchsia"
-                    catalogItems={catalogItems}
-                    placeholder="માસ્ટર લિસ્ટમાંથી શોધો / પસંદ કરો…"
-                    value={adjustmentForm.itemName}
-                    excludedNameKeys={[]}
-                    onChange={(nextValue) => setAdjustmentForm((prev) => ({
-                      ...prev,
-                      itemName: nextValue,
-                      unit: nextValue.trim() ? prev.unit : '',
-                      qty: '',
-                    }))}
-                    onSelectItem={handleAdjustmentSelectItem}
-                  />
-                </div>
-                <div>
-                  <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-500">માત્રા *</label>
-                  <CatalogStockQtyInput
-                    row={{
-                      itemName: adjustmentForm.itemName,
-                      qty: adjustmentForm.qty,
-                      unit: adjustmentForm.unit,
-                      kg: adjustmentKgPreview !== '' ? String(adjustmentKgPreview) : '',
-                    }}
-                    catalogItems={catalogItems}
-                    accent="fuchsia"
-                    onQtyChange={(value) => setAdjustmentForm((prev) => ({ ...prev, qty: value }))}
-                  />
-                </div>
-                <div>
-                  <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-gray-500">કિલો (સ્ટોક — લૉક)</label>
-                  <input
-                    readOnly
-                    tabIndex={-1}
-                    className="w-full p-3 bg-[#1a1a1a] border border-white/10 rounded-xl text-white font-black text-sm text-center outline-none cursor-not-allowed"
-                    placeholder="—"
-                    value={adjustmentKgPreview !== '' ? formatMetric(adjustmentKgPreview) : ''}
-                  />
-                  <p className="mt-1 text-[9px] text-gray-500 text-center">રિપોર્ટમાં હમેશા કિલો જાય</p>
-                </div>
-                <select
-                  className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-fuchsia-500/50 transition-all text-sm"
-                  value={adjustmentForm.direction}
-                  onChange={(e) => setAdjustmentForm((prev) => ({ ...prev, direction: e.target.value }))}
-                >
-                  <option value="OUT">Minus (OUT)</option>
-                  <option value="IN">Plus (IN)</option>
-                </select>
-                <select
-                  className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-fuchsia-500/50 transition-all text-sm"
-                  value={adjustmentForm.reason}
-                  onChange={(e) => setAdjustmentForm((prev) => ({ ...prev, reason: e.target.value }))}
-                >
-                  <option value="Shrinkage">Shrinkage</option>
-                  <option value="Damage">Damage</option>
-                  <option value="Missing">Missing</option>
-                  <option value="Found / Correction">Found / Correction</option>
-                </select>
-                <input
-                  className="w-full p-3 bg-[#252525] border border-white/10 rounded-xl text-white outline-none focus:border-fuchsia-500/50 transition-all text-sm sm:col-span-2 lg:col-span-3"
-                  placeholder="Remark"
-                  value={adjustmentForm.remark}
-                  onChange={(e) => setAdjustmentForm((prev) => ({ ...prev, remark: e.target.value }))}
-                />
-              </div>
-              <ItemsListSearchHint />
-              <div className="mt-3 flex flex-wrap gap-2">
-                <motion.button
-                  whileHover={{ scale: 1.02 }}
-                  whileTap={{ scale: 0.98 }}
-                  onClick={handlePhysicalAdjustmentSubmit}
-                  disabled={adjustmentSubmitting}
-                  className="bg-gradient-to-r from-fuchsia-500 to-violet-600 text-white px-5 py-3 rounded-xl font-bold text-sm uppercase tracking-wide shadow-lg shadow-fuchsia-500/20 disabled:opacity-50"
-                >
-                  {adjustmentSubmitting ? 'Saving...' : (adjustmentForm.id ? 'Update entry' : 'Save adjustment entry')}
-                </motion.button>
-                {adjustmentForm.id && (
-                  <button
-                    type="button"
-                    onClick={() => setAdjustmentForm(createDefaultAdjustmentForm())}
-                    className="rounded-xl border border-white/10 bg-white/5 px-5 py-3 text-sm font-bold uppercase text-gray-300 hover:bg-white/10"
-                  >
-                    Cancel edit
-                  </button>
-                )}
-                <button
-                  type="button"
-                  onClick={fetchPhysicalAdjustments}
-                  disabled={adjustmentListLoading}
-                  className="rounded-xl border border-fuchsia-500/20 bg-fuchsia-500/10 px-4 py-3 text-xs font-bold uppercase text-fuchsia-200 hover:bg-fuchsia-500/20 disabled:opacity-50 inline-flex items-center gap-1"
-                >
-                  <RefreshCw size={14} className={adjustmentListLoading ? 'animate-spin' : ''} />
-                  Refresh
-                </button>
-              </div>
-
-              <div className="mt-4 rounded-xl border border-white/10 bg-[#151515] overflow-hidden">
-                <div className="px-3 py-2 border-b border-white/10 flex justify-between items-center">
-                  <p className="text-[10px] font-bold uppercase tracking-widest text-gray-500">Adjustment entries</p>
-                  <span className="text-[10px] text-fuchsia-300 font-bold">{adjustmentEntries.length}</span>
-                </div>
-                {adjustmentListLoading ? (
-                  <p className="p-4 text-center text-sm text-gray-500">Loading…</p>
-                ) : adjustmentEntries.length === 0 ? (
-                  <p className="p-4 text-center text-sm text-gray-500">કોઈ એન્ટ્રી નથી.</p>
-                ) : (
-                  <div className="max-h-52 overflow-y-auto custom-scroll">
-                    <table className="w-full text-xs">
-                      <thead className="bg-[#252525] sticky top-0">
-                        <tr>
-                          <th className="p-2 text-left text-gray-500 font-bold uppercase">Date</th>
-                          <th className="p-2 text-left text-gray-500 font-bold uppercase">Item</th>
-                          <th className="p-2 text-center text-gray-500 font-bold uppercase">Qty</th>
-                          <th className="p-2 text-center text-gray-500 font-bold uppercase">KG</th>
-                          <th className="p-2 text-center text-gray-500 font-bold uppercase">±</th>
-                          <th className="p-2 w-16" />
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {adjustmentEntries.map((entry) => (
-                          <tr key={entry.id} className={`border-t border-white/5 ${adjustmentForm.id === entry.id ? 'bg-fuchsia-500/10' : ''}`}>
-                            <td className="p-2 text-gray-400 whitespace-nowrap">{formatDisplayDate(entry.transaction_date)}</td>
-                            <td className="p-2 font-medium text-white">{entry.itemName}</td>
-                            <td className="p-2 text-center text-gray-300">
-                              {formatMetric(entry.entry_qty)} <span className="text-[9px] text-gray-500">{entry.entry_unit}</span>
-                            </td>
-                            <td className="p-2 text-center font-bold text-fuchsia-300">{formatMetric(entry.quantity)}</td>
-                            <td className="p-2 text-center">
-                              <span className={entry.transaction_type === 'IN' ? 'text-green-400 font-bold' : 'text-red-400 font-bold'}>
-                                {entry.transaction_type}
-                              </span>
-                            </td>
-                            <td className="p-2">
-                              <div className="flex justify-end gap-1">
-                                <button type="button" onClick={() => handleEditPhysicalAdjustment(entry)} className="p-1.5 rounded-lg text-blue-400 hover:bg-blue-500/10" title="Edit">
-                                  <Edit3 size={14} />
-                                </button>
-                                <button type="button" onClick={() => handleDeletePhysicalAdjustment(entry)} disabled={adjustmentDeletingId === entry.id} className="p-1.5 rounded-lg text-red-400 hover:bg-red-500/10 disabled:opacity-50" title="Delete">
-                                  {adjustmentDeletingId === entry.id ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
-                                </button>
-                              </div>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <CenterAdminPanel centersList={centersList} refreshCenters={refreshCenters} />
-
             <div className="mt-5 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
               <p className="text-xs text-gray-500">
                 Columns: income also embeds મુખ્ય કોઠારની ખુલવાની સ્ટોક — પહેલાં ગ્લોબલ રીતે થઈ ચુકેલી ટ્રાન્ઝેક્શન. દરેક સેન્ટર રિપોર્ટમાં પિરીયડ ખરીદી દેખાશે; રિક્વેસ્ટ/સેન્ડ સેન્ટર મુજબ ફિલ્ટર.
@@ -3519,10 +3778,18 @@ function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refre
             orders={orders}
             sendOrders={sendOrders}
             onEditRequest={(order) => {
+              if (isDateMonthLocked(order?.date)) {
+                alert('આ મહિનો લોક છે — ફક્ત પ્રિવ્યૂ.');
+                return;
+              }
               setActiveTab('requests');
               setEditOrder(order);
             }}
             onEditSend={(order) => {
+              if (isDateMonthLocked(order?.date)) {
+                alert('આ મહિનો લોક છે — ફક્ત પ્રિવ્યૂ.');
+                return;
+              }
               setActiveTab('sends');
               setEditSendOrder(order);
             }}
@@ -3649,8 +3916,36 @@ function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refre
         <ItemAdminPanel user={user} catalogItems={catalogItems} refreshCatalog={refreshCatalog} />
       )}
 
+      {isOthers && (
+        <div className="space-y-5">
+          <PhysicalStockAdjustmentPanel
+            adjustmentForm={adjustmentForm}
+            setAdjustmentForm={setAdjustmentForm}
+            adjustmentTargetMonthLocked={adjustmentTargetMonthLocked}
+            catalogItems={catalogItems}
+            globalUnits={globalUnits}
+            adjustmentKgPreview={adjustmentKgPreview}
+            handleAdjustmentSelectItem={handleAdjustmentSelectItem}
+            handlePhysicalAdjustmentSubmit={handlePhysicalAdjustmentSubmit}
+            adjustmentSubmitting={adjustmentSubmitting}
+            fetchPhysicalAdjustments={fetchPhysicalAdjustments}
+            adjustmentListLoading={adjustmentListLoading}
+            adjustmentEntries={adjustmentEntries}
+            handleEditPhysicalAdjustment={handleEditPhysicalAdjustment}
+            handleDeletePhysicalAdjustment={handleDeletePhysicalAdjustment}
+            adjustmentDeletingId={adjustmentDeletingId}
+            lockedMonths={lockedMonths}
+            getPhysicalEntryLockMonth={getPhysicalEntryLockMonth}
+          />
+          <motion.div initial={{ y: -12, opacity: 0 }} animate={{ y: 0, opacity: 1 }}
+            className={`rounded-2xl sm:rounded-3xl border ${OTHERS_PINK.borderPanel} bg-gradient-to-b from-[#1e1e1e] to-[#181818] p-4 sm:p-6`}>
+            <CenterAdminPanel embedded centersList={centersList} refreshCenters={refreshCenters} />
+          </motion.div>
+        </div>
+      )}
+
       {isPurchases && (
-        <PurchaseAdminPanel user={user} catalogItems={catalogItems} onLedgerChanged={bumpLedgerData} />
+        <PurchaseAdminPanel user={user} catalogItems={catalogItems} onLedgerChanged={bumpLedgerData} globalUnits={globalUnits} lockedMonths={lockedMonths} />
       )}
 
       {/* Request Preview Modal */}
@@ -3699,7 +3994,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refre
                         <td className="border p-2 text-center text-gray-500 font-sans">{i+1}</td>
                         <td className="border p-2 font-bold">{it.name}</td>
                         <td className="border p-2 text-center font-bold">{it.qty}</td>
-                        <td className="border p-2 text-center font-bold text-orange-700">{formatMetric(convertItemQtyToKg(it.qty, it.unit))}</td>
+                        <td className="border p-2 text-center font-bold text-orange-700">{formatMetric(convertItemQtyToKg(it.qty, it.unit, catalogItems, it, globalUnits))}</td>
                         <td className="border p-2 text-center text-gray-400 text-[10px] uppercase font-sans font-bold">{it.unit}</td>
                       </tr>
                     ))}
@@ -3707,7 +4002,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refre
                 </table>
               </div>
               {(() => {
-                const totals = calculateTotals(previewOrder.items);
+                const totals = calculateTotals(previewOrder.items, catalogItems, globalUnits);
                 return (
                   <div className="mt-6 sm:mt-10 grid grid-cols-3 border-4 border-black p-3 sm:p-5 font-black text-center uppercase text-xs sm:text-sm tracking-tighter">
                     <div className="border-r border-gray-200">ITEMS: {previewOrder.items.length}</div>
@@ -3762,7 +4057,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refre
                     {(previewSendOrder.items || []).filter(r => r.itemName && r.itemName.trim()).map((it, i) => {
                       const qtyVal = it.qty != null && it.qty !== '' ? it.qty : it.kg;
                       const unitVal = it.unit || 'કિલો';
-                      const kgVal = convertItemQtyToKg(qtyVal, unitVal);
+                      const kgVal = convertItemQtyToKg(qtyVal, unitVal, catalogItems, { name: it.itemName, ...it }, globalUnits);
                       return (
                         <tr key={i} className="border border-gray-300">
                           <td className="border p-2 text-center text-gray-500 font-sans">{i + 1}</td>
@@ -3783,7 +4078,7 @@ function AdminDashboard({ user, catalogItems, refreshCatalog, centersList, refre
                   qty: it.qty != null && it.qty !== '' ? it.qty : it.kg,
                   unit: it.unit || 'કિલો',
                 }));
-                const totals = calculateTotals(mapped);
+                const totals = calculateTotals(mapped, catalogItems, globalUnits);
                 return (
                   <div className="mt-6 sm:mt-10 grid grid-cols-3 border-4 border-black p-3 sm:p-5 font-black text-center uppercase text-xs sm:text-sm tracking-tighter">
                     <div className="border-r border-gray-200">ITEMS: {filledItems.length}</div>
@@ -4226,37 +4521,39 @@ function ItemAdminPanel({ user, catalogItems, refreshCatalog }) {
   };
 
   return (
-    <div className="grid grid-cols-1 gap-6 xl:grid-cols-[380px_minmax(0,1fr)]">
-      <motion.div initial={{ y: -20, opacity: 0 }} animate={{ y: 0, opacity: 1 }}
-        className="bg-gradient-to-b from-[#1e1e1e] to-[#181818] p-4 sm:p-6 rounded-2xl sm:rounded-3xl border border-white/5 shadow-xl">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <div className="flex items-center gap-2 text-amber-400 font-bold uppercase text-xs tracking-widest">
-              <Package size={16} /> Item Master
+    <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(300px,400px)_minmax(0,1fr)]">
+      <div className="flex flex-col gap-4">
+      <motion.div initial={{ y: -12, opacity: 0 }} animate={{ y: 0, opacity: 1 }}
+        className="bg-gradient-to-b from-[#1e1e1e] to-[#181818] p-4 rounded-2xl border border-white/5 shadow-xl">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 text-amber-400 font-bold uppercase text-[10px] tracking-widest">
+              <Package size={14} /> Item Master
             </div>
-            <h2 className="mt-2 text-xl sm:text-2xl font-black text-white">Shared Item Catalog</h2>
-            <p className="mt-2 text-sm text-gray-400">Admin can manage canonical items here so request, send, and purchase all use the same stock names.</p>
+            <h2 className="mt-1 text-lg font-black text-white leading-tight">Shared Item Catalog</h2>
           </div>
-          <button
-            type="button"
-            onClick={resetForm}
-            className="text-gray-400 hover:text-white flex items-center justify-center gap-1.5 text-xs font-bold uppercase transition-all bg-white/5 hover:bg-white/10 px-3 py-2 rounded-xl border border-white/10"
-          >
-            <Eraser size={14} /> Clear
-          </button>
+          <div className="flex shrink-0 flex-col gap-1.5">
+            <button
+              type="button"
+              onClick={resetForm}
+              className="text-gray-400 hover:text-white flex items-center justify-center gap-1 text-[10px] font-bold uppercase bg-white/5 hover:bg-white/10 px-2.5 py-1.5 rounded-lg border border-white/10"
+            >
+              <Eraser size={12} /> Clear
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setShowInactiveModal(true);
+                fetchInactiveItems();
+              }}
+              className="inline-flex items-center justify-center gap-1 rounded-lg border border-red-500/20 bg-red-500/10 px-2.5 py-1.5 text-[10px] font-bold uppercase text-red-300 hover:bg-red-500/20"
+            >
+              <Trash2 size={12} /> Deactive
+            </button>
+          </div>
         </div>
-        <button
-          type="button"
-          onClick={() => {
-            setShowInactiveModal(true);
-            fetchInactiveItems();
-          }}
-          className="mt-3 inline-flex items-center gap-2 rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs font-bold uppercase text-red-300 hover:bg-red-500/20"
-        >
-          <Trash2 size={14} /> Deactive List
-        </button>
 
-        <div className="mt-6 space-y-4">
+        <div className="mt-4 space-y-3">
           <div>
             <label className="block text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Item Name *</label>
             <input
@@ -4365,8 +4662,8 @@ function ItemAdminPanel({ user, catalogItems, refreshCatalog }) {
 
         <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={handleSubmit}
           disabled={submitting}
-          className="mt-5 w-full bg-gradient-to-r from-amber-500 to-yellow-600 text-white p-4 rounded-xl font-bold shadow-xl shadow-amber-500/20 flex items-center justify-center gap-2 text-sm sm:text-base disabled:opacity-50">
-          {submitting ? <Loader2 size={18} className="animate-spin" /> : <CheckCircle size={18} />}
+          className="mt-4 w-full bg-gradient-to-r from-amber-500 to-yellow-600 text-white p-3 rounded-xl font-bold shadow-lg shadow-amber-500/20 flex items-center justify-center gap-2 text-sm disabled:opacity-50">
+          {submitting ? <Loader2 size={16} className="animate-spin" /> : <CheckCircle size={16} />}
           {editingId ? 'Update Item' : 'Save Item'}
         </motion.button>
         {!hasFirebaseItems && (
@@ -4374,14 +4671,15 @@ function ItemAdminPanel({ user, catalogItems, refreshCatalog }) {
             type="button"
             onClick={handleImportDefaults}
             disabled={importingDefaults}
-            className="mt-3 w-full rounded-xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm font-bold text-amber-300 transition-all hover:bg-amber-500/20 disabled:opacity-50"
+            className="mt-2 w-full rounded-xl border border-amber-500/20 bg-amber-500/10 px-3 py-2.5 text-xs font-bold text-amber-300 transition-all hover:bg-amber-500/20 disabled:opacity-50"
           >
-            {importingDefaults ? 'Importing Default Items...' : 'Import Default Item List To Firebase'}
+            {importingDefaults ? 'Importing…' : 'Import defaults to Firebase'}
           </button>
         )}
-        <p className="mt-3 text-xs text-gray-500">Logged in as {user?.username || 'Admin'}</p>
-        <GlobalUnitsPanel onUnitsChange={refreshGlobalUnits} />
+        <p className="mt-2 text-[10px] text-gray-600 text-center">{user?.username || 'Admin'}</p>
       </motion.div>
+      <GlobalUnitsPanel embedded onUnitsChange={refreshGlobalUnits} />
+      </div>
 
       <motion.div initial={{ y: 10, opacity: 0 }} animate={{ y: 0, opacity: 1 }}
         className="bg-gradient-to-b from-[#1e1e1e] to-[#181818] p-4 sm:p-6 rounded-2xl sm:rounded-3xl border border-white/5 shadow-xl">
@@ -4518,10 +4816,10 @@ const createDefaultPurchaseForm = () => ({
   billNo: '',
   billDate: new Date().toISOString().split('T')[0],
   entryDate: new Date().toISOString().split('T')[0],
-  rows: createRowsFromItems([], 5),
+  rows: createRowsFromItems([], 5, [], []),
 });
 
-function PurchaseAdminPanel({ user, catalogItems, onLedgerChanged }) {
+function PurchaseAdminPanel({ user, catalogItems, onLedgerChanged, globalUnits = [], lockedMonths = new Set() }) {
   const [purchaseForm, setPurchaseForm] = useState(createDefaultPurchaseForm);
   const [purchases, setPurchases] = useState([]);
   const [purchaseLoading, setPurchaseLoading] = useState(true);
@@ -4566,14 +4864,14 @@ function PurchaseAdminPanel({ user, catalogItems, onLedgerChanged }) {
     const patch = field === 'kg' ? { qty: value } : { [field]: value };
     setPurchaseForm((prev) => ({
       ...prev,
-      rows: patchStockRow(prev.rows, id, patch, catalogItems),
+      rows: patchStockRow(prev.rows, id, patch, catalogItems, globalUnits),
     }));
   };
 
   const selectPurchaseRowItem = (id, item) => {
     setPurchaseForm((prev) => ({
       ...prev,
-      rows: patchStockRow(prev.rows, id, { itemName: item.name }, catalogItems),
+      rows: patchStockRow(prev.rows, id, { itemName: item.name }, catalogItems, globalUnits),
     }));
   };
 
@@ -4618,6 +4916,12 @@ function PurchaseAdminPanel({ user, catalogItems, onLedgerChanged }) {
     try {
       const isShop = purchaseForm.purchaseSource === PURCHASE_SOURCE_SHOP;
       const primaryDate = isShop ? purchaseForm.billDate : purchaseForm.entryDate;
+      const lockMonthNew = isoDateToMonthValue(normalizeDateOnly(primaryDate));
+      if (isMonthLocked(lockMonthNew, lockedMonths)) {
+        alert('આ મહિનો લોક છે — નવી ખરીદી આ તારીખે સેવ ન થઈ શકે.');
+        setPurchaseSubmitting(false);
+        return;
+      }
       if (!canSubmitStockEntryDate(primaryDate)) {
         const backfillNote = ENABLE_INITIAL_STOCK_BACKFILL
           ? ` (initial mode: last ${INITIAL_BACKFILL_MONTHS} months allowed)`
@@ -4698,6 +5002,9 @@ function PurchaseAdminPanel({ user, catalogItems, onLedgerChanged }) {
   };
 
   const handleDeletePurchase = async (purchase) => {
+    if (isMonthLocked(getPurchaseLockMonthValue(purchase), lockedMonths)) {
+      return alert('આ મહિનો લોક છે — ખરીદી કાઢી શકાતી નથી.');
+    }
     const delLabel = getPurchaseResolvedSource(purchase) === PURCHASE_SOURCE_KOTHAR_STOCK
       ? `કોઠાર સ્ટોક એન્ટ્રી (${formatDisplayDate(purchase.date || purchase.entryDate)})`
       : `બિલ ${purchase.billNo} — ${purchase.shopName}`;
@@ -4772,6 +5079,8 @@ function PurchaseAdminPanel({ user, catalogItems, onLedgerChanged }) {
         purchase={editPurchase}
         catalogItems={catalogItems}
         savedShopNames={savedShopNames}
+        globalUnits={globalUnits}
+        lockedMonths={lockedMonths}
         onBack={() => {
           setEditPurchase(null);
           fetchPurchases();
@@ -4915,6 +5224,7 @@ function PurchaseAdminPanel({ user, catalogItems, onLedgerChanged }) {
                       <CatalogStockQtyInput
                         row={row}
                         catalogItems={catalogItems}
+                        globalUnits={globalUnits}
                         accent="violet"
                         onQtyChange={(value) => updatePurchaseRow(row.id, 'qty', value)}
                       />
@@ -5050,8 +5360,9 @@ function PurchaseAdminPanel({ user, catalogItems, onLedgerChanged }) {
                       className="bg-[#252525] hover:bg-[#2d2d2d] text-white p-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all border border-white/5">
                       <Eye size={14} /> Preview
                     </motion.button>
-                    <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={() => setEditPurchase(purchase)}
-                      className="bg-[#252525] hover:bg-[#2d2d2d] text-white p-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all border border-white/5">
+                    <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} disabled={isMonthLocked(getPurchaseLockMonthValue(purchase), lockedMonths)} onClick={() => setEditPurchase(purchase)}
+                      title={isMonthLocked(getPurchaseLockMonthValue(purchase), lockedMonths) ? 'મહિનો લોક' : ''}
+                      className="bg-[#252525] hover:bg-[#2d2d2d] text-white p-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all border border-white/5 disabled:opacity-40 disabled:cursor-not-allowed">
                       <Edit3 size={14} /> Edit
                     </motion.button>
                     <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} disabled={purchasePdfLoading === purchase.id} onClick={() => handleSharePurchase(purchase)}
@@ -5136,7 +5447,7 @@ function PurchaseAdminPanel({ user, catalogItems, onLedgerChanged }) {
                     {(previewPurchase.items || []).map((item, index) => {
                       const qtyVal = item.qty != null && item.qty !== '' ? item.qty : item.kg;
                       const unitVal = item.unit || 'કિલો';
-                      const kgVal = convertItemQtyToKg(qtyVal, unitVal);
+                      const kgVal = convertItemQtyToKg(qtyVal, unitVal, catalogItems, { name: item.itemName, ...item }, globalUnits);
                       return (
                         <tr key={`${previewPurchase.id}-${index}`} className="even:bg-gray-50">
                           <td className="border p-2 text-center text-gray-500">{index + 1}</td>
@@ -5156,7 +5467,7 @@ function PurchaseAdminPanel({ user, catalogItems, onLedgerChanged }) {
                   qty: it.qty != null && it.qty !== '' ? it.qty : it.kg,
                   unit: it.unit || 'કિલો',
                 }));
-                const t = calculateTotals(mapped);
+                const t = calculateTotals(mapped, catalogItems, globalUnits);
                 return (
               <div className="mt-6 sm:mt-10 grid grid-cols-3 border-4 border-black p-3 sm:p-5 font-black text-center uppercase text-xs sm:text-sm tracking-tighter">
                 <div className="border-r border-gray-200">NUMBER OF ITEMS: {(previewPurchase.items || []).length}</div>
@@ -5175,7 +5486,7 @@ function PurchaseAdminPanel({ user, catalogItems, onLedgerChanged }) {
 }
 
 // --- EDIT PURCHASE SCREEN ---
-const buildPurchaseFormFromRecord = (purchase, catalogItems) => ({
+const buildPurchaseFormFromRecord = (purchase, catalogItems, globalUnits = []) => ({
   purchaseSource: getPurchaseResolvedSource(purchase),
   shopName: purchase.shopName || '',
   billNo: purchase.billNo || '',
@@ -5190,11 +5501,12 @@ const buildPurchaseFormFromRecord = (purchase, catalogItems) => ({
     })),
     Math.max((purchase.items || []).length, 5),
     catalogItems,
+    globalUnits,
   ),
 });
 
-function EditPurchaseScreen({ purchase, onBack, catalogItems, savedShopNames, onUpdated }) {
-  const [form, setForm] = useState(() => buildPurchaseFormFromRecord(purchase, catalogItems));
+function EditPurchaseScreen({ purchase, onBack, catalogItems, savedShopNames, onUpdated, globalUnits = [], lockedMonths = new Set() }) {
+  const [form, setForm] = useState(() => buildPurchaseFormFromRecord(purchase, catalogItems, globalUnits));
   const [loading, setLoading] = useState(false);
   const catalogNameKeys = new Set(catalogItems.map((item) => item.nameKey));
   const filledRows = form.rows.filter((row) => row.itemName.trim());
@@ -5203,14 +5515,14 @@ function EditPurchaseScreen({ purchase, onBack, catalogItems, savedShopNames, on
     const patch = field === 'kg' ? { qty: value } : { [field]: value };
     setForm((prev) => ({
       ...prev,
-      rows: patchStockRow(prev.rows, id, patch, catalogItems),
+      rows: patchStockRow(prev.rows, id, patch, catalogItems, globalUnits),
     }));
   };
 
   const selectRowItem = (id, item) => {
     setForm((prev) => ({
       ...prev,
-      rows: patchStockRow(prev.rows, id, { itemName: item.name }, catalogItems),
+      rows: patchStockRow(prev.rows, id, { itemName: item.name }, catalogItems, globalUnits),
     }));
   };
 
@@ -5245,6 +5557,10 @@ function EditPurchaseScreen({ purchase, onBack, catalogItems, savedShopNames, on
 
     const isShop = form.purchaseSource === PURCHASE_SOURCE_SHOP;
     const primaryDate = isShop ? form.billDate : form.entryDate;
+    const lockMonth = isoDateToMonthValue(normalizeDateOnly(primaryDate));
+    if (isMonthLocked(lockMonth, lockedMonths)) {
+      return alert('આ મહિનો લોક છે — ખરીદી એડિટ શક્ય નથી.');
+    }
     if (!canSubmitStockEntryDate(primaryDate)) {
       const backfillNote = ENABLE_INITIAL_STOCK_BACKFILL
         ? ` (initial mode: last ${INITIAL_BACKFILL_MONTHS} months allowed)`
@@ -5458,6 +5774,7 @@ function EditPurchaseScreen({ purchase, onBack, catalogItems, savedShopNames, on
                       <CatalogStockQtyInput
                         row={row}
                         catalogItems={catalogItems}
+                        globalUnits={globalUnits}
                         accent="violet"
                         onQtyChange={(value) => updateRow(row.id, 'qty', value)}
                       />
@@ -5492,7 +5809,7 @@ function EditPurchaseScreen({ purchase, onBack, catalogItems, savedShopNames, on
 }
 
 // --- EDIT ORDER SCREEN ---
-function EditOrderScreen({ order, onBack, catalogItems, centersList = centerData }) {
+function EditOrderScreen({ order, onBack, catalogItems, centersList = centerData, globalUnits = [], lockedMonths = new Set() }) {
   const centerInitial = useMemo(() => deriveEditableCenterFields(order.center, centersList), [order.center, centersList]);
   const [centerSelect, setCenterSelect] = useState(centerInitial.select);
   const [centerOther, setCenterOther] = useState(centerInitial.other);
@@ -5506,7 +5823,7 @@ function EditOrderScreen({ order, onBack, catalogItems, centersList = centerData
 
   const updateQuantity = (itemName, category, unit, qty) => {
     const existing = cart.find(i => normalizeItemName(i.name) === normalizeItemName(itemName));
-    const line = buildRequestCartLine(itemName, category, unit, qty, mergedCatalogItems);
+    const line = buildRequestCartLine(itemName, category, unit, qty, mergedCatalogItems, globalUnits);
     if (line.qty > 0) {
       if (existing) {
         setCart(cart.map((i) => (
@@ -5519,13 +5836,16 @@ function EditOrderScreen({ order, onBack, catalogItems, centersList = centerData
   };
 
   const handleUpdate = async () => {
+    if (isMonthLocked(isoDateToMonthValue(normalizeDateOnly(order?.date)), lockedMonths)) {
+      return alert('આ મહિનો લોક છે — રિક્વેસ્ટ એડિટ શક્ય નથી.');
+    }
     if (!centerSelect) return alert('Center select karo!');
     if (centerSelect === 'Other' && !centerOther.trim()) return alert('Center name likho!');
     if (cart.length === 0) return alert("Add at least one item!");
     const effectiveCenter = getResolvedCenterValue(centerSelect, centerOther);
     setLoading(true);
     try {
-      const { totalKg } = calculateTotals(cart, mergedCatalogItems);
+      const { totalKg } = calculateTotals(cart, mergedCatalogItems, globalUnits);
       await updateDoc(doc(db, "orders", order.id), {
         center: effectiveCenter,
         centerFromOther: centerSelect === 'Other',
@@ -5673,7 +5993,7 @@ function EditOrderScreen({ order, onBack, catalogItems, centersList = centerData
                     <div className="p-3 bg-[#151515] grid gap-2">
                       {isGheeTelCategory(category) && (
                         <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] font-bold text-amber-100">
-                          ૧ ડબ્બો = ૧૩ કિલો થશે, માટે નીચેના બોક્સમાં ડબ્બાની સંખ્યા લખવી.
+                          ૧ ડબ્બો = ૧૫  કિલો થશે, માટે નીચેના બોક્સમાં ડબ્બાની સંખ્યા લખવી.
                         </div>
                       )}
                       {isColorCategory(category) && (
@@ -5691,7 +6011,7 @@ function EditOrderScreen({ order, onBack, catalogItems, centersList = centerData
                         const showKgPreview = isGheeTelBulkUnit(lineUnit)
                           || (item.unitToKgFactor && item.unitToKgFactor !== 1)
                           || (inCart?.unitToKgFactor && inCart.unitToKgFactor !== 1);
-                        const secondaryKg = convertItemQtyToKg(inCart?.qty, lineUnit, mergedCatalogItems, { name: item.name, ...inCart });
+                        const secondaryKg = convertItemQtyToKg(inCart?.qty, lineUnit, mergedCatalogItems, { name: item.name, ...inCart }, globalUnits);
                         return (
                           <motion.div 
                             key={item.name}
@@ -5782,22 +6102,22 @@ function EditOrderScreen({ order, onBack, catalogItems, centersList = centerData
 }
 
 // --- EDIT SEND ORDER SCREEN ---
-function EditSendOrderScreen({ order, onBack, catalogItems, centersList = centerData }) {
+function EditSendOrderScreen({ order, onBack, catalogItems, centersList = centerData, globalUnits = [], lockedMonths = new Set() }) {
   const fromCenterInitial = useMemo(() => deriveEditableCenterFields(order.fromCenter, centersList), [order.fromCenter, centersList]);
   const [fromCenterSelect, setFromCenterSelect] = useState(fromCenterInitial.select);
   const [fromCenterOther, setFromCenterOther] = useState(fromCenterInitial.other);
   const mergedCatalogItems = mergeCatalogItemsWithExisting(catalogItems, order.items || []);
-  const [rows, setRows] = useState(() => createRowsFromItems(order.items || [], 5, mergedCatalogItems));
+  const [rows, setRows] = useState(() => createRowsFromItems(order.items || [], 5, mergedCatalogItems, globalUnits));
   const [loading, setLoading] = useState(false);
   const catalogNameKeys = new Set(mergedCatalogItems.map((item) => item.nameKey));
   const resolvedFromCenter = getResolvedCenterValue(fromCenterSelect, fromCenterOther);
 
   const updateRow = (id, field, value) => {
     const patch = field === 'kg' ? { qty: value } : { [field]: value };
-    setRows((prev) => patchStockRow(prev, id, patch, mergedCatalogItems));
+    setRows((prev) => patchStockRow(prev, id, patch, mergedCatalogItems, globalUnits));
   };
   const selectRowItem = (id, item) => {
-    setRows((prev) => patchStockRow(prev, id, { itemName: item.name }, mergedCatalogItems));
+    setRows((prev) => patchStockRow(prev, id, { itemName: item.name }, mergedCatalogItems, globalUnits));
   };
   const addRow = () => {
     setRows(prev => [...prev, createEmptyItemRow(getNextRowId(prev))]);
@@ -5805,6 +6125,9 @@ function EditSendOrderScreen({ order, onBack, catalogItems, centersList = center
   const removeRow = (id) => { if (rows.length > 1) setRows(prev => prev.filter(r => r.id !== id)); };
 
   const handleUpdate = async () => {
+    if (isMonthLocked(isoDateToMonthValue(normalizeDateOnly(order?.date)), lockedMonths)) {
+      return alert('આ મહિનો લોક છે — સેન્ડ એડિટ શક્ય નથી.');
+    }
     if (!fromCenterSelect) return alert('Center select karo!');
     if (fromCenterSelect === 'Other' && !fromCenterOther.trim()) return alert('Center name likho!');
     const filledRows = rows.filter(r => r.itemName && r.itemName.trim());
@@ -5921,6 +6244,7 @@ function EditSendOrderScreen({ order, onBack, catalogItems, centersList = center
               <CatalogStockQtyInput
                 row={row}
                 catalogItems={mergedCatalogItems}
+                globalUnits={globalUnits}
                 accent="blue"
                 onQtyChange={(value) => updateRow(row.id, 'qty', value)}
               />
@@ -5958,11 +6282,31 @@ function EditSendOrderScreen({ order, onBack, catalogItems, centersList = center
 }
 
 // --- USER HUB ---
-function UserHub({ user, catalogItems, centersList = centerData }) {
+function UserHub({ user, catalogItems, centersList = centerData, globalUnits = [] }) {
   const [section, setSection] = useState(null);
 
-  if (section === 'request') return <UserDashboard user={user} onBack={() => setSection(null)} catalogItems={catalogItems} centersList={centersList} />;
-  if (section === 'send') return <SendDashboard user={user} onBack={() => setSection(null)} catalogItems={catalogItems} centersList={centersList} />;
+  if (section === 'request') {
+    return (
+      <UserDashboard
+        user={user}
+        onBack={() => setSection(null)}
+        catalogItems={catalogItems}
+        centersList={centersList}
+        globalUnits={globalUnits}
+      />
+    );
+  }
+  if (section === 'send') {
+    return (
+      <SendDashboard
+        user={user}
+        onBack={() => setSection(null)}
+        catalogItems={catalogItems}
+        centersList={centersList}
+        globalUnits={globalUnits}
+      />
+    );
+  }
 
   return (
     <motion.div
@@ -6043,7 +6387,7 @@ function UserHub({ user, catalogItems, centersList = centerData }) {
 }
 
 // --- SEND DASHBOARD ---
-function SendDashboard({ user, onBack, catalogItems, centersList = centerData }) {
+function SendDashboard({ user, onBack, catalogItems, centersList = centerData, globalUnits = [] }) {
   const INITIAL_ROWS = 15;
   const [step, setStep] = useState('form');
   const [chalanLoading, setChalanLoading] = useState(true);
@@ -6058,7 +6402,7 @@ function SendDashboard({ user, onBack, catalogItems, centersList = centerData })
     globalId: '',
     email: '',
   });
-  const [rows, setRows] = useState(() => createRowsFromItems([], INITIAL_ROWS, catalogItems));
+  const [rows, setRows] = useState(() => createRowsFromItems([], INITIAL_ROWS, catalogItems, globalUnits));
   const [loading, setLoading] = useState(false);
   const catalogNameKeys = new Set(catalogItems.map((item) => item.nameKey));
 
@@ -6083,10 +6427,10 @@ function SendDashboard({ user, onBack, catalogItems, centersList = centerData })
 
   const updateRow = (id, field, value) => {
     const patch = field === 'kg' ? { qty: value } : { [field]: value };
-    setRows((prev) => patchStockRow(prev, id, patch, catalogItems));
+    setRows((prev) => patchStockRow(prev, id, patch, catalogItems, globalUnits));
   };
   const selectRowItem = (id, item) => {
-    setRows((prev) => patchStockRow(prev, id, { itemName: item.name }, catalogItems));
+    setRows((prev) => patchStockRow(prev, id, { itemName: item.name }, catalogItems, globalUnits));
   };
   const addRow = () => {
     setRows(prev => [...prev, createEmptyItemRow(getNextRowId(prev))]);
@@ -6386,6 +6730,7 @@ function SendDashboard({ user, onBack, catalogItems, centersList = centerData })
                     <CatalogStockQtyInput
                       row={row}
                       catalogItems={catalogItems}
+                      globalUnits={globalUnits}
                       accent="blue"
                       onQtyChange={(value) => updateRow(row.id, 'qty', value)}
                     />
@@ -6419,7 +6764,7 @@ function SendDashboard({ user, onBack, catalogItems, centersList = centerData })
 }
 
 // --- USER DASHBOARD ---
-function UserDashboard({ user, onBack = null, catalogItems, centersList = centerData }) {
+function UserDashboard({ user, onBack = null, catalogItems, centersList = centerData, globalUnits = [] }) {
   const [formData, setFormData] = useState({
     chalanNo: '',
     date: new Date().toISOString().split('T')[0],
@@ -6464,7 +6809,7 @@ function UserDashboard({ user, onBack = null, catalogItems, centersList = center
 
   const updateQuantity = (itemName, category, unit, qty) => {
     const existing = cart.find(i => normalizeItemName(i.name) === normalizeItemName(itemName));
-    const line = buildRequestCartLine(itemName, category, unit, qty, catalogItems);
+    const line = buildRequestCartLine(itemName, category, unit, qty, catalogItems, globalUnits);
     if (line.qty > 0) {
       if (existing) {
         setCart(cart.map((i) => (
@@ -6479,7 +6824,7 @@ function UserDashboard({ user, onBack = null, catalogItems, centersList = center
   const handleConfirmSubmit = async () => {
     setLoading(true);
     try {
-      const { totalKg } = calculateTotals(cart, catalogItems);
+      const { totalKg } = calculateTotals(cart, catalogItems, globalUnits);
       const payload = {
         ...formData,
         center: formData.center === 'Other' ? formData.centerOther.trim() : formData.center,
@@ -6508,7 +6853,7 @@ function UserDashboard({ user, onBack = null, catalogItems, centersList = center
               item_id: normalizeItemName(item.name),
               itemName: item.name,
               transaction_type: 'OUT',
-              quantity: toSafeTxQuantity(convertItemQtyToKg(item.qty, item.unit, catalogItems, item)),
+              quantity: toSafeTxQuantity(convertItemQtyToKg(item.qty, item.unit, catalogItems, item, globalUnits)),
               transaction_date: normalizeDateOnly(payload.date),
               created_at: payload.timestamp,
               autoSynced: true,
@@ -6727,7 +7072,7 @@ function UserDashboard({ user, onBack = null, catalogItems, centersList = center
                         const showKgPreview = isGheeTelBulkUnit(lineUnit)
                           || (item.unitToKgFactor && item.unitToKgFactor !== 1)
                           || (inCart?.unitToKgFactor && inCart.unitToKgFactor !== 1);
-                        const secondaryKg = convertItemQtyToKg(inCart?.qty, lineUnit, catalogItems, { name: item.name, ...inCart });
+                        const secondaryKg = convertItemQtyToKg(inCart?.qty, lineUnit, catalogItems, { name: item.name, ...inCart }, globalUnits);
                         return (
                           <motion.div 
                             key={item.name}
@@ -6824,7 +7169,7 @@ function UserDashboard({ user, onBack = null, catalogItems, centersList = center
   }
 
   if (step === 'review') {
-    const totals = calculateTotals(cart, catalogItems);
+    const totals = calculateTotals(cart, catalogItems, globalUnits);
     return (
       <motion.div 
         initial={{ opacity: 0, x: 50 }}
@@ -6881,7 +7226,7 @@ function UserDashboard({ user, onBack = null, catalogItems, centersList = center
                       <span className="text-[10px] text-gray-500 uppercase font-bold">{item.unit}</span>
                       {getUnitToKgFactor(item.unit, item) !== 1 && (
                         <span className="ml-2 text-[10px] text-gray-400 font-bold">
-                          (= {formatMetric(convertItemQtyToKg(item.qty, item.unit, catalogItems, item))} {UNIT_KG})
+                          (= {formatMetric(convertItemQtyToKg(item.qty, item.unit, catalogItems, item, globalUnits))} {UNIT_KG})
                         </span>
                       )}
                     </td>

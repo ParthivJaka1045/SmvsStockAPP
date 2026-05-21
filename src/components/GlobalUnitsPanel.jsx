@@ -3,7 +3,7 @@ import { Loader2, Plus } from 'lucide-react';
 import { CONVERSION_BASE_UNITS, conversionInputToKgFactor, UNIT_KG } from '../itemUnits';
 import { fetchGlobalUnits, saveGlobalUnit, softDeleteGlobalUnit } from '../globalUnits';
 
-export default function GlobalUnitsPanel({ onUnitsChange }) {
+export default function GlobalUnitsPanel({ onUnitsChange, embedded = false }) {
   const [units, setUnits] = useState([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -58,14 +58,23 @@ export default function GlobalUnitsPanel({ onUnitsChange }) {
     setSaving(false);
   };
 
+  const shellClass = embedded
+    ? 'rounded-2xl border border-amber-500/20 bg-[#1a1a1a]/90 p-3 sm:p-4'
+    : 'mt-6 rounded-2xl border border-amber-500/25 bg-amber-500/5 p-4 sm:p-6';
+
   return (
-    <div className="mt-6 rounded-2xl border border-amber-500/25 bg-amber-500/5 p-4 sm:p-6">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+    <div className={shellClass}>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <p className="text-[11px] font-bold uppercase tracking-widest text-amber-300">Global Units</p>
-          <p className="mt-1.5 text-sm text-gray-300 leading-relaxed">
-            ડબ્બો, બોરી વગેરે ગ્લોબલી ઉમેરો — દરેક આઇટમ પર અલગ kg રૂપાંતર સેટ કરી શકાય.
-          </p>
+          <p className="text-[10px] font-bold uppercase tracking-widest text-amber-300">Global Units</p>
+          {!embedded && (
+            <p className="mt-1.5 text-sm text-gray-300 leading-relaxed">
+              ડબ્બો, બોરી વગેરે ગ્લોબલી ઉમેરો — દરેક આઇટમ પર અલગ kg રૂપાંતર સેટ કરી શકાય.
+            </p>
+          )}
+          {embedded && (
+            <p className="mt-1 text-[11px] text-gray-500">ડબ્બો/બોરી — આઇટમ પર kg ઓવરરાઇડ.</p>
+          )}
         </div>
         {form.id && (
           <button
@@ -78,7 +87,7 @@ export default function GlobalUnitsPanel({ onUnitsChange }) {
         )}
       </div>
 
-      <form onSubmit={handleSubmit} className="mt-5 space-y-4">
+      <form onSubmit={handleSubmit} className={`${embedded ? 'mt-3' : 'mt-5'} space-y-3`}>
         <div>
           <label className="block text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-2">
             એકમનું નામ *
@@ -145,9 +154,9 @@ export default function GlobalUnitsPanel({ onUnitsChange }) {
         </div>
       </form>
 
-      <div className="mt-8 border-t border-white/10 pt-6">
-        <p className="text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-3">સાચવેલા એકમ</p>
-        <div className="max-h-44 overflow-y-auto rounded-xl border border-white/10 bg-[#1a1a1a] custom-scroll">
+      <div className={`${embedded ? 'mt-4 pt-3' : 'mt-8 pt-6'} border-t border-white/10`}>
+        <p className="text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-2">સાચવેલા એકમ</p>
+        <div className={`${embedded ? 'max-h-36' : 'max-h-44'} overflow-y-auto rounded-xl border border-white/10 bg-[#1a1a1a] custom-scroll`}>
           {loading ? (
             <div className="flex justify-center py-10">
               <Loader2 className="animate-spin text-amber-400" size={28} />

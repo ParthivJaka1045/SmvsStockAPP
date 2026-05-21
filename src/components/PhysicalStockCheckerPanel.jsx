@@ -27,6 +27,8 @@ export default function PhysicalStockCheckerPanel({
   const [ledgerLoading, setLedgerLoading] = useState(false);
   const [stockTransactions, setStockTransactions] = useState([]);
   const [monthlyClosingStock, setMonthlyClosingStock] = useState([]);
+  /** full_balance = carry forward + IN − OUT; month_only = period IN − OUT only */
+  const [balanceViewMode, setBalanceViewMode] = useState('full_balance');
 
   const loadLedger = useCallback(async () => {
     setLedgerLoading(true);
@@ -58,6 +60,8 @@ export default function PhysicalStockCheckerPanel({
     [catalogItem, globalUnits],
   );
 
+  const includeCarryForward = balanceViewMode === 'full_balance';
+
   const balance = useMemo(() => {
     if (!itemName.trim()) return null;
     return computeItemPhysicalBalance({
@@ -68,8 +72,9 @@ export default function PhysicalStockCheckerPanel({
       monthlyClosingStock,
       catalogItem,
       globalUnit,
+      includeCarryForward,
     });
-  }, [itemName, asOfDate, month, stockTransactions, monthlyClosingStock, catalogItem, globalUnit]);
+  }, [itemName, asOfDate, month, stockTransactions, monthlyClosingStock, catalogItem, globalUnit, includeCarryForward]);
 
   const unitLabel = balance ? resolveCatalogItemUnit(catalogItem || { unit: balance.unit }) : UNIT_KG;
   const isNegative = balance && balance.balanceKg < 0;
@@ -95,6 +100,31 @@ export default function PhysicalStockCheckerPanel({
         >
           {ledgerLoading ? <Loader2 size={14} className="animate-spin" /> : <Search size={14} />}
           Refresh ledger
+        </button>
+      </div>
+
+      <div className="mt-4 flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={() => setBalanceViewMode('full_balance')}
+          className={`rounded-xl px-3 py-2 text-[11px] font-bold uppercase border ${
+            balanceViewMode === 'full_balance'
+              ? 'border-teal-400 bg-teal-500/20 text-teal-100'
+              : 'border-white/10 bg-[#252525] text-gray-400'
+          }`}
+        >
+          પૂર્ણ બેલેન્સ (ભરતી સહિત)
+        </button>
+        <button
+          type="button"
+          onClick={() => setBalanceViewMode('month_only')}
+          className={`rounded-xl px-3 py-2 text-[11px] font-bold uppercase border ${
+            balanceViewMode === 'month_only'
+              ? 'border-amber-400 bg-amber-500/15 text-amber-100'
+              : 'border-white/10 bg-[#252525] text-gray-400'
+          }`}
+        >
+          ફક્ત આ મહિનો (IN − OUT)
         </button>
       </div>
 
@@ -161,11 +191,13 @@ export default function PhysicalStockCheckerPanel({
             Through {asOfDate.split('-').reverse().join('-')} · Month {month}
           </p>
 
-          <div className="mt-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
-            <div className="rounded-xl bg-[#252525] p-3 border border-white/5 text-center">
-              <p className="text-[10px] text-gray-500 font-bold uppercase">Carry forward</p>
-              <p className="font-black text-teal-300 mt-1">{formatMetric(balance.openingKg)} {UNIT_KG}</p>
-            </div>
+          <div className={`mt-4 grid gap-3 ${includeCarryForward ? 'grid-cols-2 lg:grid-cols-4' : 'grid-cols-2 lg:grid-cols-3'}`}>
+            {includeCarryForward && (
+              <div className="rounded-xl bg-[#252525] p-3 border border-white/5 text-center">
+                <p className="text-[10px] text-gray-500 font-bold uppercase">Carry forward</p>
+                <p className="font-black text-teal-300 mt-1">{formatMetric(balance.openingKgCarry ?? balance.openingKg)} {UNIT_KG}</p>
+              </div>
+            )}
             <div className="rounded-xl bg-[#252525] p-3 border border-white/5 text-center">
               <p className="text-[10px] text-gray-500 font-bold uppercase">Month IN</p>
               <p className="font-black text-emerald-400 mt-1">+{formatMetric(balance.periodInKg)} {UNIT_KG}</p>

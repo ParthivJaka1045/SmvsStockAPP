@@ -1,4 +1,4 @@
-import { getFallbackCatalogItems } from './itemCatalog';
+import { getFallbackCatalogItems, normalizeItemName } from './itemCatalog';
 import {
   convertKgToUnitQty,
   convertQtyToKg,
@@ -8,11 +8,43 @@ import {
 
 const isLegacyStockReportTitle = (title) => /SMVS/i.test(title) || /MONTHLY STOCK REPORT/i.test(title);
 
+const getMonthShortName = (monthValue) => {
+  if (!monthValue || !/^\d{4}-\d{2}$/.test(monthValue)) return '';
+  return formatMonthLabel(monthValue).split('_')[0] || '';
+};
+
+const listMonthShortNamesInRange = (fromMonth, toMonth) => {
+  if (!fromMonth || !toMonth || !/^\d{4}-\d{2}$/.test(fromMonth) || !/^\d{4}-\d{2}$/.test(toMonth)) {
+    return [];
+  }
+  const names = [];
+  let [year, month] = fromMonth.split('-').map(Number);
+  const [endYear, endMonth] = toMonth.split('-').map(Number);
+  while (year < endYear || (year === endYear && month <= endMonth)) {
+    names.push(getMonthShortName(`${year}-${padValue(month)}`));
+    month += 1;
+    if (month > 12) {
+      month = 1;
+      year += 1;
+    }
+  }
+  return names;
+};
+
+/** PDF/preview heading only — Java adds the SMVS prefix. */
 export const deriveStockReportTitle = (report) => {
-  if (report?.reportPeriod === 'yearly') return 'Yearly Report';
-  if (report?.stockViewMode === 'month_movements_only') return 'Monthly Report (ચાલુ મહિનો)';
-  if (report?.stockViewMode === 'full_balance') return 'Monthly Report (પૂર્ણ સ્ટોક)';
-  return 'Monthly Report';
+  if (report?.reportPeriod === 'yearly') {
+    const year = (report?.month || '').toString().slice(0, 4);
+    return year && /^\d{4}$/.test(year) ? `${year} Yearly Report` : 'Yearly Report';
+  }
+  const fromMonth = report?.fromMonth || report?.month;
+  const toMonth = report?.toMonth || report?.month;
+  if (fromMonth && toMonth && fromMonth !== toMonth) {
+    const names = listMonthShortNamesInRange(fromMonth, toMonth);
+    if (names.length > 0) return `${names.join(', ')} Report`;
+  }
+  const shortName = getMonthShortName(report?.month);
+  return shortName ? `${shortName} Month Stock Report` : 'Monthly Stock Report';
 };
 
 export const formatYearLabel = (monthValue) => {
@@ -208,7 +240,7 @@ const isDateStrictlyBeforeRangeStart = (value, rangeStartIso) => {
 };
 
 /** મુખ્ય કોઠાર દર આઇટમની શરૂઆતની સ્ટોક રેન્જ પહેલાં: ખરીદી (બધા) + સેન્ડ (બધા કેન્દ્ર) − રિક્વેસ્ટ (બધા કેન્દ્ર). */
-const accumulateGlobalOpeningStockByItem = (orders, sendOrders, purchases, rangeStartIso) => {
+const accumulateGlobalOpeningStockByItem = (orders, sendOrders, purchases, rangeStartIso, catalogItems = [], globalUnits = []) => {
   const byKey = new Map();
   const bumpOpening = (itemName, deltaKg, displayFallback) => {
     const trimmed = (itemName || '').toString().trim();
@@ -254,7 +286,7 @@ const accumulateGlobalOpeningStockByItem = (orders, sendOrders, purchases, range
     .forEach((order) => {
       const items = Array.isArray(order.items) ? order.items : [];
       items.forEach((item) =>
-        bumpOpening(item.name, -getRequestItemValue(item), item.name),
+        bumpOpening(item.name, -getRequestItemValue(item, catalogItems, globalUnits), item.name),
       );
     });
 
@@ -269,13 +301,29 @@ const matchesCenterFilter = (candidateCenter, scope, targetCenter) => {
 /** દુકાન/કોઠાર ખરીદી દરેક સેન્ટર રિપોર્ટમાં આવક તરીકે (ગ્લોબલી ગણવી). */
 const purchaseMatchesReportCenterScope = () => true;
 
+const findCatalogForRequestLine = (catalogItems, itemName) => {
+  if (!Array.isArray(catalogItems) || !itemName) return null;
+  const nk = normalizeText(itemName);
+  return catalogItems.find((c) => normalizeText(c.name) === nk) || null;
+};
+
+const pickGlobalUnitForCatalog = (catalogItem, globalUnits) => {
+  if (!catalogItem?.globalUnitId || !Array.isArray(globalUnits)) return null;
+  return globalUnits.find((u) => u.id === catalogItem.globalUnitId) || null;
+};
+
 const getSendItemValue = (item) => safeNumber(item?.kg);
 
-const getRequestItemValue = (item) =>
-  convertQtyToKg(item?.qty, item?.unit, {
-    unit: item?.unit,
-    unitToKgFactor: item?.unitToKgFactor,
-  });
+const getRequestItemValue = (item, catalogItems = [], globalUnits = []) => {
+  const cat = findCatalogForRequestLine(catalogItems, item?.name);
+  const gu = pickGlobalUnitForCatalog(cat, globalUnits);
+  return convertQtyToKg(
+    item?.qty,
+    item?.unit,
+    cat || { unit: item?.unit, unitToKgFactor: item?.unitToKgFactor },
+    gu,
+  );
+};
 
 const getPurchaseItemValue = (item) => safeNumber(item?.kg);
 
@@ -403,6 +451,7 @@ export const computeItemPhysicalBalance = ({
   globalUnit = null,
   scope = 'all',
   center = '',
+  includeCarryForward = true,
 }) => {
   const trimmedName = (itemName || '').toString().trim();
   const itemKey = normalizeText(trimmedName);
@@ -437,7 +486,8 @@ export const computeItemPhysicalBalance = ({
     monthlyClosingStock,
     rangeStartDate: rangeStart,
   });
-  const openingKg = roundMetric(openingMap.get(itemKey)?.kg ?? 0);
+  const openingKgRaw = roundMetric(openingMap.get(itemKey)?.kg ?? 0);
+  const openingKg = includeCarryForward ? openingKgRaw : 0;
 
   let periodInKg = 0;
   let periodOutKg = 0;
@@ -451,13 +501,16 @@ export const computeItemPhysicalBalance = ({
       }
     });
 
-  const balanceKg = roundMetric(openingKg + periodInKg - periodOutKg);
+  const balanceKg = includeCarryForward
+    ? roundMetric(openingKgRaw + periodInKg - periodOutKg)
+    : roundMetric(periodInKg - periodOutKg);
   const unit = resolveCatalogItemUnit(catalogItem || { unit: UNIT_KG });
   const balanceInUnit = convertKgToUnitQty(balanceKg, unit, catalogItem, globalUnit);
 
   return {
     itemName: openingMap.get(itemKey)?.displayName || trimmedName,
     openingKg,
+    openingKgCarry: openingKgRaw,
     periodInKg,
     periodOutKg,
     balanceKg,
@@ -567,7 +620,7 @@ export const buildSummaryReportFromSnapshots = ({
     centerLabel: normalizedScope === 'center' && normalizedCenter ? normalizedCenter : 'All Centers / Full Report',
     rangeLabel: getRangeLabel(ensureDateInMonth(normalizedMonth, selectedDate), normalizedMonth, reportPeriod),
     reportPeriod: 'monthly',
-    title: deriveStockReportTitle({ reportPeriod: 'monthly', stockViewMode }),
+    title: deriveStockReportTitle({ reportPeriod: 'monthly', month: normalizedMonth }),
     createdBy,
     generatedAt: new Date(),
     generatedAtIso: new Date().toISOString(),
@@ -629,10 +682,17 @@ export const hydrateReport = (report) => {
   const summarySource = report.summary || {};
   const computedSummary = summarizeRows(rows);
 
+  const stockViewMode = report.stockViewMode === 'month_movements_only' ? 'month_movements_only' : 'full_balance';
+
   const rawTitle = (report.title || '').trim();
   const title =
     !rawTitle || isLegacyStockReportTitle(rawTitle)
-      ? deriveStockReportTitle({ reportPeriod })
+      ? deriveStockReportTitle({
+          reportPeriod,
+          month,
+          fromMonth: report.fromMonth,
+          toMonth: report.toMonth,
+        })
       : rawTitle;
 
   const storedRange = report.rangeLabel;
@@ -653,7 +713,7 @@ export const hydrateReport = (report) => {
     center,
     centerLabel,
     rangeLabel,
-    stockViewMode: report.stockViewMode === 'month_movements_only' ? 'month_movements_only' : 'full_balance',
+    stockViewMode,
     generatedAtIso:
       report.generatedAtIso || getIsoString(report.generatedAt) || getIsoString(report.generatedOn) || new Date().toISOString(),
     createdBy: report.createdBy || 'Admin',
@@ -693,6 +753,8 @@ export const buildSummaryReport = ({
   center = '',
   reportPeriod = 'monthly',
   stockViewMode = 'full_balance',
+  catalogItems = [],
+  globalUnits = [],
 }) => {
   const normalizedReportPeriod = reportPeriod === 'yearly' ? 'yearly' : 'monthly';
   const normalizedMonth = getNormalizedMonthValue(month || selectedDate || new Date());
@@ -734,6 +796,8 @@ export const buildSummaryReport = ({
         sendOrders,
         purchases,
         rangeStartDate,
+        catalogItems,
+        globalUnits,
       );
   const isMonthMovementsOnly = stockViewMode === 'month_movements_only';
   if (!isMonthMovementsOnly) {
@@ -770,7 +834,7 @@ export const buildSummaryReport = ({
       .forEach((order) => {
         const items = Array.isArray(order.items) ? order.items : [];
         items.forEach((item) => {
-          addMovement(rowMap, item.name, monthLabel, 'outgoing', getRequestItemValue(item));
+          addMovement(rowMap, item.name, monthLabel, 'outgoing', getRequestItemValue(item, catalogItems, globalUnits));
         });
       });
 
@@ -837,7 +901,9 @@ export const buildSummaryReport = ({
     reportPeriod: normalizedReportPeriod,
     title: deriveStockReportTitle({
       reportPeriod: normalizedReportPeriod,
-      stockViewMode: isMonthMovementsOnly ? 'month_movements_only' : 'full_balance',
+      month: normalizedMonth,
+      fromMonth: normalizedFromMonth,
+      toMonth: normalizedToMonth,
     }),
     createdBy,
     generatedAt: new Date(),

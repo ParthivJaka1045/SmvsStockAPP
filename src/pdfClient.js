@@ -1,3 +1,5 @@
+import { hydrateReport } from './reporting';
+
 const PDF_SERVICE_BASE_URL = (
   typeof import.meta.env.VITE_PDF_SERVICE_BASE_URL === 'string' && import.meta.env.VITE_PDF_SERVICE_BASE_URL.trim()
     ? import.meta.env.VITE_PDF_SERVICE_BASE_URL.trim()
@@ -52,4 +54,7 @@ export const generatePurchasePDFBlob = (purchase) => postPdf('/purchase', purcha
  * Monthly/yearly stock report PDF — Java pdf-service (`POST .../monthly-report`), portrait A4.
  * Optional `VITE_PDF_SERVICE_BASE_URL` overrides the default API root.
  */
-export const generateSummaryReportPDFBlob = (report) => postPdf('/monthly-report', report);
+export const generateSummaryReportPDFBlob = (report) => {
+  const payload = hydrateReport(report);
+  return postPdf('/monthly-report', payload);
+};
